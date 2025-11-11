@@ -524,29 +524,12 @@ class BermudaOptionsFlowHandler(OptionsFlowWithConfigEntry):
         global_attenuation = self.options.get(CONF_ATTENUATION, DEFAULT_ATTENUATION)
         global_max_radius = self.options.get(CONF_MAX_RADIUS, DEFAULT_MAX_RADIUS)
 
-        # Determine which scanners to show settings for
-        # If a device is selected, show only the nearest scanner
-        # Otherwise show all scanners for manual configuration
-        scanners_to_show = []
-        nearest_scanner_name = None
+        # For now, always show all scanners - we'll filter later once we understand the data
+        scanners_to_show = self.coordinator.scanner_list
         selected_device = None
 
         if self._last_device:
             selected_device = self._get_bermuda_device_from_registry(self._last_device)
-            if selected_device is not None and selected_device.area_advert is not None:
-                # area_advert points to the BermudaAdvert for the nearest scanner
-                # Get the scanner address from the advert
-                scanner_address = selected_device.area_advert.scanner_address
-                if scanner_address in self.coordinator.scanner_list:
-                    scanners_to_show = [scanner_address]
-                    # Get the scanner name for display
-                    scanner_device = self.coordinator.devices.get(scanner_address)
-                    if scanner_device:
-                        nearest_scanner_name = scanner_device.name
-
-        # If no device selected or no nearest scanner found, show all scanners
-        if not scanners_to_show:
-            scanners_to_show = self.coordinator.scanner_list
 
         # Build nested dict for scanners to display
         scanner_config_dict = {}
@@ -579,35 +562,30 @@ class BermudaOptionsFlowHandler(OptionsFlowWithConfigEntry):
             f"*Global defaults: attenuation={global_attenuation}, max_radius={global_max_radius}m*\n\n"
         )
 
-        # If a device is selected and we found the nearest scanner, show calibration info
-        if self._last_device and nearest_scanner_name and selected_device:
-            description += "---\n\n## 📍 Calibration Mode\n\n"
-            description += f"**Device:** {selected_device.name}\n\n"
-            description += f"**Nearest Scanner:** {nearest_scanner_name}\n\n"
+        # If a device is selected, dump EVERYTHING about it
+        if self._last_device and selected_device:
+            description += "---\n\n## 📋 DEVICE DEBUG DUMP\n\n"
+            description += f"**name:** {selected_device.name}\n\n"
+            description += f"**address:** {selected_device.address}\n\n"
+            description += f"**area_name:** {selected_device.area_name}\n\n"
+            description += f"**area_distance:** {selected_device.area_distance}\n\n"
+            description += f"**area_rssi:** {selected_device.area_rssi}\n\n"
+            description += f"**area_advert:** {selected_device.area_advert}\n\n"
 
-            if selected_device.area_distance is not None:
-                description += f"**Distance:** {selected_device.area_distance:.2f} meters\n\n"
+            if selected_device.area_advert:
+                description += "**area_advert details:**\n\n"
+                description += f"- scanner_address: {selected_device.area_advert.scanner_address}\n"
+                description += f"- rssi: {selected_device.area_advert.rssi}\n"
+                description += f"- rssi_distance: {selected_device.area_advert.rssi_distance}\n"
+                description += f"- area_id: {selected_device.area_advert.area_id}\n"
+                description += f"- area_name: {selected_device.area_advert.area_name}\n\n"
 
-            # Get RSSI directly from area_advert
-            if selected_device.area_advert is not None and selected_device.area_advert.rssi is not None:
-                description += f"**RSSI:** {selected_device.area_advert.rssi} dBm\n\n"
+            description += f"**adverts (all scanners seeing this device):**\n\n"
+            for key, advert in selected_device.adverts.items():
+                description += f"- Scanner: {advert.scanner_address}\n"
+                description += f"  - distance: {advert.rssi_distance}\n"
+                description += f"  - rssi: {advert.rssi}\n\n"
 
-            description += (
-                "*Adjust the scanner settings below to calibrate distance measurements. "
-                "Click Submit to refresh, or check Save and Close when finished.*\n"
-            )
-        elif self._last_device and selected_device:
-            # Device selected but not detected by any scanner (or area_name is None)
-            # Add debug info to help troubleshoot
-            description += "\n⚠️ **Debug Info:**\n\n"
-            description += f"- Device found: {selected_device.name}\n"
-            description += f"- Area name: {selected_device.area_name if selected_device.area_name else '(None)'}\n"
-            description += f"- Area distance: {selected_device.area_distance if selected_device.area_distance is not None else '(None)'}\n"
-            description += f"- Available scanners: {', '.join([self.coordinator.devices[s].name for s in self.coordinator.scanner_list])}\n\n"
-            description += (
-                "The device may not be detected by any scanner, or there may be a name mismatch. "
-                "Make sure the device is powered on and within range.\n"
-            )
         elif self._last_device:
             # Device ID provided but couldn't find the Bermuda device
             # Show debug info to help troubleshoot
