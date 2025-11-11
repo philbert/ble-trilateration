@@ -527,9 +527,33 @@ class BermudaOptionsFlowHandler(OptionsFlowWithConfigEntry):
         # For now, always show all scanners - we'll filter later once we understand the data
         scanners_to_show = self.coordinator.scanner_list
         selected_device = None
+        debug_info = []
 
         if self._last_device:
-            selected_device = self._get_bermuda_device_from_registry(self._last_device)
+            debug_info.append(f"registry_id: {self._last_device}")
+
+            devreg = dr.async_get(self.hass)
+            ha_device = devreg.async_get(self._last_device)
+            debug_info.append(f"ha_device found: {ha_device is not None}")
+
+            if ha_device:
+                debug_info.append(f"ha_device.name: {ha_device.name}")
+                debug_info.append(f"connections: {ha_device.connections}")
+
+                for conn in ha_device.connections:
+                    debug_info.append(f"  checking connection: {conn}")
+                    if conn[0] in {"private_ble_device", "bluetooth", "ibeacon"}:
+                        address = conn[1]
+                        normalized = mac_norm(address)
+                        debug_info.append(f"  address: {address}, normalized: {normalized}")
+                        debug_info.append(f"  in coordinator.devices? {normalized in self.coordinator.devices}")
+
+                        if normalized in self.coordinator.devices:
+                            selected_device = self.coordinator.devices[normalized]
+                            debug_info.append(f"  GOT DEVICE: {selected_device.name}")
+                            break
+                        else:
+                            debug_info.append(f"  NOT FOUND IN COORDINATOR")
 
         # Build nested dict for scanners to display
         scanner_config_dict = {}
@@ -561,6 +585,12 @@ class BermudaOptionsFlowHandler(OptionsFlowWithConfigEntry):
             "- **max_radius**: Maximum tracking distance in meters for this scanner\n\n"
             f"*Global defaults: attenuation={global_attenuation}, max_radius={global_max_radius}m*\n\n"
         )
+
+        # Debug device lookup
+        if debug_info:
+            description += "---\n\n## 🔍 LOOKUP DEBUG:\n\n"
+            for line in debug_info:
+                description += f"{line}\n\n"
 
         # If a device is selected, dump EVERYTHING about it
         if self._last_device and selected_device:
