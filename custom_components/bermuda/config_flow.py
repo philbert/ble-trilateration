@@ -554,9 +554,7 @@ class BermudaOptionsFlowHandler(OptionsFlowWithConfigEntry):
                 "max_radius": saved_max_radii.get(scanner, global_max_radius),
             }
 
-        # Build schema with refresh button appearing after device selector if device selected
-        from homeassistant.helpers.selector import ButtonSelector
-
+        # Build schema
         data_schema = {
             vol.Optional(
                 CONF_DEVICES,
@@ -564,9 +562,9 @@ class BermudaOptionsFlowHandler(OptionsFlowWithConfigEntry):
             ): DeviceSelector(DeviceSelectorConfig(integration=DOMAIN)),
         }
 
-        # Add refresh button if a device is selected
+        # Add refresh checkbox if a device is selected
         if self._last_device:
-            data_schema[vol.Optional("refresh_calibration", default=False)] = ButtonSelector()
+            data_schema[vol.Optional("refresh_calibration", default=False)] = vol.Coerce(bool)
 
         # Add scanner settings and save button
         data_schema.update({
