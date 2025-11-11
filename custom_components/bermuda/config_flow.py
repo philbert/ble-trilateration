@@ -593,30 +593,41 @@ class BermudaOptionsFlowHandler(OptionsFlowWithConfigEntry):
                 description += f"{line}\n\n"
             description += f"selected_device is None? {selected_device is None}\n\n"
             description += f"selected_device value: {selected_device}\n\n"
+            description += f"selected_device type: {type(selected_device)}\n\n"
+            description += f"bool(selected_device): {bool(selected_device)}\n\n"
+            if selected_device is not None:
+                description += f"hasattr __bool__: {hasattr(selected_device, '__bool__')}\n\n"
 
         # If a device is selected, dump EVERYTHING about it
-        if selected_device:
-            description += "---\n\n## 📋 DEVICE DEBUG DUMP\n\n"
-            description += f"**name:** {selected_device.name}\n\n"
-            description += f"**address:** {selected_device.address}\n\n"
-            description += f"**area_name:** {selected_device.area_name}\n\n"
-            description += f"**area_distance:** {selected_device.area_distance}\n\n"
-            description += f"**area_rssi:** {selected_device.area_rssi}\n\n"
-            description += f"**area_advert:** {selected_device.area_advert}\n\n"
+        if selected_device is not None:
+            try:
+                description += "---\n\n## 📋 DEVICE DEBUG DUMP\n\n"
+                description += f"**name:** {selected_device.name}\n\n"
+                description += f"**address:** {selected_device.address}\n\n"
+                description += f"**area_name:** {selected_device.area_name}\n\n"
+                description += f"**area_distance:** {selected_device.area_distance}\n\n"
+                description += f"**area_rssi:** {selected_device.area_rssi}\n\n"
+                description += f"**area_advert:** {selected_device.area_advert}\n\n"
 
-            if selected_device.area_advert:
-                description += "**area_advert details:**\n\n"
-                description += f"- scanner_address: {selected_device.area_advert.scanner_address}\n"
-                description += f"- rssi: {selected_device.area_advert.rssi}\n"
-                description += f"- rssi_distance: {selected_device.area_advert.rssi_distance}\n"
-                description += f"- area_id: {selected_device.area_advert.area_id}\n"
-                description += f"- area_name: {selected_device.area_advert.area_name}\n\n"
+                if selected_device.area_advert:
+                    description += "**area_advert details:**\n\n"
+                    description += f"- scanner_address: {selected_device.area_advert.scanner_address}\n"
+                    description += f"- rssi: {selected_device.area_advert.rssi}\n"
+                    description += f"- rssi_distance: {selected_device.area_advert.rssi_distance}\n"
+                    description += f"- area_id: {selected_device.area_advert.area_id}\n"
+                    description += f"- area_name: {selected_device.area_advert.area_name}\n\n"
 
-            description += f"**adverts (all scanners seeing this device):**\n\n"
-            for key, advert in selected_device.adverts.items():
-                description += f"- Scanner: {advert.scanner_address}\n"
-                description += f"  - distance: {advert.rssi_distance}\n"
-                description += f"  - rssi: {advert.rssi}\n\n"
+                description += f"**adverts (all scanners seeing this device):**\n\n"
+                for key, advert in selected_device.adverts.items():
+                    description += f"- Scanner: {advert.scanner_address}\n"
+                    description += f"  - distance: {advert.rssi_distance}\n"
+                    description += f"  - rssi: {advert.rssi}\n\n"
+
+                description += "✅ Device dump completed successfully!\n\n"
+            except Exception as e:
+                import traceback
+                description += f"❌ ERROR dumping device: {type(e).__name__}: {e}\n\n"
+                description += f"Traceback:\n```\n{traceback.format_exc()}\n```\n\n"
 
         elif self._last_device:
             # Device ID provided but couldn't find the Bermuda device
