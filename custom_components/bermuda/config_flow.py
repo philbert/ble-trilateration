@@ -554,35 +554,28 @@ class BermudaOptionsFlowHandler(OptionsFlowWithConfigEntry):
                 "max_radius": saved_max_radii.get(scanner, global_max_radius),
             }
 
-        # Build schema
         data_schema = {
             vol.Optional(
                 CONF_DEVICES,
                 default=self._last_device if self._last_device is not None else vol.UNDEFINED,
             ): DeviceSelector(DeviceSelectorConfig(integration=DOMAIN)),
-        }
-
-        # Add refresh checkbox if a device is selected
-        if self._last_device:
-            data_schema[vol.Optional("refresh_calibration", default=False)] = vol.Coerce(bool)
-
-        # Add scanner settings and save button
-        data_schema.update({
             vol.Required(
                 CONF_SCANNER_INFO,
                 default=scanner_config_dict if not self._last_scanner_info else self._last_scanner_info,
             ): ObjectSelector(),
             vol.Optional(CONF_SAVE_AND_CLOSE, default=False): vol.Coerce(bool),
-        })
+        }
 
-        # Build description with helpful information
-        description = (
-            "**Configure per-scanner settings:**\n\n"
-            "- **rssi_offset** (Advanced): Adjust signal strength, typically -10 to +10\n"
-            "- **attenuation**: Environmental factor, 2.0-2.5 for open space, 4.0-5.0 for thick walls/concrete\n"
-            "- **max_radius**: Maximum tracking distance in meters for this scanner\n\n"
-            f"*Global defaults: attenuation={global_attenuation}, max_radius={global_max_radius}m*\n\n"
-        )
+        # Same hack as calibration1_global to work around placeholder issues with <details> tags
+        _ugly_token_hack = {
+            "details": "<details>",
+            "details_end": "</details>",
+            "summary": "<summary>",
+            "summary_end": "</summary>",
+        }
+
+        # Start building the dynamic suffix content (calibration info will be added below)
+        description = ""
 
         # If a device is selected, show calibration info and filter to nearest scanner
         if selected_device is not None:
@@ -617,6 +610,8 @@ class BermudaOptionsFlowHandler(OptionsFlowWithConfigEntry):
                     if rssi and rssi != "unavailable":
                         description += f"**RSSI:** {rssi} dBm\n\n"
 
+                    description += "*💡 Click **Submit** to refresh these readings*\n\n"
+
                     # Filter to show only the nearest scanner's settings
                     if selected_device.area_advert:
                         nearest_scanner_address = selected_device.area_advert.scanner_address
@@ -627,28 +622,10 @@ class BermudaOptionsFlowHandler(OptionsFlowWithConfigEntry):
             except Exception as e:
                 description += f"⚠️ Could not load calibration info: {e}\n\n"
 
-        if not self._last_device:
-            # No device selected - show all scanners for manual configuration
-            description += (
-                "\n💡 **Calibration Workflow:**\n"
-                "1. Place a tracked device near the scanner you want to calibrate\n"
-                "2. Select that device from the dropdown above\n"
-                "3. Click **Submit** - you'll see only that scanner's settings\n"
-                "4. Adjust settings until the distance is accurate\n"
-                "5. Check **Save and Close** when done\n"
-                "6. Repeat for other scanners\n\n"
-                "*Or edit all scanner settings manually below:*\n"
-            )
-
-        description += (
-            "\n\n⚠️ **Note:** Attenuation and max_radius are currently saved but not yet applied to tracking. "
-            "Only rssi_offset is active."
-        )
-
         return self.async_show_form(
             step_id="calibration2_scanners",
             data_schema=vol.Schema(data_schema),
-            description_placeholders={"suffix": description},
+            description_placeholders=_ugly_token_hack | {"suffix": description},
         )
 
     def _get_bermuda_device_from_registry(self, registry_id: str) -> BermudaDevice | None:
