@@ -591,9 +591,11 @@ class BermudaOptionsFlowHandler(OptionsFlowWithConfigEntry):
             description += "---\n\n## 🔍 LOOKUP DEBUG:\n\n"
             for line in debug_info:
                 description += f"{line}\n\n"
+            description += f"selected_device is None? {selected_device is None}\n\n"
+            description += f"selected_device value: {selected_device}\n\n"
 
         # If a device is selected, dump EVERYTHING about it
-        if self._last_device and selected_device:
+        if selected_device:
             description += "---\n\n## 📋 DEVICE DEBUG DUMP\n\n"
             description += f"**name:** {selected_device.name}\n\n"
             description += f"**address:** {selected_device.address}\n\n"
