@@ -560,8 +560,7 @@ class BermudaOptionsFlowHandler(OptionsFlowWithConfigEntry):
         }
 
         # Start building the dynamic suffix content (calibration info will be added below)
-        # DEBUG FIRST - to make sure it's visible
-        description = f"**DEBUG (top):** scanners_to_show has {len(scanners_to_show)} scanners\n\n"
+        description = ""
 
         # If a device is selected, filter to nearest scanner and show calibration info
         if selected_device is not None:
@@ -608,15 +607,6 @@ class BermudaOptionsFlowHandler(OptionsFlowWithConfigEntry):
             except Exception as e:
                 description += f"⚠️ Could not load calibration info: {e}\n\n"
 
-        # DEBUG: Show what scanners we're supposed to display
-        description += f"\n\n**DEBUG INFO:**\n\n"
-        description += f"- scanners_to_show count: {len(scanners_to_show)}\n"
-        description += f"- scanners_to_show addresses: {scanners_to_show}\n"
-        description += f"- selected_device is not None: {selected_device is not None}\n"
-        if selected_device is not None and hasattr(selected_device, 'area_advert') and selected_device.area_advert is not None:
-            description += f"- nearest_scanner_address: {selected_device.area_advert.scanner_address}\n"
-        description += f"- self._last_scanner_info is None: {self._last_scanner_info is None}\n\n"
-
         # Build nested dict for scanners to display (after filtering to nearest scanner if applicable)
         scanner_config_dict = {}
         for scanner in scanners_to_show:
@@ -626,15 +616,6 @@ class BermudaOptionsFlowHandler(OptionsFlowWithConfigEntry):
                 "attenuation": saved_attenuations.get(scanner, global_attenuation),
                 "max_radius": saved_max_radii.get(scanner, global_max_radius),
             }
-
-        # DEBUG: Add a fake scanner to verify we're controlling the right object
-        scanner_config_dict["FAKE_TEST_SCANNER"] = {
-            "rssi_offset": 999,
-            "attenuation": 99.9,
-            "max_radius": 999.9,
-        }
-
-        description += f"- scanner_config_dict keys: {list(scanner_config_dict.keys())}\n\n"
 
         # If we have previous user input, filter it to only include scanners we want to show
         if self._last_scanner_info:
