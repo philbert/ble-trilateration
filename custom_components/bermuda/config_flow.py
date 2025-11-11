@@ -477,61 +477,68 @@ class BermudaOptionsFlowHandler(OptionsFlowWithConfigEntry):
         to calculations. This will be enabled in a future update.
         """
         if user_input is not None:
-            # Check if user wants to save
-            if user_input.get(CONF_SAVE_AND_CLOSE, False):
-                # Save configuration without closing
-                rssi_offset_by_address = {}
-                attenuation_by_address = {}
-                max_radius_by_address = {}
+            # Always save on submit - merge submitted values with existing saved values
+            # Load existing saved values
+            saved_rssi_offsets = self.options.get(CONF_RSSI_OFFSETS, {})
+            saved_attenuations = self.options.get(CONF_SCANNER_ATTENUATION, {})
+            saved_max_radii = self.options.get(CONF_SCANNER_MAX_RADIUS, {})
 
-                # Get global defaults for fallback
-                global_attenuation = self.options.get(CONF_ATTENUATION, DEFAULT_ATTENUATION)
-                global_max_radius = self.options.get(CONF_MAX_RADIUS, DEFAULT_MAX_RADIUS)
+            # Get global defaults for fallback
+            global_attenuation = self.options.get(CONF_ATTENUATION, DEFAULT_ATTENUATION)
+            global_max_radius = self.options.get(CONF_MAX_RADIUS, DEFAULT_MAX_RADIUS)
 
+            # Process the submitted scanner info (may be filtered to just one scanner)
+            for scanner_name, scanner_data in user_input[CONF_SCANNER_INFO].items():
+                # Find the scanner address from the name
+                scanner_address = None
                 for address in self.coordinator.scanner_list:
-                    scanner_name = self.coordinator.devices[address].name
-                    scanner_data = user_input[CONF_SCANNER_INFO].get(scanner_name, {})
+                    if self.coordinator.devices[address].name == scanner_name:
+                        scanner_address = address
+                        break
 
+                if scanner_address:
                     # RSSI Offset - clip to sensible range, fixes #497
                     rssi_val = scanner_data.get("rssi_offset", 0)
-                    rssi_offset_by_address[address] = max(min(rssi_val, 127), -127)
+                    saved_rssi_offsets[scanner_address] = max(min(rssi_val, 127), -127)
 
                     # Attenuation - store if different from global default
                     atten_val = scanner_data.get("attenuation", global_attenuation)
                     if atten_val != global_attenuation:
-                        attenuation_by_address[address] = max(min(float(atten_val), 10.0), 1.0)
+                        saved_attenuations[scanner_address] = max(min(float(atten_val), 10.0), 1.0)
+                    elif scanner_address in saved_attenuations:
+                        # Value matches global default, remove override
+                        del saved_attenuations[scanner_address]
 
                     # Max Radius - store if different from global default
                     radius_val = scanner_data.get("max_radius", global_max_radius)
                     if radius_val != global_max_radius:
-                        max_radius_by_address[address] = max(min(float(radius_val), 100.0), 1.0)
+                        saved_max_radii[scanner_address] = max(min(float(radius_val), 100.0), 1.0)
+                    elif scanner_address in saved_max_radii:
+                        # Value matches global default, remove override
+                        del saved_max_radii[scanner_address]
 
-                self.options.update({
-                    CONF_RSSI_OFFSETS: rssi_offset_by_address,
-                    CONF_SCANNER_ATTENUATION: attenuation_by_address,
-                    CONF_SCANNER_MAX_RADIUS: max_radius_by_address,
-                })
+            # Save the merged values
+            self.options.update({
+                CONF_RSSI_OFFSETS: saved_rssi_offsets,
+                CONF_SCANNER_ATTENUATION: saved_attenuations,
+                CONF_SCANNER_MAX_RADIUS: saved_max_radii,
+            })
 
-                # Save without closing - update the config entry
-                self.hass.config_entries.async_update_entry(self.config_entry, options=self.options)
+            # Save without closing - update the config entry
+            self.hass.config_entries.async_update_entry(self.config_entry, options=self.options)
 
-                # Continue showing the form (don't return, fall through to else block)
-                # But clear the scanner info so user sees fresh values after save
+            # Update state and refresh display
+            new_device = user_input.get(CONF_DEVICES)
+
+            # If a device is selected, always clear scanner info so we rebuild based on
+            # the CURRENT nearest scanner (which may have changed)
+            if new_device:
                 self._last_scanner_info = None
-                self._last_device = user_input.get(CONF_DEVICES)
             else:
-                # User changed something or clicked refresh - update display with current values
-                new_device = user_input.get(CONF_DEVICES)
+                # No device selected - keep user's edits to all scanners
+                self._last_scanner_info = user_input[CONF_SCANNER_INFO]
 
-                # If a device is selected, always clear scanner info so we rebuild based on
-                # the CURRENT nearest scanner (which may have changed)
-                if new_device:
-                    self._last_scanner_info = None
-                else:
-                    # No device selected - keep user's edits to all scanners
-                    self._last_scanner_info = user_input[CONF_SCANNER_INFO]
-
-                self._last_device = new_device
+            self._last_device = new_device
 
         # Load saved values and global defaults
         saved_rssi_offsets = self.options.get(CONF_RSSI_OFFSETS, {})
@@ -647,7 +654,6 @@ class BermudaOptionsFlowHandler(OptionsFlowWithConfigEntry):
                 CONF_SCANNER_INFO,
                 default=default_scanner_info,
             ): ObjectSelector(),
-            vol.Optional(CONF_SAVE_AND_CLOSE, default=False): vol.Coerce(bool),
         }
 
         return self.async_show_form(
