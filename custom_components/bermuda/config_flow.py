@@ -527,33 +527,21 @@ class BermudaOptionsFlowHandler(OptionsFlowWithConfigEntry):
         # Will be set to nearest scanner if device selected, otherwise all scanners
         scanners_to_show = self.coordinator.scanner_list
         selected_device = None
-        debug_info = []
 
+        # Look up the Bermuda device from the selected HA device
         if self._last_device:
-            debug_info.append(f"registry_id: {self._last_device}")
-
             devreg = dr.async_get(self.hass)
             ha_device = devreg.async_get(self._last_device)
-            debug_info.append(f"ha_device found: {ha_device is not None}")
 
             if ha_device:
-                debug_info.append(f"ha_device.name: {ha_device.name}")
-                debug_info.append(f"connections: {ha_device.connections}")
-
                 for conn in ha_device.connections:
-                    debug_info.append(f"  checking connection: {conn}")
                     if conn[0] in {"private_ble_device", "bluetooth", "ibeacon"}:
                         address = conn[1]
                         normalized = mac_norm(address)
-                        debug_info.append(f"  address: {address}, normalized: {normalized}")
-                        debug_info.append(f"  in coordinator.devices? {normalized in self.coordinator.devices}")
 
                         if normalized in self.coordinator.devices:
                             selected_device = self.coordinator.devices[normalized]
-                            debug_info.append(f"  GOT DEVICE: {selected_device.name}")
                             break
-                        else:
-                            debug_info.append(f"  NOT FOUND IN COORDINATOR")
 
         # Build nested dict for scanners to display
         scanner_config_dict = {}
@@ -586,101 +574,50 @@ class BermudaOptionsFlowHandler(OptionsFlowWithConfigEntry):
             f"*Global defaults: attenuation={global_attenuation}, max_radius={global_max_radius}m*\n\n"
         )
 
-        # Debug device lookup
-        if debug_info:
-            description += "---\n\n## 🔍 LOOKUP DEBUG:\n\n"
-            for line in debug_info:
-                description += f"{line}\n\n"
-            description += f"selected_device is None? {selected_device is None}\n\n"
-            description += f"selected_device value: {selected_device}\n\n"
-            description += f"selected_device type: {type(selected_device)}\n\n"
-            description += f"bool(selected_device): {bool(selected_device)}\n\n"
-            if selected_device is not None:
-                description += f"hasattr __bool__: {hasattr(selected_device, '__bool__')}\n\n"
-
-        # If a device is selected, get entity states from Bermuda integration
+        # If a device is selected, show calibration info and filter to nearest scanner
         if selected_device is not None:
             try:
                 from homeassistant.helpers import entity_registry as er
 
-                description += "---\n\n## 📍 BERMUDA SENSOR DATA\n\n"
-
-                # Get entity registry
+                # Get entity registry to read Bermuda sensor states
                 entity_reg = er.async_get(self.hass)
-
-                # Find all Bermuda entities for this HA device
                 entities = er.async_entries_for_device(entity_reg, self._last_device, include_disabled_entities=True)
-
                 bermuda_entities = [e for e in entities if e.platform == DOMAIN]
 
-                description += f"Found {len(bermuda_entities)} Bermuda entities:\n\n"
+                # Find the sensor values we need
+                nearest_scanner_name = None
+                distance = None
+                rssi = None
 
                 for entity in bermuda_entities:
                     state = self.hass.states.get(entity.entity_id)
-                    state_value = state.state if state else "unavailable"
-                    description += f"- **{entity.original_name or entity.name}**: {state_value}\n\n"
+                    if state:
+                        if entity.original_name == "Nearest Scanner":
+                            nearest_scanner_name = state.state
+                        elif entity.original_name == "Distance":
+                            distance = state.state
+                        elif entity.original_name == "Nearest RSSI":
+                            rssi = state.state
 
-                # Also dump the raw device data
-                description += "\n## RAW DEVICE DATA:\n\n"
-                description += f"- area_name: {selected_device.area_name}\n\n"
-                description += f"- area_distance: {selected_device.area_distance}\n\n"
-                description += f"- area_rssi: {selected_device.area_rssi}\n\n"
-                description += f"- area_advert: {selected_device.area_advert}\n\n"
+                if nearest_scanner_name and nearest_scanner_name != "unavailable":
+                    description += "---\n\n## 📍 Calibration Info\n\n"
+                    description += f"**Nearest Scanner:** {nearest_scanner_name}\n\n"
+                    if distance and distance != "unavailable":
+                        description += f"**Distance:** {distance}m\n\n"
+                    if rssi and rssi != "unavailable":
+                        description += f"**RSSI:** {rssi} dBm\n\n"
 
-                if selected_device.area_advert:
-                    description += f"- area_advert.scanner_address: {selected_device.area_advert.scanner_address}\n\n"
-                    scanner_name = self.coordinator.devices[selected_device.area_advert.scanner_address].name
-                    description += f"- Nearest scanner name: {scanner_name}\n\n"
+                    # Filter to show only the nearest scanner's settings
+                    if selected_device.area_advert:
+                        nearest_scanner_address = selected_device.area_advert.scanner_address
+                        scanners_to_show = [nearest_scanner_address]
+                else:
+                    description += "---\n\n⚠️ Device not currently detected by any scanner\n\n"
 
             except Exception as e:
-                import traceback
-                description += f"❌ ERROR: {type(e).__name__}: {e}\n\n"
-                description += f"Traceback:\n```\n{traceback.format_exc()}\n```\n\n"
+                description += f"⚠️ Could not load calibration info: {e}\n\n"
 
-        elif self._last_device:
-            # Device ID provided but couldn't find the Bermuda device
-            # Show debug info to help troubleshoot
-            devreg = dr.async_get(self.hass)
-            ha_device = devreg.async_get(self._last_device)
-
-            description += "\n⚠️ **Device Lookup Failed - Debug Info:**\n\n"
-
-            if ha_device:
-                description += f"- HA Device: {ha_device.name}\n"
-                description += f"- Connections: {list(ha_device.connections)}\n"
-
-                # Try to find what address we extracted
-                device_address = None
-                for connection in ha_device.connections:
-                    if connection[0] in {DOMAIN_PRIVATE_BLE_DEVICE, dr.CONNECTION_BLUETOOTH, "ibeacon"}:
-                        device_address = connection[1]
-                        break
-
-                if device_address:
-                    normalized = mac_norm(device_address)
-                    description += f"- Extracted address: `{device_address}`\n"
-                    description += f"- Normalized: `{normalized}`\n"
-                    description += f"- In coordinator.devices? {normalized in self.coordinator.devices}\n"
-
-                    if normalized in self.coordinator.devices:
-                        bermuda_dev = self.coordinator.devices[normalized]
-                        description += f"- create_sensor flag: {bermuda_dev.create_sensor}\n"
-                        description += f"- Is scanner: {bermuda_dev._is_scanner}\n"
-
-                    description += "\n"
-                    # Show some coordinator device keys for comparison
-                    sample_keys = list(self.coordinator.devices.keys())[:5]
-                    description += f"- Sample coordinator keys: {sample_keys}\n"
-                else:
-                    description += "- Could not extract bluetooth address from connections\n"
-            else:
-                description += "- HA device not found in registry\n"
-
-            description += (
-                "\n*This device may not be configured in 'Select Devices' or may be using "
-                "a different address format (iBeacon UUID, IRK, etc.)*\n"
-            )
-        else:
+        if not self._last_device:
             # No device selected - show all scanners for manual configuration
             description += (
                 "\n💡 **Calibration Workflow:**\n"
