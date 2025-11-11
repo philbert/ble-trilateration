@@ -50,7 +50,7 @@ from .const import (
     DOMAIN_PRIVATE_BLE_DEVICE,
     NAME,
 )
-from .util import mac_redact, rssi_to_metres
+from .util import mac_norm, mac_redact, rssi_to_metres
 
 if TYPE_CHECKING:
     from homeassistant.components.bluetooth import BluetoothServiceInfoBleak
@@ -625,7 +625,6 @@ class BermudaOptionsFlowHandler(OptionsFlowWithConfigEntry):
                 description += f"- Connections: {list(ha_device.connections)}\n"
 
                 # Try to find what address we extracted
-                from .util import mac_norm
                 device_address = None
                 for connection in ha_device.connections:
                     if connection[0] in {DOMAIN_PRIVATE_BLE_DEVICE, dr.CONNECTION_BLUETOOTH, "ibeacon"}:
@@ -686,28 +685,33 @@ class BermudaOptionsFlowHandler(OptionsFlowWithConfigEntry):
 
         Returns None if the id can not be resolved to a tracked device.
         """
-        from .util import mac_norm
-
         devreg = dr.async_get(self.hass)
         device = devreg.async_get(registry_id)
+        if device is None:
+            return None
+
         device_address = None
-        if device is not None:
-            for connection in device.connections:
-                if connection[0] in {
-                    DOMAIN_PRIVATE_BLE_DEVICE,
-                    dr.CONNECTION_BLUETOOTH,
-                    "ibeacon",
-                }:
-                    device_address = connection[1]
-                    break
-            if device_address is not None:
-                # Normalize the address format to match coordinator.devices keys
-                normalized_address = mac_norm(device_address)
-                if normalized_address in self.coordinator.devices:
-                    return self.coordinator.devices[normalized_address]
-                # Try lowercase as fallback
-                if device_address.lower() in self.coordinator.devices:
-                    return self.coordinator.devices[device_address.lower()]
+        for connection in device.connections:
+            if connection[0] in {
+                DOMAIN_PRIVATE_BLE_DEVICE,
+                dr.CONNECTION_BLUETOOTH,
+                "ibeacon",
+            }:
+                device_address = connection[1]
+                break
+
+        if device_address is None:
+            return None
+
+        # Normalize the address format to match coordinator.devices keys
+        normalized_address = mac_norm(device_address)
+        if normalized_address in self.coordinator.devices:
+            return self.coordinator.devices[normalized_address]
+
+        # Try lowercase as fallback
+        if device_address.lower() in self.coordinator.devices:
+            return self.coordinator.devices[device_address.lower()]
+
         # We couldn't match the HA device id to a bermuda device mac.
         return None
 
