@@ -521,14 +521,16 @@ class BermudaOptionsFlowHandler(OptionsFlowWithConfigEntry):
                 self._last_device = user_input.get(CONF_DEVICES)
             else:
                 # User changed something or clicked refresh - update display with current values
-                # Check if device selection changed - if so, clear scanner info to force refresh
                 new_device = user_input.get(CONF_DEVICES)
-                if new_device != self._last_device:
-                    # Device changed - clear scanner info so we rebuild from saved values
+
+                # If a device is selected, always clear scanner info so we rebuild based on
+                # the CURRENT nearest scanner (which may have changed)
+                if new_device:
                     self._last_scanner_info = None
                 else:
-                    # Same device - keep the user's edits
+                    # No device selected - keep user's edits to all scanners
                     self._last_scanner_info = user_input[CONF_SCANNER_INFO]
+
                 self._last_device = new_device
 
         # Load saved values and global defaults
