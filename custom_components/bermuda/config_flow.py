@@ -617,6 +617,13 @@ class BermudaOptionsFlowHandler(OptionsFlowWithConfigEntry):
                 "max_radius": saved_max_radii.get(scanner, global_max_radius),
             }
 
+        # DEBUG: Add a fake scanner to verify we're controlling the right object
+        scanner_config_dict["FAKE_TEST_SCANNER"] = {
+            "rssi_offset": 999,
+            "attenuation": 99.9,
+            "max_radius": 999.9,
+        }
+
         # If we have previous user input, filter it to only include scanners we want to show
         if self._last_scanner_info:
             scanner_names_to_show = set(scanner_config_dict.keys())
