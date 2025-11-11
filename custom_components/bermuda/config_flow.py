@@ -524,7 +524,7 @@ class BermudaOptionsFlowHandler(OptionsFlowWithConfigEntry):
         global_attenuation = self.options.get(CONF_ATTENUATION, DEFAULT_ATTENUATION)
         global_max_radius = self.options.get(CONF_MAX_RADIUS, DEFAULT_MAX_RADIUS)
 
-        # For now, always show all scanners - we'll filter later once we understand the data
+        # Will be set to nearest scanner if device selected, otherwise all scanners
         scanners_to_show = self.coordinator.scanner_list
         selected_device = None
         debug_info = []
@@ -598,35 +598,27 @@ class BermudaOptionsFlowHandler(OptionsFlowWithConfigEntry):
             if selected_device is not None:
                 description += f"hasattr __bool__: {hasattr(selected_device, '__bool__')}\n\n"
 
-        # If a device is selected, dump EVERYTHING about it
+        # If a device is selected, show nearest scanner info
         if selected_device is not None:
             try:
-                description += "---\n\n## 📋 DEVICE DEBUG DUMP\n\n"
-                description += f"**name:** {selected_device.name}\n\n"
-                description += f"**address:** {selected_device.address}\n\n"
-                description += f"**area_name:** {selected_device.area_name}\n\n"
-                description += f"**area_distance:** {selected_device.area_distance}\n\n"
-                description += f"**area_rssi:** {selected_device.area_rssi}\n\n"
-                description += f"**area_advert:** {selected_device.area_advert}\n\n"
+                description += "---\n\n## 📍 Calibration Info\n\n"
 
                 if selected_device.area_advert:
-                    description += "**area_advert details:**\n\n"
-                    description += f"- scanner_address: {selected_device.area_advert.scanner_address}\n"
-                    description += f"- rssi: {selected_device.area_advert.rssi}\n"
-                    description += f"- rssi_distance: {selected_device.area_advert.rssi_distance}\n"
-                    description += f"- area_id: {selected_device.area_advert.area_id}\n"
-                    description += f"- area_name: {selected_device.area_advert.area_name}\n\n"
+                    nearest_scanner_address = selected_device.area_advert.scanner_address
+                    nearest_scanner_name = self.coordinator.devices[nearest_scanner_address].name
 
-                description += f"**adverts (all scanners seeing this device):**\n\n"
-                for key, advert in selected_device.adverts.items():
-                    description += f"- Scanner: {advert.scanner_address}\n"
-                    description += f"  - distance: {advert.rssi_distance}\n"
-                    description += f"  - rssi: {advert.rssi}\n\n"
+                    description += f"**Nearest Scanner:** {nearest_scanner_name}\n\n"
+                    description += f"**Distance:** {selected_device.area_distance:.2f}m\n\n"
+                    description += f"**RSSI:** {selected_device.area_rssi} dBm\n\n"
 
-                description += "✅ Device dump completed successfully!\n\n"
+                    # Only show settings for this nearest scanner
+                    scanners_to_show = [nearest_scanner_address]
+                else:
+                    description += "⚠️ Device not currently detected by any scanner\n\n"
+
             except Exception as e:
                 import traceback
-                description += f"❌ ERROR dumping device: {type(e).__name__}: {e}\n\n"
+                description += f"❌ ERROR: {type(e).__name__}: {e}\n\n"
                 description += f"Traceback:\n```\n{traceback.format_exc()}\n```\n\n"
 
         elif self._last_device:
