@@ -72,13 +72,14 @@
       },
       "calibration2_scanners": {
         "title": "Calibration 2: Per-Scanner Configuration",
-        "description": "Configure individual settings for each scanner. Select a device to calibrate one scanner at a time.\n\n{details}\n{summary}\nExpand for instructions!{summary_end}\n\n**Configure per-scanner settings:**\n\n- **rssi_offset** (Advanced): Adjust signal strength, typically -10 to +10\n- **attenuation**: Environmental factor, 2.0-2.5 for open space, 4.0-5.0 for thick walls/concrete\n- **max_radius**: Maximum tracking distance in meters for this scanner\n\n**💡 Calibration Workflow:**\n\n1. Place a tracked device near the scanner you want to calibrate\n2. Select that device from the dropdown above\n3. Click **Submit** - you'll see only that scanner's settings\n4. Adjust settings until the distance is accurate\n5. Check **Save and Close** when done\n6. Repeat for other scanners\n\n*Or edit all scanner settings manually below*\n\n⚠️ **Note:** Attenuation and max_radius are currently saved but not yet applied to tracking. Only rssi_offset is active.\n{details_end}\n\n{suffix}",
+        "description": "Configure individual settings for each scanner. Select a device to calibrate one scanner at a time.\n\n{details}\n{summary}\nExpand for instructions!{summary_end}\n\n**Configure per-scanner settings:**\n\n- **rssi_offset** (Advanced): Adjust signal strength, typically -10 to +10\n- **attenuation**: Environmental factor, 2.0-2.5 for open space, 4.0-5.0 for thick walls/concrete\n- **max_radius**: Maximum tracking distance in meters for this scanner\n\n**💡 Calibration Workflow:**\n\n1. Place a tracked device near the scanner you want to calibrate\n2. Select that device from the dropdown above\n3. Click **Submit** - you'll see only that scanner's settings\n4. Adjust settings until the distance is accurate\n5. Check **Save configuration** and click **Submit** to save\n6. Repeat for other scanners\n\n*Or edit all scanner settings manually below*\n\n⚠️ **Note:** Attenuation and max_radius are currently saved but not yet applied to tracking. Only rssi_offset is active.\n{details_end}\n\n{suffix}",
         "data": {
           "configured_devices": "Device",
-          "save_and_close": "Save and Close",
+          "save_and_close": "Save configuration",
           "scanner_info": "Per-Scanner RSSI Offsets"
         },
         "data_description": {
+          "save_and_close": "Check this box and click Submit to save your changes. You can continue calibrating other scanners after saving.",
           "scanner_info": "Leave at zero to accept the global default, or enter a non-zero number to offset the rssi reported by that scanner. Adjust until the estimated distance above matches the actual distance between that scanner and the selected transmitting device. Negative values will increase the distance, positive values will decrease it."
         }
       }

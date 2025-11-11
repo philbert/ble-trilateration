@@ -477,9 +477,9 @@ class BermudaOptionsFlowHandler(OptionsFlowWithConfigEntry):
         to calculations. This will be enabled in a future update.
         """
         if user_input is not None:
-            # Check what button was clicked
+            # Check if user wants to save
             if user_input.get(CONF_SAVE_AND_CLOSE, False):
-                # Save and close
+                # Save configuration without closing
                 rssi_offset_by_address = {}
                 attenuation_by_address = {}
                 max_radius_by_address = {}
@@ -512,7 +512,13 @@ class BermudaOptionsFlowHandler(OptionsFlowWithConfigEntry):
                     CONF_SCANNER_MAX_RADIUS: max_radius_by_address,
                 })
 
-                return await self._update_options()
+                # Save without closing - update the config entry
+                self.hass.config_entries.async_update_entry(self.config_entry, options=self.options)
+
+                # Continue showing the form (don't return, fall through to else block)
+                # But clear the scanner info so user sees fresh values after save
+                self._last_scanner_info = None
+                self._last_device = user_input.get(CONF_DEVICES)
             else:
                 # User changed something or clicked refresh - update display with current values
                 # Check if device selection changed - if so, clear scanner info to force refresh
