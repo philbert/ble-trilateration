@@ -610,6 +610,19 @@ class BermudaOptionsFlowHandler(OptionsFlowWithConfigEntry):
                 "max_radius": saved_max_radii.get(scanner, global_max_radius),
             }
 
+        # If we have previous user input, filter it to only include scanners we want to show
+        if self._last_scanner_info:
+            scanner_names_to_show = set(scanner_config_dict.keys())
+            filtered_scanner_info = {
+                name: values
+                for name, values in self._last_scanner_info.items()
+                if name in scanner_names_to_show
+            }
+            # Use filtered user input if it has any scanners, otherwise use the default dict
+            default_scanner_info = filtered_scanner_info if filtered_scanner_info else scanner_config_dict
+        else:
+            default_scanner_info = scanner_config_dict
+
         data_schema = {
             vol.Optional(
                 CONF_DEVICES,
@@ -617,7 +630,7 @@ class BermudaOptionsFlowHandler(OptionsFlowWithConfigEntry):
             ): DeviceSelector(DeviceSelectorConfig(integration=DOMAIN)),
             vol.Required(
                 CONF_SCANNER_INFO,
-                default=scanner_config_dict if not self._last_scanner_info else self._last_scanner_info,
+                default=default_scanner_info,
             ): ObjectSelector(),
             vol.Optional(CONF_SAVE_AND_CLOSE, default=False): vol.Coerce(bool),
         }
