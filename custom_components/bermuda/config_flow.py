@@ -688,38 +688,26 @@ class BermudaOptionsFlowHandler(OptionsFlowWithConfigEntry):
         """
         from .util import mac_norm
 
-        try:
-            devreg = dr.async_get(self.hass)
-            device = devreg.async_get(registry_id)
-            device_address = None
-            if device is not None:
-                for connection in device.connections:
-                    if connection[0] in {
-                        DOMAIN_PRIVATE_BLE_DEVICE,
-                        dr.CONNECTION_BLUETOOTH,
-                        "ibeacon",
-                    }:
-                        device_address = connection[1]
-                        break
-                if device_address is not None:
-                    # Normalize the address format to match coordinator.devices keys
-                    normalized_address = mac_norm(device_address)
-                    if normalized_address in self.coordinator.devices:
-                        bermuda_device = self.coordinator.devices[normalized_address]
-                        # Make sure it's actually a BermudaDevice for a tracked device, not a scanner
-                        if bermuda_device.create_sensor:
-                            return bermuda_device
-                    # Try lowercase as fallback
-                    if device_address.lower() in self.coordinator.devices:
-                        bermuda_device = self.coordinator.devices[device_address.lower()]
-                        if bermuda_device.create_sensor:
-                            return bermuda_device
-        except Exception as e:
-            # Log the error but don't crash
-            import logging
-            _LOGGER = logging.getLogger(__name__)
-            _LOGGER.error("Error getting bermuda device from registry: %s", e)
-
+        devreg = dr.async_get(self.hass)
+        device = devreg.async_get(registry_id)
+        device_address = None
+        if device is not None:
+            for connection in device.connections:
+                if connection[0] in {
+                    DOMAIN_PRIVATE_BLE_DEVICE,
+                    dr.CONNECTION_BLUETOOTH,
+                    "ibeacon",
+                }:
+                    device_address = connection[1]
+                    break
+            if device_address is not None:
+                # Normalize the address format to match coordinator.devices keys
+                normalized_address = mac_norm(device_address)
+                if normalized_address in self.coordinator.devices:
+                    return self.coordinator.devices[normalized_address]
+                # Try lowercase as fallback
+                if device_address.lower() in self.coordinator.devices:
+                    return self.coordinator.devices[device_address.lower()]
         # We couldn't match the HA device id to a bermuda device mac.
         return None
 
