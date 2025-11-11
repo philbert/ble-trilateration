@@ -598,21 +598,39 @@ class BermudaOptionsFlowHandler(OptionsFlowWithConfigEntry):
             if selected_device is not None:
                 description += f"hasattr __bool__: {hasattr(selected_device, '__bool__')}\n\n"
 
-        # If a device is selected, dump ALL its properties
+        # If a device is selected, get entity states from Bermuda integration
         if selected_device is not None:
             try:
-                description += "---\n\n## 📍 RAW DEVICE DUMP\n\n"
+                from homeassistant.helpers import entity_registry as er
 
-                # Dump every attribute we can find
-                description += f"dir(selected_device): {[x for x in dir(selected_device) if not x.startswith('_')]}\n\n"
+                description += "---\n\n## 📍 BERMUDA SENSOR DATA\n\n"
 
-                # Try to access each property
-                for attr in ['name', 'address', 'area_name', 'area_distance', 'area_rssi', 'area_advert', 'adverts']:
-                    try:
-                        value = getattr(selected_device, attr, "ATTRIBUTE NOT FOUND")
-                        description += f"**{attr}:** {value}\n\n"
-                    except Exception as e:
-                        description += f"**{attr}:** ERROR - {e}\n\n"
+                # Get entity registry
+                entity_reg = er.async_get(self.hass)
+
+                # Find all Bermuda entities for this HA device
+                entities = er.async_entries_for_device(entity_reg, self._last_device, include_disabled_entities=True)
+
+                bermuda_entities = [e for e in entities if e.platform == DOMAIN]
+
+                description += f"Found {len(bermuda_entities)} Bermuda entities:\n\n"
+
+                for entity in bermuda_entities:
+                    state = self.hass.states.get(entity.entity_id)
+                    state_value = state.state if state else "unavailable"
+                    description += f"- **{entity.original_name or entity.name}**: {state_value}\n\n"
+
+                # Also dump the raw device data
+                description += "\n## RAW DEVICE DATA:\n\n"
+                description += f"- area_name: {selected_device.area_name}\n\n"
+                description += f"- area_distance: {selected_device.area_distance}\n\n"
+                description += f"- area_rssi: {selected_device.area_rssi}\n\n"
+                description += f"- area_advert: {selected_device.area_advert}\n\n"
+
+                if selected_device.area_advert:
+                    description += f"- area_advert.scanner_address: {selected_device.area_advert.scanner_address}\n\n"
+                    scanner_name = self.coordinator.devices[selected_device.area_advert.scanner_address].name
+                    description += f"- Nearest scanner name: {scanner_name}\n\n"
 
             except Exception as e:
                 import traceback
