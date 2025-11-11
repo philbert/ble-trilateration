@@ -599,7 +599,7 @@ class BermudaOptionsFlowHandler(OptionsFlowWithConfigEntry):
                     description += "*💡 Click **Submit** to refresh these readings*\n\n"
 
                     # Filter to show only the nearest scanner's settings
-                    if selected_device.area_advert:
+                    if selected_device.area_advert is not None:
                         nearest_scanner_address = selected_device.area_advert.scanner_address
                         scanners_to_show = [nearest_scanner_address]
                 else:
@@ -613,7 +613,7 @@ class BermudaOptionsFlowHandler(OptionsFlowWithConfigEntry):
         description += f"- scanners_to_show count: {len(scanners_to_show)}\n"
         description += f"- scanners_to_show addresses: {scanners_to_show}\n"
         description += f"- selected_device is not None: {selected_device is not None}\n"
-        if selected_device is not None and hasattr(selected_device, 'area_advert') and selected_device.area_advert:
+        if selected_device is not None and hasattr(selected_device, 'area_advert') and selected_device.area_advert is not None:
             description += f"- nearest_scanner_address: {selected_device.area_advert.scanner_address}\n"
         description += f"- self._last_scanner_info is None: {self._last_scanner_info is None}\n\n"
 
