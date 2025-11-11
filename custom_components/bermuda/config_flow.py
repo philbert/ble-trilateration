@@ -560,7 +560,8 @@ class BermudaOptionsFlowHandler(OptionsFlowWithConfigEntry):
         }
 
         # Start building the dynamic suffix content (calibration info will be added below)
-        description = ""
+        # DEBUG FIRST - to make sure it's visible
+        description = f"**DEBUG (top):** scanners_to_show has {len(scanners_to_show)} scanners\n\n"
 
         # If a device is selected, filter to nearest scanner and show calibration info
         if selected_device is not None:
