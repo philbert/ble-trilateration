@@ -32,7 +32,9 @@ from .const import (
     CONF_REF_POWER,
     CONF_RSSI_OFFSETS,
     CONF_SAVE_AND_CLOSE,
+    CONF_SCANNER_ATTENUATION,
     CONF_SCANNER_INFO,
+    CONF_SCANNER_MAX_RADIUS,
     CONF_SCANNERS,
     CONF_SMOOTHING_SAMPLES,
     CONF_UPDATE_INTERVAL,
@@ -48,7 +50,7 @@ from .const import (
     DOMAIN_PRIVATE_BLE_DEVICE,
     NAME,
 )
-from .util import mac_redact, rssi_to_metres
+from .util import mac_norm, mac_redact, rssi_to_metres
 
 if TYPE_CHECKING:
     from homeassistant.components.bluetooth import BluetoothServiceInfoBleak
@@ -188,8 +190,8 @@ class BermudaOptionsFlowHandler(OptionsFlowWithConfigEntry):
             menu_options={
                 "globalopts": "Global Options",
                 "selectdevices": "Select Devices",
-                "calibration1_global": "Calibration 1: Global",
-                "calibration2_scanners": "Calibration 2: Scanner RSSI Offsets",
+                "calibration1_global": "Calibration 1: Global Settings",
+                "calibration2_scanners": "Calibration 2: Per-Scanner Configuration",
             },
             description_placeholders=messages,
         )
@@ -462,122 +464,254 @@ class BermudaOptionsFlowHandler(OptionsFlowWithConfigEntry):
 
     async def async_step_calibration2_scanners(self, user_input=None):
         """
-        Per-scanner calibration of rssi_offset.
+        Per-scanner configuration.
 
-        Prompts the user to select a configured device, then adjust the offset
-        so that the estimated distance to each proxy is correct (typically by
-        placing device at 1m from each proxy in turn).
+        Configure individual settings for each BLE scanner/proxy:
+        - RSSI Offset: Fine-tune signal strength readings (advanced)
+        - Attenuation: Environmental absorption factor (lower=open space, higher=thick walls)
+        - Max Radius: Maximum tracking distance for this scanner (in meters)
 
-        Distances are recalculated and displayed each time the user presses
-        Submit, and they check "Save and Close" to save the config.
+        Select a device to see real-time distance estimates for calibration.
+
+        NOTE: Attenuation and Max Radius settings are currently UI-only and not yet applied
+        to calculations. This will be enabled in a future update.
         """
         if user_input is not None:
-            if user_input[CONF_SAVE_AND_CLOSE]:
-                # Convert the name-based dict to use MAC addresses
-                rssi_offset_by_address = {}
+            # Always save on submit - merge submitted values with existing saved values
+            # Load existing saved values
+            saved_rssi_offsets = self.options.get(CONF_RSSI_OFFSETS, {})
+            saved_attenuations = self.options.get(CONF_SCANNER_ATTENUATION, {})
+            saved_max_radii = self.options.get(CONF_SCANNER_MAX_RADIUS, {})
+
+            # Get global defaults for fallback
+            global_attenuation = self.options.get(CONF_ATTENUATION, DEFAULT_ATTENUATION)
+            global_max_radius = self.options.get(CONF_MAX_RADIUS, DEFAULT_MAX_RADIUS)
+
+            # Process the submitted scanner info (may be filtered to just one scanner)
+            for scanner_name, scanner_data in user_input[CONF_SCANNER_INFO].items():
+                # Find the scanner address from the name
+                scanner_address = None
                 for address in self.coordinator.scanner_list:
-                    scanner_name = self.coordinator.devices[address].name
-                    val = user_input[CONF_SCANNER_INFO][scanner_name]
-                    # Clip to keep in sensible range, fixes #497
-                    rssi_offset_by_address[address] = max(min(val, 127), -127)
+                    if self.coordinator.devices[address].name == scanner_name:
+                        scanner_address = address
+                        break
 
-                self.options.update({CONF_RSSI_OFFSETS: rssi_offset_by_address})
-                # Per previous step, returning elsewhere in the flow after updating the entry doesn't
-                # seem to work, so we'll just save and close the flow.
-                # # Let's update the options - but we don't want to call create entry as that will close the flow.
-                # self.hass.config_entries.async_update_entry(self.config_entry, options=self.options)
-                # # Reset last device so that the next step doesn't think it exists.
-                # self._last_device = None
-                # self._last_scanner_info = None
-                # return await self.async_step_init()
+                if scanner_address:
+                    # RSSI Offset - clip to sensible range, fixes #497
+                    rssi_val = scanner_data.get("rssi_offset", 0)
+                    saved_rssi_offsets[scanner_address] = max(min(rssi_val, 127), -127)
 
-                # Save the config entry and close the flow.
-                return await self._update_options()
+                    # Attenuation - store if different from global default
+                    atten_val = scanner_data.get("attenuation", global_attenuation)
+                    if atten_val != global_attenuation:
+                        saved_attenuations[scanner_address] = max(min(float(atten_val), 10.0), 1.0)
+                    elif scanner_address in saved_attenuations:
+                        # Value matches global default, remove override
+                        del saved_attenuations[scanner_address]
 
-            # It's a refresh, basically...
-            self._last_scanner_info = user_input[CONF_SCANNER_INFO]
-            self._last_device = user_input[CONF_DEVICES]
+                    # Max Radius - store if different from global default
+                    radius_val = scanner_data.get("max_radius", global_max_radius)
+                    if radius_val != global_max_radius:
+                        saved_max_radii[scanner_address] = max(min(float(radius_val), 100.0), 1.0)
+                    elif scanner_address in saved_max_radii:
+                        # Value matches global default, remove override
+                        del saved_max_radii[scanner_address]
 
+            # Save the merged values
+            self.options.update({
+                CONF_RSSI_OFFSETS: saved_rssi_offsets,
+                CONF_SCANNER_ATTENUATION: saved_attenuations,
+                CONF_SCANNER_MAX_RADIUS: saved_max_radii,
+            })
+
+            # Save without closing - update the config entry
+            self.hass.config_entries.async_update_entry(self.config_entry, options=self.options)
+
+            # Update state and refresh display
+            new_device = user_input.get(CONF_DEVICES)
+
+            # If a device is selected, always clear scanner info so we rebuild based on
+            # the CURRENT nearest scanner (which may have changed)
+            if new_device:
+                self._last_scanner_info = None
+            else:
+                # No device selected - keep user's edits to all scanners
+                self._last_scanner_info = user_input[CONF_SCANNER_INFO]
+
+            self._last_device = new_device
+
+        # Load saved values and global defaults
         saved_rssi_offsets = self.options.get(CONF_RSSI_OFFSETS, {})
-        rssi_offset_dict = {}
+        saved_attenuations = self.options.get(CONF_SCANNER_ATTENUATION, {})
+        saved_max_radii = self.options.get(CONF_SCANNER_MAX_RADIUS, {})
+        global_attenuation = self.options.get(CONF_ATTENUATION, DEFAULT_ATTENUATION)
+        global_max_radius = self.options.get(CONF_MAX_RADIUS, DEFAULT_MAX_RADIUS)
 
-        for scanner in self.coordinator.scanner_list:
+        # Will be set to nearest scanner if device selected, otherwise all scanners
+        scanners_to_show = self.coordinator.scanner_list
+        selected_device = None
+
+        # Look up the Bermuda device from the selected HA device
+        if self._last_device:
+            devreg = dr.async_get(self.hass)
+            ha_device = devreg.async_get(self._last_device)
+
+            if ha_device:
+                for conn in ha_device.connections:
+                    if conn[0] in {"private_ble_device", "bluetooth", "ibeacon"}:
+                        address = conn[1]
+                        normalized = mac_norm(address)
+
+                        if normalized in self.coordinator.devices:
+                            selected_device = self.coordinator.devices[normalized]
+                            break
+
+        # Same hack as calibration1_global to work around placeholder issues with <details> tags
+        _ugly_token_hack = {
+            "details": "<details>",
+            "details_end": "</details>",
+            "summary": "<summary>",
+            "summary_end": "</summary>",
+        }
+
+        # Start building the dynamic suffix content (calibration info will be added below)
+        description = ""
+
+        # If a device is selected, filter to nearest scanner and show calibration info
+        if selected_device is not None:
+            try:
+                from homeassistant.helpers import entity_registry as er
+
+                # Get entity registry to read Bermuda sensor states
+                entity_reg = er.async_get(self.hass)
+                entities = er.async_entries_for_device(entity_reg, self._last_device, include_disabled_entities=True)
+                bermuda_entities = [e for e in entities if e.platform == DOMAIN]
+
+                # Find the sensor values we need
+                nearest_scanner_name = None
+                distance = None
+                rssi = None
+
+                for entity in bermuda_entities:
+                    state = self.hass.states.get(entity.entity_id)
+                    if state:
+                        if entity.original_name == "Nearest Scanner":
+                            nearest_scanner_name = state.state
+                        elif entity.original_name == "Distance":
+                            distance = state.state
+                        elif entity.original_name == "Nearest RSSI":
+                            rssi = state.state
+
+                if nearest_scanner_name and nearest_scanner_name != "unavailable":
+                    description += "---\n\n## 📍 Calibration Info\n\n"
+                    description += f"**Nearest Scanner:** {nearest_scanner_name}\n\n"
+                    if distance and distance != "unavailable":
+                        description += f"**Distance:** {distance}m\n\n"
+                    if rssi and rssi != "unavailable":
+                        description += f"**RSSI:** {rssi} dBm\n\n"
+
+                    description += "*💡 Click **Submit** to refresh these readings*\n\n"
+
+                    # Filter to show only the nearest scanner's settings
+                    if selected_device.area_advert is not None:
+                        nearest_scanner_address = selected_device.area_advert.scanner_address
+                        scanners_to_show = [nearest_scanner_address]
+                else:
+                    description += "---\n\n⚠️ Device not currently detected by any scanner\n\n"
+
+            except Exception as e:
+                description += f"⚠️ Could not load calibration info: {e}\n\n"
+
+        # Build nested dict for scanners to display (after filtering to nearest scanner if applicable)
+        scanner_config_dict = {}
+        for scanner in scanners_to_show:
             scanner_name = self.coordinator.devices[scanner].name
-            rssi_offset_dict[scanner_name] = saved_rssi_offsets.get(scanner, 0)
+            scanner_config_dict[scanner_name] = {
+                "rssi_offset": saved_rssi_offsets.get(scanner, 0),
+                "attenuation": saved_attenuations.get(scanner, global_attenuation),
+                "max_radius": saved_max_radii.get(scanner, global_max_radius),
+            }
+
+        # If we have previous user input, filter it to only include scanners we want to show
+        if self._last_scanner_info:
+            scanner_names_to_show = set(scanner_config_dict.keys())
+            filtered_scanner_info = {
+                name: values
+                for name, values in self._last_scanner_info.items()
+                if name in scanner_names_to_show
+            }
+            # Use filtered user input if it has any scanners, otherwise use the default dict
+            default_scanner_info = filtered_scanner_info if filtered_scanner_info else scanner_config_dict
+        else:
+            default_scanner_info = scanner_config_dict
+
         data_schema = {
-            vol.Required(
+            vol.Optional(
                 CONF_DEVICES,
                 default=self._last_device if self._last_device is not None else vol.UNDEFINED,
             ): DeviceSelector(DeviceSelectorConfig(integration=DOMAIN)),
             vol.Required(
                 CONF_SCANNER_INFO,
-                default=rssi_offset_dict if not self._last_scanner_info else self._last_scanner_info,
+                default=default_scanner_info,
             ): ObjectSelector(),
-            vol.Optional(CONF_SAVE_AND_CLOSE, default=False): vol.Coerce(bool),
         }
-        if user_input is None:
-            return self.async_show_form(
-                step_id="calibration2_scanners",
-                data_schema=vol.Schema(data_schema),
-                description_placeholders={"suffix": "After you click Submit, the new distances will be shown here."},
-            )
-        if isinstance(self._last_device, str):
-            device = self._get_bermuda_device_from_registry(self._last_device)
-        results_str = ""
-        if device is not None and isinstance(self._last_scanner_info, dict):
-            results = {}
-            # Gather new estimates for distances using rssi hist and the new offset.
-            for scanner in self.coordinator.scanner_list:
-                scanner_name = self.coordinator.devices[scanner].name
-                cur_offset = self._last_scanner_info.get(scanner_name, 0)
-                if (scanneradvert := device.get_scanner(scanner)) is not None:
-                    results[scanner_name] = [
-                        rssi_to_metres(
-                            historical_rssi + cur_offset,
-                            self.options.get(CONF_REF_POWER, DEFAULT_REF_POWER),
-                            self.options.get(CONF_ATTENUATION, DEFAULT_ATTENUATION),
-                        )
-                        for historical_rssi in scanneradvert.hist_rssi
-                    ]
-            # Format the results for display (HA has full markdown support!)
-            results_str = "| Scanner | 0 | 1 | 2 | 3 | 4 |\n|---|---:|---:|---:|---:|---:|"
-            for scanner_name, distances in results.items():
-                results_str += f"\n|{scanner_name}|"
-                for i in range(5):
-                    # We round to 2 places (1cm) and pad to fit nn.nn
-                    try:
-                        results_str += f" `{distances[i]:>6.2f}`|"
-                    except IndexError:
-                        results_str += "`-`|"
-            results_str += "\n\n"
 
         return self.async_show_form(
             step_id="calibration2_scanners",
             data_schema=vol.Schema(data_schema),
-            description_placeholders={"suffix": results_str},
+            description_placeholders=_ugly_token_hack | {"suffix": description},
         )
 
     def _get_bermuda_device_from_registry(self, registry_id: str) -> BermudaDevice | None:
         """
-        Given a device registry device id, return the associated MAC address.
+        Given a device registry device id, return the associated BermudaDevice.
 
-        Returns None if the id can not be resolved to a mac.
+        Returns None if the id can not be resolved to a tracked device.
         """
+        from .const import _LOGGER
+
         devreg = dr.async_get(self.hass)
         device = devreg.async_get(registry_id)
+        if device is None:
+            _LOGGER.debug("_get_bermuda_device: HA device not found for registry_id %s", registry_id)
+            return None
+
         device_address = None
-        if device is not None:
-            for connection in device.connections:
-                if connection[0] in {
-                    DOMAIN_PRIVATE_BLE_DEVICE,
-                    dr.CONNECTION_BLUETOOTH,
-                    "ibeacon",
-                }:
-                    device_address = connection[1]
-                    break
-            if device_address is not None:
-                return self.coordinator.devices[device_address.lower()]
+        for connection in device.connections:
+            if connection[0] in {
+                DOMAIN_PRIVATE_BLE_DEVICE,
+                dr.CONNECTION_BLUETOOTH,
+                "ibeacon",
+            }:
+                device_address = connection[1]
+                break
+
+        if device_address is None:
+            _LOGGER.debug("_get_bermuda_device: No bluetooth connection found for %s", device.name)
+            return None
+
+        # Normalize the address format to match coordinator.devices keys
+        normalized_address = mac_norm(device_address)
+        _LOGGER.debug(
+            "_get_bermuda_device: Looking for address=%s, normalized=%s, in_devices=%s",
+            device_address,
+            normalized_address,
+            normalized_address in self.coordinator.devices,
+        )
+
+        if normalized_address in self.coordinator.devices:
+            result = self.coordinator.devices[normalized_address]
+            _LOGGER.debug("_get_bermuda_device: Found! Returning device %s", result.name)
+            return result
+
+        # Try lowercase as fallback
+        if device_address.lower() in self.coordinator.devices:
+            result = self.coordinator.devices[device_address.lower()]
+            _LOGGER.debug("_get_bermuda_device: Found via lowercase! Returning device %s", result.name)
+            return result
+
         # We couldn't match the HA device id to a bermuda device mac.
+        _LOGGER.warning("_get_bermuda_device: Address %s not found in coordinator.devices", normalized_address)
         return None
 
     async def _update_options(self):

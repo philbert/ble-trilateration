@@ -182,6 +182,20 @@ CONF_SAVE_AND_CLOSE = "save_and_close"
 CONF_SCANNER_INFO = "scanner_info"
 CONF_RSSI_OFFSETS = "rssi_offsets"
 
+# Per-scanner advanced settings (ESPresense-style)
+# NOTE: These are stored but not yet applied to calculations - UI only for now
+CONF_SCANNER_ATTENUATION = "scanner_attenuation"
+DOCS[CONF_SCANNER_ATTENUATION] = (
+    "Per-scanner attenuation factor for environmental effects. "
+    "Lower values (2.0-2.5) for open spaces, higher values (4.0-5.0) for thick walls/concrete."
+)
+
+CONF_SCANNER_MAX_RADIUS = "scanner_max_radius"
+DOCS[CONF_SCANNER_MAX_RADIUS] = (
+    "Per-scanner maximum tracking distance in meters. "
+    "Devices further than this distance from a scanner will be ignored by that scanner."
+)
+
 CONF_UPDATE_INTERVAL, DEFAULT_UPDATE_INTERVAL = "update_interval", 10
 DOCS[CONF_UPDATE_INTERVAL] = (
     "Maximum time between sensor updates in seconds. Smaller intervals",
