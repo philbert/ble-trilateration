@@ -590,71 +590,60 @@ class BermudaOptionsFlowHandler(OptionsFlowWithConfigEntry):
         if selected_device is not None:
             _LOGGER.debug("bermuda_scanner_filtering: Device selected for calibration: %s (address: %s)", selected_device.name, selected_device.address)
             try:
-                # Try to find the nearest scanner - prefer area_advert if set,
-                # otherwise manually find the closest one from adverts
-                nearest_advert = None
+                from homeassistant.helpers import entity_registry as er
 
-                if selected_device.area_advert is not None:
-                    # Use the already-determined nearest scanner
-                    nearest_advert = selected_device.area_advert
-                    _LOGGER.debug("bermuda_scanner_filtering: Using area_advert for calibration info: %s", nearest_advert.scanner_address)
-                else:
-                    # Manually find the closest scanner by looking through adverts
-                    _LOGGER.debug("bermuda_scanner_filtering: area_advert is None, searching through %d adverts", len(selected_device.adverts))
-                    closest_distance = float('inf')
-                    for advert in selected_device.adverts.values():
-                        if advert.rssi_distance is not None and advert.rssi_distance < closest_distance:
-                            closest_distance = advert.rssi_distance
-                            nearest_advert = advert
-                    if nearest_advert:
-                        _LOGGER.debug("bermuda_scanner_filtering: Found nearest scanner via manual search: %s at %.1fm",
-                                      nearest_advert.scanner_address, closest_distance)
+                # Get entity registry to read Bermuda sensor states (live/updating values)
+                entity_reg = er.async_get(self.hass)
+                entities = er.async_entries_for_device(entity_reg, self._last_device, include_disabled_entities=True)
+                bermuda_entities = [e for e in entities if e.platform == DOMAIN]
 
-                if nearest_advert is not None:
-                    nearest_scanner_address = nearest_advert.scanner_address
-                    _LOGGER.debug("bermuda_scanner_filtering: Looking up scanner '%s' in coordinator.devices", nearest_scanner_address)
-                    _LOGGER.debug("bermuda_scanner_filtering: coordinator.devices keys sample: %s", list(self.coordinator.devices.keys())[:5])
-                    _LOGGER.debug("bermuda_scanner_filtering: coordinator.scanner_list sample: %s", list(self.coordinator.scanner_list)[:5])
-                    nearest_scanner_device = self.coordinator.devices.get(nearest_scanner_address)
-                    _LOGGER.debug("bermuda_scanner_filtering: nearest_scanner_address=%s, device_found=%s, device_type=%s",
-                                  nearest_scanner_address,
-                                  "Yes" if nearest_scanner_device is not None else "No",
-                                  type(nearest_scanner_device).__name__ if nearest_scanner_device is not None else "None")
+                # Find the sensor values we need from entity states
+                nearest_scanner_name = None
+                distance = None
+                rssi = None
 
-                    # If not found, check if there's a case/format mismatch
-                    if nearest_scanner_device is None:
-                        matching_keys = [k for k in self.coordinator.devices.keys() if k.lower() == nearest_scanner_address.lower()]
-                        if matching_keys:
-                            _LOGGER.warning("bermuda_scanner_filtering: Scanner address mismatch! Looking for '%s' but found '%s'",
-                                          nearest_scanner_address, matching_keys[0])
-                        else:
-                            _LOGGER.warning("bermuda_scanner_filtering: Scanner '%s' not in coordinator.devices at all (total devices: %d)",
-                                          nearest_scanner_address, len(self.coordinator.devices))
+                for entity in bermuda_entities:
+                    state = self.hass.states.get(entity.entity_id)
+                    if state:
+                        if entity.original_name == "Nearest Scanner":
+                            nearest_scanner_name = state.state
+                        elif entity.original_name == "Distance":
+                            distance = state.state
+                        elif entity.original_name == "Nearest RSSI":
+                            rssi = state.state
 
-                    if nearest_scanner_device is not None:
-                        _LOGGER.debug("bermuda_scanner_filtering: Building calibration info for %s", nearest_scanner_device.name)
-                        description += "---\n\n## 📍 Calibration Info\n\n"
-                        description += f"**Nearest Scanner:** {nearest_scanner_device.name}\n\n"
+                _LOGGER.debug("bermuda_scanner_filtering: Entity states - scanner=%s, distance=%s, rssi=%s",
+                              nearest_scanner_name, distance, rssi)
 
-                        # Get distance and RSSI directly from the advert
-                        distance = nearest_advert.rssi_distance
-                        rssi = nearest_advert.rssi
-                        _LOGGER.debug("bermuda_scanner_filtering: distance=%s, rssi=%s", distance, rssi)
+                if nearest_scanner_name and nearest_scanner_name != "unavailable":
+                    # Build calibration info display from entity states
+                    description += "---\n\n## 📍 Calibration Info\n\n"
+                    description += f"**Nearest Scanner:** {nearest_scanner_name}\n\n"
+                    if distance and distance != "unavailable":
+                        description += f"**Distance:** {distance}m\n\n"
+                    if rssi and rssi != "unavailable":
+                        description += f"**RSSI:** {rssi} dBm\n\n"
 
-                        if distance is not None:
-                            description += f"**Distance:** {distance:.1f}m\n\n"
-                        if rssi is not None:
-                            description += f"**RSSI:** {rssi:.0f} dBm\n\n"
+                    description += "*💡 Click **Submit** to refresh these readings*\n\n"
 
-                        description += "*💡 Click **Submit** to refresh these readings*\n\n"
+                    # Find the scanner address for this scanner name for filtering
+                    nearest_scanner_address = None
+                    for address in self.coordinator.scanner_list:
+                        scanner_device = self.coordinator.devices.get(address)
+                        if scanner_device is not None and scanner_device.name == nearest_scanner_name:
+                            nearest_scanner_address = address
+                            break
 
+                    if nearest_scanner_address:
+                        _LOGGER.debug("bermuda_scanner_filtering: Found scanner address %s for name %s",
+                                      nearest_scanner_address, nearest_scanner_name)
                         # Filter to show only the nearest scanner's settings
                         scanners_to_show = [nearest_scanner_address]
-                        _LOGGER.debug("bermuda_scanner_filtering: Filtered scanners_to_show to: %s", scanners_to_show)
                     else:
-                        _LOGGER.debug("bermuda_scanner_filtering: nearest_scanner_device is None, cannot build calibration info")
+                        _LOGGER.warning("bermuda_scanner_filtering: Could not find scanner address for name '%s'",
+                                       nearest_scanner_name)
                 else:
-                    _LOGGER.debug("bermuda_scanner_filtering: No nearest advert found for device %s", selected_device.name)
+                    _LOGGER.debug("bermuda_scanner_filtering: No nearest scanner from entity states")
                     description += "---\n\n⚠️ Device not currently detected by any scanner\n\n"
 
             except Exception as e:
