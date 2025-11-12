@@ -324,12 +324,17 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         self._scanners.remove(scanner_device)
         async_dispatcher_send(self.hass, SIGNAL_SCANNERS_CHANGED)
 
-    def reload_advert_configs(self):
+    def reload_advert_configs(self, scanner_addresses: set[str] | None = None):
         """
-        Reload configuration on all existing BermudaAdvert objects.
+        Reload configuration on existing BermudaAdvert objects.
 
         Called after config changes to reflect new settings immediately
         without waiting for full integration reload.
+
+        Args:
+            scanner_addresses: Optional set of scanner addresses to reload.
+                             If None, reloads all adverts (less efficient).
+                             If provided, only reloads adverts for those scanners.
 
         Returns True if reload was performed, False if skipped due to
         concurrent reload already in progress.
@@ -340,9 +345,22 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
 
         self.config_reload_in_progress = True
         try:
+            reload_count = 0
             for device in self.devices.values():
                 for advert in device.adverts.values():
-                    advert.reload_config()
+                    # Only reload if no filter specified, or this scanner is in the filter
+                    if scanner_addresses is None or advert.scanner_address in scanner_addresses:
+                        advert.reload_config()
+                        reload_count += 1
+
+            if scanner_addresses:
+                _LOGGER.debug(
+                    "Reloaded config for %d adverts across %d scanner(s)",
+                    reload_count,
+                    len(scanner_addresses),
+                )
+            else:
+                _LOGGER.debug("Reloaded config for all %d adverts", reload_count)
             return True
         finally:
             self.config_reload_in_progress = False

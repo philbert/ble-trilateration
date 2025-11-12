@@ -484,6 +484,9 @@ class BermudaOptionsFlowHandler(OptionsFlowWithConfigEntry):
             global_attenuation = self.options.get(CONF_ATTENUATION, DEFAULT_ATTENUATION)
             global_max_radius = self.options.get(CONF_MAX_RADIUS, DEFAULT_MAX_RADIUS)
 
+            # Track which scanners had their config modified for targeted reload
+            modified_scanners = set()
+
             # Process the submitted scanner info (may be filtered to just one scanner)
             for scanner_name, scanner_data in user_input[CONF_SCANNER_INFO].items():
                 # Find the scanner address from the name
@@ -494,6 +497,9 @@ class BermudaOptionsFlowHandler(OptionsFlowWithConfigEntry):
                         break
 
                 if scanner_address:
+                    # Track that this scanner was in the submitted form
+                    modified_scanners.add(scanner_address)
+
                     # RSSI Offset - clip to sensible range, fixes #497
                     rssi_val = scanner_data.get("rssi_offset", 0)
                     saved_rssi_offsets[scanner_address] = max(min(rssi_val, 127), -127)
@@ -525,8 +531,9 @@ class BermudaOptionsFlowHandler(OptionsFlowWithConfigEntry):
             self.hass.config_entries.async_update_entry(self.config_entry, options=self.options)
 
             # Update coordinator's options and reload advert configs for immediate effect
+            # Only reload adverts for the scanners that were actually modified (more efficient)
             self.coordinator.options.update(self.options)
-            self.coordinator.reload_advert_configs()
+            self.coordinator.reload_advert_configs(scanner_addresses=modified_scanners)
 
             # Update state and refresh display
             new_device = user_input.get(CONF_DEVICES)
