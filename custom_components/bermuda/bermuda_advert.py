@@ -330,8 +330,33 @@ class BermudaAdvert(dict):
         else:
             ref_power = self.ref_power
 
+        # Debug logging for Phil's iPhone distance calculation
+        if "Phil's iPhone" in self._device.name:
+            adjusted_rssi = self.rssi + self.conf_rssi_offset
+            _LOGGER.debug(
+                "bermuda_distance_calc: Device=%s, Scanner=%s, "
+                "raw_rssi=%s, rssi_offset=%s, adjusted_rssi=%s, "
+                "ref_power=%s, attenuation=%s",
+                self._device.name,
+                self.scanner_device.name,
+                self.rssi,
+                self.conf_rssi_offset,
+                adjusted_rssi,
+                ref_power,
+                self.conf_attenuation,
+            )
+
         distance = rssi_to_metres(self.rssi + self.conf_rssi_offset, ref_power, self.conf_attenuation)
         self.rssi_distance_raw = distance
+
+        # Log the calculated distance for Phil's iPhone
+        if "Phil's iPhone" in self._device.name:
+            _LOGGER.debug(
+                "bermuda_distance_calc: Calculated distance=%.2fm for %s from %s",
+                distance,
+                self._device.name,
+                self.scanner_device.name,
+            )
         if reading_is_new:
             # Add a new historical reading
             self.hist_distance.insert(0, distance)
