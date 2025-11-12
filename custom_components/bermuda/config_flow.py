@@ -628,13 +628,18 @@ class BermudaOptionsFlowHandler(OptionsFlowWithConfigEntry):
                 if nearest_scanner_name and nearest_scanner_name != "unavailable":
                     # Build calibration info display from entity states
                     description += "---\n\n## 📍 Calibration Info\n\n"
-                    description += f"**Nearest Scanner:** {nearest_scanner_name}\n\n"
-                    if distance and distance != "unavailable":
-                        description += f"**Distance:** {distance}m\n\n"
-                    if rssi and rssi != "unavailable":
-                        description += f"**RSSI:** {rssi} dBm\n\n"
+                    description += f"**Nearest Scanner:** {nearest_scanner_name}\n"
 
-                    description += "*💡 Click **Submit** to refresh these readings*\n\n"
+                    # Get area from the selected device
+                    if selected_device.area_name:
+                        description += f"**Area:** {selected_device.area_name}\n"
+
+                    if distance and distance != "unavailable":
+                        description += f"**Distance:** {distance}m\n"
+                    if rssi and rssi != "unavailable":
+                        description += f"**RSSI:** {rssi} dBm\n"
+
+                    description += "\n*💡 Click **Submit** to refresh these readings*\n\n"
 
                     # Find the scanner address for this scanner name for filtering
                     nearest_scanner_address = None
