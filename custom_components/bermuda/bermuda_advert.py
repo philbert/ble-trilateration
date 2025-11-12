@@ -330,8 +330,8 @@ class BermudaAdvert(dict):
         else:
             ref_power = self.ref_power
 
-        # Debug logging for distance calculation - only for Phil's iPhone
-        if "Phil's iPhone" in self._device.name:
+        # Debug logging for distance calculation - only for devices with create_sensor=True
+        if self._device.create_sensor and self.scanner_device.name == "Living room light switch 2":
             adjusted_rssi = self.rssi + self.conf_rssi_offset
             _LOGGER.debug(
                 "bermuda_distance_calc: Device=%s, Scanner=%s, "
@@ -349,8 +349,8 @@ class BermudaAdvert(dict):
         distance = rssi_to_metres(self.rssi + self.conf_rssi_offset, ref_power, self.conf_attenuation)
         self.rssi_distance_raw = distance
 
-        # Log the calculated distance for Phil's iPhone
-        if "Phil's iPhone" in self._device.name:
+        # Log the calculated distance for tracked devices from Living room light switch 2
+        if self._device.create_sensor and self.scanner_device.name == "Living room light switch 2":
             _LOGGER.debug(
                 "bermuda_distance_calc: Calculated distance=%.2fm for %s from %s",
                 distance,
