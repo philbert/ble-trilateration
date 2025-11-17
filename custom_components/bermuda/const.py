@@ -227,9 +227,6 @@ def setup_bermuda_logging():
     # Mark as configured to avoid duplicate setup
     package_logger._bermuda_logging_configured = True
 
-    # Don't propagate to parent to avoid duplicate messages
-    # package_logger.propagate = False  # Commented out - let HA handle it
-
     # Create a formatter that includes filename and line number
     formatter = logging.Formatter(
         '%(levelname)s (%(threadName)s) [%(filename)s:%(lineno)d] %(message)s'
@@ -238,13 +235,14 @@ def setup_bermuda_logging():
     # Find Home Assistant's handlers by looking at the root logger
     root_logger = logging.getLogger()
 
-    # Copy and modify HA's handlers for our logger
+    # Apply our custom formatter to existing handlers instead of creating new ones
     for handler in root_logger.handlers:
-        # Create a new handler of the same type with our custom formatter
-        new_handler = type(handler)(handler.stream if hasattr(handler, 'stream') else None)
-        new_handler.setFormatter(formatter)
-        new_handler.setLevel(handler.level)
-        package_logger.addHandler(new_handler)
+        # Create a simple StreamHandler that writes to the same stream
+        if hasattr(handler, 'stream'):
+            new_handler = logging.StreamHandler(handler.stream)
+            new_handler.setFormatter(formatter)
+            new_handler.setLevel(handler.level)
+            package_logger.addHandler(new_handler)
 
     # Set propagate to False to avoid duplicate logs
     package_logger.propagate = False
