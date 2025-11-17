@@ -13,6 +13,7 @@ for them, so we can use them to contribute towards measurements.
 from __future__ import annotations
 
 import binascii
+import logging
 import re
 from typing import TYPE_CHECKING, Final
 
@@ -30,9 +31,10 @@ from homeassistant.helpers import area_registry as ar
 from homeassistant.helpers import floor_registry as fr
 from homeassistant.util import slugify
 
+_LOGGER = logging.getLogger(__name__)
+
 from .bermuda_advert import BermudaAdvert
 from .const import (
-    _LOGGER,
     _LOGGER_SPAM_LESS,
     ADDR_TYPE_IBEACON,
     ADDR_TYPE_PRIVATE_BLE_DEVICE,

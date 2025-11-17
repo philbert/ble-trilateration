@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING, Any
 
 from homeassistant.components.sensor import RestoreSensor, SensorEntity
@@ -15,8 +16,9 @@ from homeassistant.const import (
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 
+_LOGGER = logging.getLogger(__name__)
+
 from .const import (
-    _LOGGER,
     ADDR_TYPE_IBEACON,
     ADDR_TYPE_PRIVATE_BLE_DEVICE,
     SIGNAL_DEVICE_NEW,

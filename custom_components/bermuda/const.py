@@ -215,6 +215,41 @@ _LOGGER: logging.Logger = logging.getLogger(__package__)
 _LOGGER_SPAM_LESS = BermudaLogSpamLess(_LOGGER, LOGSPAM_INTERVAL)
 
 
+def setup_bermuda_logging():
+    """Configure Bermuda logging to include file names and line numbers."""
+    # Get the root logger for the Bermuda package
+    package_logger = logging.getLogger(__package__)
+
+    # Check if we've already set up our custom logging
+    if hasattr(package_logger, '_bermuda_logging_configured'):
+        return
+
+    # Mark as configured to avoid duplicate setup
+    package_logger._bermuda_logging_configured = True
+
+    # Don't propagate to parent to avoid duplicate messages
+    # package_logger.propagate = False  # Commented out - let HA handle it
+
+    # Create a formatter that includes filename and line number
+    formatter = logging.Formatter(
+        '%(levelname)s (%(threadName)s) [%(filename)s:%(lineno)d] %(message)s'
+    )
+
+    # Find Home Assistant's handlers by looking at the root logger
+    root_logger = logging.getLogger()
+
+    # Copy and modify HA's handlers for our logger
+    for handler in root_logger.handlers:
+        # Create a new handler of the same type with our custom formatter
+        new_handler = type(handler)(handler.stream if hasattr(handler, 'stream') else None)
+        new_handler.setFormatter(formatter)
+        new_handler.setLevel(handler.level)
+        package_logger.addHandler(new_handler)
+
+    # Set propagate to False to avoid duplicate logs
+    package_logger.propagate = False
+
+
 STARTUP_MESSAGE = f"""
 -------------------------------------------------------------------
 {NAME}

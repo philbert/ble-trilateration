@@ -7,6 +7,7 @@ https://github.com/agittins/bermuda
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -15,9 +16,14 @@ from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.entity_registry import async_migrate_entries
 
-from .const import _LOGGER, DOMAIN, PLATFORMS, STARTUP_MESSAGE
+_LOGGER = logging.getLogger(__name__)
+
+from .const import DOMAIN, PLATFORMS, STARTUP_MESSAGE, setup_bermuda_logging
 from .coordinator import BermudaDataUpdateCoordinator
 from .util import mac_math_offset, mac_norm
+
+# Configure logging to show file names and line numbers
+setup_bermuda_logging()
 
 if TYPE_CHECKING:
     from homeassistant.config_entries import ConfigEntry
