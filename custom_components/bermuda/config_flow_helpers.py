@@ -13,7 +13,7 @@ from .const import (
 )
 from .util import mac_norm
 
-_LOGGER = get_logger(__name__)
+_LOGGER = get_logger(__package__)
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant

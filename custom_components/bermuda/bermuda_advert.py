@@ -36,7 +36,7 @@ from .const import (
 # from .const import _LOGGER_SPAM_LESS
 from .util import clean_charbuf, rssi_to_metres
 
-_LOGGER = get_logger(__name__)
+_LOGGER = get_logger(__package__)
 
 if TYPE_CHECKING:
     from bleak.backends.scanner import AdvertisementData

@@ -12,7 +12,7 @@ import aiofiles
 
 from .const import get_logger
 
-_LOGGER = get_logger(__name__)
+_LOGGER = get_logger(__package__)
 import voluptuous as vol
 import yaml
 from bluetooth_data_tools import monotonic_time_coarse

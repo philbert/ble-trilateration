@@ -54,7 +54,7 @@ from .const import (
 )
 from .util import mac_math_offset, mac_norm
 
-_LOGGER = get_logger(__name__)
+_LOGGER = get_logger(__package__)
 
 if TYPE_CHECKING:
     from bleak.backends.scanner import AdvertisementData

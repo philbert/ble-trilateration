@@ -17,7 +17,7 @@ from homeassistant.helpers.dispatcher import async_dispatcher_connect
 
 from .const import get_logger
 
-_LOGGER = get_logger(__name__)
+_LOGGER = get_logger(__package__)
 
 from .const import (
     ADDR_TYPE_IBEACON,

@@ -14,7 +14,7 @@ from homeassistant.const import MAJOR_VERSION, MINOR_VERSION
 
 from .const import DOMAIN, PRUNE_TIME_KNOWN_IRK, IrkTypes, get_logger
 
-_LOGGER = get_logger(__name__)
+_LOGGER = get_logger(__package__)
 
 if TYPE_CHECKING:
     from cryptography.hazmat.primitives.ciphers import Cipher
