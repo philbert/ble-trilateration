@@ -13,7 +13,6 @@ for them, so we can use them to contribute towards measurements.
 from __future__ import annotations
 
 import binascii
-import logging
 import re
 from typing import TYPE_CHECKING, Final
 
@@ -31,10 +30,9 @@ from homeassistant.helpers import area_registry as ar
 from homeassistant.helpers import floor_registry as fr
 from homeassistant.util import slugify
 
-_LOGGER = logging.getLogger(__name__)
-
 from .bermuda_advert import BermudaAdvert
 from .const import (
+    get_logger,
     _LOGGER_SPAM_LESS,
     ADDR_TYPE_IBEACON,
     ADDR_TYPE_PRIVATE_BLE_DEVICE,
@@ -55,6 +53,8 @@ from .const import (
     METADEVICE_TYPE_IBEACON_SOURCE,
 )
 from .util import mac_math_offset, mac_norm
+
+_LOGGER = get_logger(__name__)
 
 if TYPE_CHECKING:
     from bleak.backends.scanner import AdvertisementData

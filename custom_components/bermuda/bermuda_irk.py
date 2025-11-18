@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import logging
 from collections.abc import Callable
 from math import floor
 from typing import TYPE_CHECKING, NamedTuple
@@ -13,9 +12,9 @@ from habluetooth import BluetoothServiceInfoBleak
 from homeassistant.components.bluetooth import BluetoothChange
 from homeassistant.const import MAJOR_VERSION, MINOR_VERSION
 
-_LOGGER = logging.getLogger(__name__)
+from .const import DOMAIN, PRUNE_TIME_KNOWN_IRK, IrkTypes, get_logger
 
-from .const import DOMAIN, PRUNE_TIME_KNOWN_IRK, IrkTypes
+_LOGGER = get_logger(__name__)
 
 if TYPE_CHECKING:
     from cryptography.hazmat.primitives.ciphers import Cipher

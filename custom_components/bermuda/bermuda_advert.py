@@ -14,14 +14,12 @@ to the combination of the scanner and the device it is reporting.
 
 from __future__ import annotations
 
-import logging
 from typing import TYPE_CHECKING, Final
 
 from bluetooth_data_tools import monotonic_time_coarse
 
-_LOGGER = logging.getLogger(__name__)
-
 from .const import (
+    get_logger,
     CONF_ATTENUATION,
     CONF_MAX_RADIUS,
     CONF_MAX_VELOCITY,
@@ -37,6 +35,8 @@ from .const import (
 
 # from .const import _LOGGER_SPAM_LESS
 from .util import clean_charbuf, rssi_to_metres
+
+_LOGGER = get_logger(__name__)
 
 if TYPE_CHECKING:
     from bleak.backends.scanner import AdvertisementData

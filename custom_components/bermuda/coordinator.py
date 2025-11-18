@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import logging
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -11,7 +10,9 @@ from typing import TYPE_CHECKING, cast
 
 import aiofiles
 
-_LOGGER = logging.getLogger(__name__)
+from .const import get_logger
+
+_LOGGER = get_logger(__name__)
 import voluptuous as vol
 import yaml
 from bluetooth_data_tools import monotonic_time_coarse

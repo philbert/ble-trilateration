@@ -3,13 +3,37 @@
 # Base component constants
 from __future__ import annotations
 
+import inspect
 import logging
+import os
 from enum import Enum
 from typing import Final
 
 from homeassistant.const import Platform
 
 from .log_spam_less import BermudaLogSpamLess
+
+
+class BermudaLoggerAdapter(logging.LoggerAdapter):
+    """Logger adapter that adds filename and line number to log messages."""
+
+    def process(self, msg, kwargs):
+        """Prepend [filename:line] to the log message."""
+        # Get the caller's frame (skip this method and the logging method)
+        frame = inspect.currentframe()
+        if frame and frame.f_back and frame.f_back.f_back:
+            caller_frame = frame.f_back.f_back
+            filename = os.path.basename(caller_frame.f_code.co_filename)
+            lineno = caller_frame.f_lineno
+            msg = f"[{filename}:{lineno}] {msg}"
+        return msg, kwargs
+
+
+def get_logger(name):
+    """Get a logger wrapped with BermudaLoggerAdapter for file:line prefixes."""
+    logger = logging.getLogger(name)
+    return BermudaLoggerAdapter(logger, {})
+
 
 NAME = "Bermuda BLE Trilateration"
 DOMAIN = "bermuda"
@@ -211,41 +235,15 @@ DOCS[CONF_SMOOTHING_SAMPLES] = (
 # Defaults
 DEFAULT_NAME = DOMAIN
 
-_LOGGER: logging.Logger = logging.getLogger(__package__)
+_LOGGER = get_logger(__package__)
 _LOGGER_SPAM_LESS = BermudaLogSpamLess(_LOGGER, LOGSPAM_INTERVAL)
 
 
 def setup_bermuda_logging():
-    """Configure Bermuda logging to include file names and line numbers."""
-    # Get the root logger for the Bermuda package
-    package_logger = logging.getLogger(__package__)
-
-    # Check if we've already set up our custom logging
-    if hasattr(package_logger, '_bermuda_logging_configured'):
-        return
-
-    # Mark as configured to avoid duplicate setup
-    package_logger._bermuda_logging_configured = True
-
-    # Create a formatter that includes filename and line number
-    formatter = logging.Formatter(
-        '%(levelname)s (%(threadName)s) [%(filename)s:%(lineno)d] %(message)s'
-    )
-
-    # Find Home Assistant's handlers by looking at the root logger
-    root_logger = logging.getLogger()
-
-    # Apply our custom formatter to existing handlers instead of creating new ones
-    for handler in root_logger.handlers:
-        # Create a simple StreamHandler that writes to the same stream
-        if hasattr(handler, 'stream'):
-            new_handler = logging.StreamHandler(handler.stream)
-            new_handler.setFormatter(formatter)
-            new_handler.setLevel(handler.level)
-            package_logger.addHandler(new_handler)
-
-    # Set propagate to False to avoid duplicate logs
-    package_logger.propagate = False
+    """Configure Bermuda logging - no-op, let Home Assistant handle logging."""
+    # No custom setup needed - Home Assistant's logging system will handle everything
+    # The debug level is configured in configuration.yaml under logger.logs
+    pass
 
 
 STARTUP_MESSAGE = f"""

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import logging
 from typing import TYPE_CHECKING
 
 import voluptuous as vol
@@ -13,9 +12,8 @@ from homeassistant.helpers.selector import (
     ObjectSelector,
 )
 
-_LOGGER = logging.getLogger(__name__)
-
 from .const import (
+    get_logger,
     CONF_ATTENUATION,
     CONF_DEVICES,
     CONF_MAX_RADIUS,
@@ -28,6 +26,8 @@ from .const import (
     DOMAIN,
 )
 from .util import mac_norm
+
+_LOGGER = get_logger(__name__)
 
 if TYPE_CHECKING:
     from homeassistant.config_entries import ConfigFlowResult

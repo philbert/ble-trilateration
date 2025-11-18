@@ -2,18 +2,18 @@
 
 from __future__ import annotations
 
-import logging
 from typing import TYPE_CHECKING
 
 from homeassistant.helpers import device_registry as dr
 
-_LOGGER = logging.getLogger(__name__)
-
 from .const import (
+    get_logger,
     DOMAIN_PRIVATE_BLE_DEVICE,
     NAME,
 )
 from .util import mac_norm
+
+_LOGGER = get_logger(__name__)
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
