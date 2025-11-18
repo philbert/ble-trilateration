@@ -271,19 +271,23 @@ class BermudaCalibrationScannerFlowMixin:
         else:
             default_scanner_info = scanner_config_dict
 
-        data_schema = {
+        # Using suggested_value allows the device to be cleared but shows last selection
+        data_schema = vol.Schema({
             vol.Optional(
                 CONF_DEVICES,
-                default=self._last_device if self._last_device is not None else vol.UNDEFINED,
+                description={"suggested_value": self._last_device},
             ): DeviceSelector(DeviceSelectorConfig(integration=DOMAIN)),
             vol.Required(
                 CONF_SCANNER_INFO,
                 default=default_scanner_info,
             ): ObjectSelector(),
-        }
+        })
 
+        # Return with last_step=False to indicate more config may be needed
+        # This encourages the UI to auto-refresh when device selection changes
         return self.async_show_form(
             step_id="calibration2_scanners",
-            data_schema=vol.Schema(data_schema),
+            data_schema=data_schema,
             description_placeholders=_ugly_token_hack | {"suffix": description},
+            last_step=False,
         )
