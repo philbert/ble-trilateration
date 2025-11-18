@@ -48,6 +48,9 @@ class BermudaCalibrationScannerFlowMixin:
         Select a device to see real-time distance estimates for calibration.
         """
         if user_input is not None:
+            _LOGGER.debug("User input received: %s", user_input.keys())
+            _LOGGER.debug("Device in user_input: %s", user_input.get(CONF_DEVICES))
+
             # Always save on submit - merge submitted values with existing saved values
             # Load existing saved values
             saved_rssi_offsets = self.options.get(CONF_RSSI_OFFSETS, {})
