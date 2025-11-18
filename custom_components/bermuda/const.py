@@ -17,15 +17,42 @@ from .log_spam_less import BermudaLogSpamLess
 class BermudaLoggerAdapter(logging.LoggerAdapter):
     """Logger adapter that adds filename and line number to log messages."""
 
-    def process(self, msg, kwargs):
-        """Prepend [filename:line] to the log message."""
-        # Get the caller's frame (skip this method and the logging method)
+    def _log_with_location(self, level, msg, args, **kwargs):
+        """Log with filename and line number prepended."""
+        # Get the caller's frame (2 levels up: this method -> debug/info/etc -> actual caller)
         frame = inspect.currentframe()
         if frame and frame.f_back and frame.f_back.f_back:
             caller_frame = frame.f_back.f_back
             filename = os.path.basename(caller_frame.f_code.co_filename)
             lineno = caller_frame.f_lineno
             msg = f"[{filename}:{lineno}] {msg}"
+
+        # Call the underlying logger directly
+        if self.isEnabledFor(level):
+            self.logger._log(level, msg, args, **kwargs)
+
+    def debug(self, msg, *args, **kwargs):
+        """Log debug message with location."""
+        self._log_with_location(logging.DEBUG, msg, args, **kwargs)
+
+    def info(self, msg, *args, **kwargs):
+        """Log info message with location."""
+        self._log_with_location(logging.INFO, msg, args, **kwargs)
+
+    def warning(self, msg, *args, **kwargs):
+        """Log warning message with location."""
+        self._log_with_location(logging.WARNING, msg, args, **kwargs)
+
+    def error(self, msg, *args, **kwargs):
+        """Log error message with location."""
+        self._log_with_location(logging.ERROR, msg, args, **kwargs)
+
+    def critical(self, msg, *args, **kwargs):
+        """Log critical message with location."""
+        self._log_with_location(logging.CRITICAL, msg, args, **kwargs)
+
+    def process(self, msg, kwargs):
+        """Process is no longer needed, but keep for compatibility."""
         return msg, kwargs
 
 
