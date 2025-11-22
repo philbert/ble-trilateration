@@ -6,17 +6,36 @@ import pytest
 from unittest.mock import MagicMock, patch
 from custom_components.bermuda.bermuda_advert import BermudaAdvert
 from custom_components.bermuda.bermuda_device import BermudaDevice
+from custom_components.bermuda.const import (
+    CONF_ATTENUATION,
+    CONF_MAX_VELOCITY,
+    CONF_REF_POWER,
+    CONF_RSSI_OFFSETS,
+    CONF_SMOOTHING_SAMPLES,
+)
 from bleak.backends.scanner import AdvertisementData
 
 
 @pytest.fixture
-def mock_parent_device():
+def mock_coordinator():
+    """Provide a coordinator with per-scanner helpers."""
+    coordinator = MagicMock()
+    coordinator.get_scanner_rssi_offset.return_value = 5
+    coordinator.get_scanner_attenuation.return_value = 2.0
+    coordinator.get_scanner_max_radius.return_value = 20.0
+    coordinator.reload_all_advert_configs = MagicMock()
+    return coordinator
+
+
+@pytest.fixture
+def mock_parent_device(mock_coordinator):
     """Fixture for mocking the parent BermudaDevice."""
     device = MagicMock(spec=BermudaDevice)
     device.address = "aa:bb:cc:dd:ee:ff"
     device.ref_power = -59
     device.name_bt_local_name = None
     device.name = "mock parent name"
+    device._coordinator = mock_coordinator
     return device
 
 
@@ -53,11 +72,11 @@ def mock_advertisement_data():
 def bermuda_advert(mock_parent_device, mock_advertisement_data, mock_scanner_device):
     """Fixture for creating a BermudaAdvert instance."""
     options = {
-        "CONF_RSSI_OFFSETS": {"11:22:33:44:55:66": 5},
-        "CONF_REF_POWER": -59,
-        "CONF_ATTENUATION": 2.0,
-        "CONF_MAX_VELOCITY": 3.0,
-        "CONF_SMOOTHING_SAMPLES": 5,
+        CONF_RSSI_OFFSETS: {"11:22:33:44:55:66": 5},
+        CONF_REF_POWER: -59,
+        CONF_ATTENUATION: 2.0,
+        CONF_MAX_VELOCITY: 3.0,
+        CONF_SMOOTHING_SAMPLES: 5,
     }
     ba = BermudaAdvert(
         parent_device=mock_parent_device,
