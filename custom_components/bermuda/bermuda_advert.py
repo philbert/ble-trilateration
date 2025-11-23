@@ -25,6 +25,7 @@ from .const import (
     CONF_REF_POWER,
     CONF_RSSI_OFFSETS,
     CONF_SMOOTHING_SAMPLES,
+    DEBUG_DEVICES,
     DISTANCE_INFINITE,
     DISTANCE_TIMEOUT,
     HIST_KEEP_COUNT,
@@ -195,6 +196,13 @@ class BermudaAdvert(dict):
             self.rssi = advertisementdata.rssi
             self.hist_rssi.insert(0, self.rssi)
 
+            # Extract local_name BEFORE distance calculation so debug logs show friendly names
+            if advertisementdata.local_name:
+                nametuplet = (clean_charbuf(advertisementdata.local_name), advertisementdata.local_name.encode())
+                if self._device.name_bt_local_name is None or len(self._device.name_bt_local_name) < len(nametuplet[0]):
+                    self._device.name_bt_local_name = nametuplet[0]
+                    self._device.make_name()
+
             self._update_raw_distance(reading_is_new=True)
 
             # Note: this is not actually the interval between adverts,
@@ -293,6 +301,18 @@ class BermudaAdvert(dict):
             ref_power = self.ref_power
 
         distance = rssi_to_metres(self.rssi + self.conf_rssi_offset, ref_power, self.conf_attenuation)
+        if self._device.name in DEBUG_DEVICES:
+            _LOGGER.debug(
+                "Distance calc for %s->%s: rssi=%s, offset=%s, adjusted=%s, ref_power=%s, attenuation=%s, distance=%.2fm",
+                self._device.name,
+                self.scanner_device.name,
+                self.rssi,
+                self.conf_rssi_offset,
+                self.rssi + self.conf_rssi_offset,
+                ref_power,
+                self.conf_attenuation,
+                distance,
+            )
         self.rssi_distance_raw = distance
         if reading_is_new:
             # Add a new historical reading

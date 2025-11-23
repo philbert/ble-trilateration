@@ -64,6 +64,10 @@ LOGSPAM_INTERVAL = 22
 # value in seconds is how long we wait between emitting a particular error message
 # when encountering it - primarily for our update loop.
 
+# Debug logging for specific devices - edit this list to enable detailed logs
+# Example: DEBUG_DEVICES = ["Phil's iPhone", "Melinda's Watch"]
+DEBUG_DEVICES = ["Phil's iPhone"]
+
 DISTANCE_TIMEOUT = 30  # seconds to wait before marking a sensor distance measurement
 # as unknown/none/stale/away. Separate from device_tracker.
 DISTANCE_INFINITE = 999  # arbitrary distance for infinite/unknown rssi range

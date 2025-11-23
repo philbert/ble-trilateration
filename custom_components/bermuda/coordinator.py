@@ -71,6 +71,7 @@ from .const import (
     CONF_RSSI_OFFSETS,
     CONF_SMOOTHING_SAMPLES,
     CONF_UPDATE_INTERVAL,
+    DEBUG_DEVICES,
     DEFAULT_ATTENUATION,
     DEFAULT_DEVTRACK_TIMEOUT,
     DEFAULT_MAX_RADIUS,
@@ -1402,6 +1403,9 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         # if device.name in ("Ash Pixel IRK", "Garage", "Melinda iPhone"):
         #     _superchatty = True
 
+        # Check if debug logging is enabled for this device
+        _debug_this_device = device.name in DEBUG_DEVICES
+
         for challenger in device.adverts.values():
             # Check each scanner and any time one is found to be closer / better than
             # the existing closest_scanner, replace it. At the end we should have the
@@ -1436,6 +1440,15 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
 
             # If we are too far away or don't have an area, we cannot win...
             if challenger.rssi_distance is None or challenger.rssi_distance > challenger_max_radius or challenger.area_id is None:
+                if _debug_this_device or (challenger.rssi_distance is not None and challenger.rssi_distance > challenger_max_radius):
+                    _LOGGER.debug(
+                        "Area: %s challenger %s REJECTED: distance=%.2f, max_radius=%.2f, area=%s",
+                        device.name,
+                        challenger.name,
+                        challenger.rssi_distance if challenger.rssi_distance is not None else -1,
+                        challenger_max_radius,
+                        challenger.area_name or "None",
+                    )
                 continue
 
             # At this point the challenger is a vaild contender...
@@ -1462,15 +1475,16 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             incumbent_max_radius = self.get_scanner_max_radius(incumbent.scanner_address)
             if incumbent.rssi_distance > incumbent_max_radius:
                 # Incumbent is too far away, challenger wins
-                incumbent = challenger
-                if _superchatty:
+                if _debug_this_device:
                     _LOGGER.debug(
-                        "%s IS closer to %s: Incumbent %s exceeds max_radius %.1f",
+                        "Area: %s incumbent %s INVALIDATED (distance=%.2f > max_radius=%.2f), challenger %s WINS",
                         device.name,
-                        challenger.name,
                         incumbent.name,
+                        incumbent.rssi_distance,
                         incumbent_max_radius,
+                        challenger.name,
                     )
+                incumbent = challenger
                 continue
 
             # NOTE:
