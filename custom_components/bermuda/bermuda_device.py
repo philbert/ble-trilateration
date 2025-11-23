@@ -593,6 +593,26 @@ class BermudaDevice(dict):
 
         return self.name
 
+    @property
+    def prefname(self):
+        """
+        Return the best display name for logging.
+
+        For metadevice sources (Private BLE rotating MACs), returns the parent
+        metadevice's friendly name. Otherwise returns this device's name.
+        """
+        from .const import METADEVICE_TYPE_PRIVATE_BLE_SOURCE, METADEVICE_TYPE_IBEACON_SOURCE
+
+        # If this is a metadevice source, try to find the parent metadevice
+        if METADEVICE_TYPE_PRIVATE_BLE_SOURCE in self.metadevice_type or METADEVICE_TYPE_IBEACON_SOURCE in self.metadevice_type:
+            # Search metadevices for one that has this address in its sources
+            for metadevice in self._coordinator.metadevices.values():
+                if self.address in metadevice.metadevice_sources:
+                    return metadevice.name
+
+        # Default to this device's name
+        return self.name
+
     def set_ref_power(self, new_ref_power: float):
         """
         Set a new reference power for this device and immediately apply

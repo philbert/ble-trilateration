@@ -301,10 +301,10 @@ class BermudaAdvert(dict):
             ref_power = self.ref_power
 
         distance = rssi_to_metres(self.rssi + self.conf_rssi_offset, ref_power, self.conf_attenuation)
-        if self._device.name in DEBUG_DEVICES:
+        if self._device.prefname in DEBUG_DEVICES:
             _LOGGER.debug(
                 "Distance calc for %s->%s: rssi=%s, offset=%s, adjusted=%s, ref_power=%s, attenuation=%s, distance=%.2fm",
-                self._device.name,
+                self._device.prefname,
                 self.scanner_device.name,
                 self.rssi,
                 self.conf_rssi_offset,
