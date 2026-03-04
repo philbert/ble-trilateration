@@ -26,7 +26,7 @@ from .const import (
     CONF_REF_POWER,
     CONF_RSSI_OFFSETS,
     CONF_SMOOTHING_SAMPLES,
-    DEBUG_DEVICES,
+    debug_device_match,
     DISTANCE_INFINITE,
     DISTANCE_TIMEOUT,
     HIST_KEEP_COUNT,
@@ -298,6 +298,19 @@ class BermudaAdvert(dict):
             return (13, 0.22, 12.0)
         return (9, 0.45, 15.0)
 
+    def _debug_this_device(self) -> bool:
+        """Return true when this advert belongs to a configured debug target."""
+        return debug_device_match(
+            self._device.name,
+            self._device.prefname,
+            self._device.address,
+            self.device_address,
+            self._device.name_by_user,
+            self._device.name_devreg,
+            self._device.name_bt_local_name,
+            self._device.name_bt_serviceinfo,
+        )
+
     @staticmethod
     def _median_abs_deviation(values: list[float], center: float | None = None) -> float:
         """Return the median absolute deviation of values."""
@@ -323,7 +336,7 @@ class BermudaAdvert(dict):
             robust_sigma = max(mad * 1.4826, 1.0)
             threshold = max(outlier_db, robust_sigma * 3.0)
             if abs(sample - med) > threshold:
-                if self._device.prefname in DEBUG_DEVICES:
+                if self._debug_this_device():
                     _LOGGER.debug(
                         "RSSI outlier clamped for %s->%s: raw=%.1f median=%.1f threshold=%.1f",
                         self._device.prefname,
@@ -375,7 +388,7 @@ class BermudaAdvert(dict):
         filtered_rssi = self._update_filtered_rssi(adjusted_rssi)
 
         distance = rssi_to_metres(filtered_rssi, ref_power, self.conf_attenuation)
-        if self._device.prefname in DEBUG_DEVICES:
+        if self._debug_this_device():
             _LOGGER.debug(
                 (
                     "Distance calc for %s->%s: raw_rssi=%s, offset=%s, adjusted=%.2f, filtered=%.2f,"

@@ -32,6 +32,8 @@ class _DummyDevice:
         self.mobility_type = mobility_type
         self.adverts = {}
         self.area_advert = None
+        self.area_name = None
+        self.area_is_unknown = False
         self.diag_area_switch = None
         self.applied: list[tuple[object | None, bool]] = []
 
@@ -41,6 +43,13 @@ class _DummyDevice:
     def apply_scanner_selection(self, advert, force_unknown: bool = False):
         self.applied.append((advert, force_unknown))
         self.area_advert = advert
+        self.area_is_unknown = force_unknown
+        if force_unknown:
+            self.area_name = "Unknown"
+        elif advert is not None:
+            self.area_name = advert.area_name
+        else:
+            self.area_name = None
 
 
 def _make_coordinator():
@@ -84,3 +93,21 @@ def test_unknown_when_weak_and_ambiguous():
     assert device.applied[-1][1] is True
     assert device.diag_area_switch is not None
     assert "UNKNOWN" in device.diag_area_switch
+
+
+def test_unknown_entry_is_delayed_while_incumbent_exists():
+    """Short weak periods should hold the incumbent area before moving to Unknown."""
+    coordinator = _make_coordinator()
+    device = _DummyDevice("dev-c", mobility_type="moving")
+
+    incumbent = _make_advert("scanner_a", "Garage", -82.0, 4.0)
+    weak = _make_advert("scanner_b", "Laundry", -101.0, 9.0)
+    device.area_advert = incumbent
+    device.area_name = "Garage"
+    device.adverts = {("dev-c", "scanner_a"): weak}
+
+    coordinator._refresh_area_by_min_distance(device)
+
+    # First weak detection should keep incumbent instead of flapping to Unknown immediately.
+    assert device.applied[-1][0] is incumbent
+    assert device.applied[-1][1] is False

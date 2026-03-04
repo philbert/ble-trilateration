@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from enum import Enum
 from typing import Final
 
@@ -65,9 +66,57 @@ LOGSPAM_INTERVAL = 22
 # value in seconds is how long we wait between emitting a particular error message
 # when encountering it - primarily for our update loop.
 
-# Debug logging for specific devices - edit this list to enable detailed logs
-# Example: DEBUG_DEVICES = ["Phil's iPhone", "Melinda's Watch"]
-DEBUG_DEVICES = ["Phil's iPhone"]
+# Debug logging for specific devices - edit this list to enable detailed logs.
+# Matching is case-insensitive and supports partial name matches.
+# Example: DEBUG_DEVICES = ["Phil's iPhone", "Melinda's Watch", "AA:BB:CC:DD:EE:FF"]
+DEBUG_DEVICES = ["Brown bin"]
+
+
+def _debug_norm(value: str | None) -> str:
+    """Normalize debug match strings to be case/spacing tolerant."""
+    if value is None:
+        return ""
+    return " ".join(str(value).casefold().strip().split())
+
+
+def _debug_compact(value: str | None) -> str:
+    """Normalize debug match strings for address-like comparisons."""
+    return re.sub(r"[^a-z0-9]", "", _debug_norm(value))
+
+
+def debug_device_match(*identifiers: str | None) -> bool:
+    """
+    Return true if any identifier matches a configured DEBUG_DEVICES selector.
+
+    Match behavior:
+      - Case-insensitive exact match
+      - Case-insensitive substring match
+      - Compact address-safe exact/substring match (ignores punctuation)
+    """
+    if not DEBUG_DEVICES:
+        return False
+
+    targets = []
+    for target in DEBUG_DEVICES:
+        norm_target = _debug_norm(target)
+        if norm_target != "":
+            targets.append(norm_target)
+    if not targets:
+        return False
+    compact_targets = [_debug_compact(target) for target in targets]
+
+    for identifier in identifiers:
+        ident = _debug_norm(identifier)
+        if ident == "":
+            continue
+        ident_compact = _debug_compact(ident)
+        for target, target_compact in zip(targets, compact_targets, strict=False):
+            if ident == target or target in ident or ident in target:
+                return True
+            if ident_compact != "" and target_compact != "":
+                if ident_compact == target_compact or target_compact in ident_compact or ident_compact in target_compact:
+                    return True
+    return False
 
 DISTANCE_TIMEOUT = 30  # seconds to wait before marking a sensor distance measurement
 # as unknown/none/stale/away. Separate from device_tracker.

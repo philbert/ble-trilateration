@@ -74,7 +74,6 @@ from .const import (
     CONF_RSSI_OFFSETS,
     CONF_SMOOTHING_SAMPLES,
     CONF_UPDATE_INTERVAL,
-    DEBUG_DEVICES,
     DEFAULT_ATTENUATION,
     DEFAULT_DEVTRACK_TIMEOUT,
     DEFAULT_MAX_RADIUS,
@@ -100,6 +99,7 @@ from .const import (
     SIGNAL_DEVICE_NEW,
     SIGNAL_SCANNERS_CHANGED,
     UPDATE_INTERVAL,
+    debug_device_match,
 )
 from .util import mac_explode_formats, mac_norm
 
@@ -1427,6 +1427,8 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         ambiguity_ratio: float = 1.2
         ambiguity_hold_seconds: float = 8.0
         unknown_exit_ratio: float = 1.35
+        unknown_enter_seconds: float = 12.0
+        reacquire_seconds: float = 8.0
 
     @dataclass
     class AreaDecisionState:
@@ -1455,15 +1457,28 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             return BermudaDataUpdateCoordinator.MobilityPolicy(
                 mode=MOBILITY_STATIONARY,
                 fast_ratio=2.0,
-                dwell_seconds=24.0,
-                majority_window=15,
-                majority_need=10,
-                min_rssi_confidence=-92.0,
-                ambiguity_ratio=1.25,
-                ambiguity_hold_seconds=14.0,
+                dwell_seconds=28.0,
+                majority_window=17,
+                majority_need=12,
+                min_rssi_confidence=-95.0,
+                ambiguity_ratio=1.2,
+                ambiguity_hold_seconds=16.0,
                 unknown_exit_ratio=1.45,
+                unknown_enter_seconds=20.0,
+                reacquire_seconds=12.0,
             )
-        return BermudaDataUpdateCoordinator.MobilityPolicy()
+        return BermudaDataUpdateCoordinator.MobilityPolicy(
+            fast_ratio=1.8,
+            dwell_seconds=12.0,
+            majority_window=11,
+            majority_need=8,
+            min_rssi_confidence=-96.0,
+            ambiguity_ratio=1.15,
+            ambiguity_hold_seconds=10.0,
+            unknown_exit_ratio=1.35,
+            unknown_enter_seconds=12.0,
+            reacquire_seconds=8.0,
+        )
 
     @staticmethod
     def _majority_wins(history: deque[str], candidate: str, window: int, need: int) -> bool:
@@ -1482,7 +1497,15 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         nowstamp = monotonic_time_coarse()
         tests = self.AreaTests()
         tests.device = device.name
-        _debug_this_device = device.name in DEBUG_DEVICES
+        _debug_this_device = debug_device_match(
+            device.name,
+            device.prefname,
+            device.address,
+            device.name_by_user,
+            device.name_devreg,
+            device.name_bt_local_name,
+            device.name_bt_serviceinfo,
+        )
         policy = self._mobility_policy(device.get_mobility_type())
         state = self._get_area_decision_state(device)
 
@@ -1493,9 +1516,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
 
             challenger_max_radius = self.get_scanner_max_radius(challenger.scanner_address)
             if challenger.rssi_distance is None or challenger.rssi_distance > challenger_max_radius or challenger.area_id is None:
-                if _debug_this_device or (
-                    challenger.rssi_distance is not None and challenger.rssi_distance > challenger_max_radius
-                ):
+                if _debug_this_device:
                     _LOGGER.debug(
                         "Area: %s challenger %s REJECTED: distance=%.2f, max_radius=%.2f, area=%s",
                         device.name,
@@ -1527,6 +1548,11 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         best_label = best.advert.scanner_address if best is not None else AREA_NAME_UNKNOWN
         state.dominant_history.append(best_label)
 
+        incumbent_advert = device.area_advert
+        incumbent = next((c for c in contenders if incumbent_advert is not None and c.advert is incumbent_advert), None)
+        if incumbent is None and incumbent_advert is not None:
+            incumbent = next((c for c in contenders if c.advert.scanner_address == incumbent_advert.scanner_address), None)
+
         # Unknown/Uncovered gating: weak, ambiguous, or edge-of-radius with tiny separation.
         unknown_reason: str | None = None
         if best is None:
@@ -1553,18 +1579,32 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         else:
             state.ambiguous_since = 0.0
 
-        # Hold unknown until evidence becomes clearer.
-        if (
-            unknown_reason is None
-            and state.unknown_since > 0
-            and second is not None
-            and (best.score / max(second.score, 1e-9)) < policy.unknown_exit_ratio
-        ):
-            unknown_reason = "hold_unknown_until_clear"
+        # Hold unknown until evidence becomes clearly dominant.
+        if unknown_reason is None and device.area_is_unknown and best is not None:
+            if second is None or (best.score / max(second.score, 1e-9)) < policy.unknown_exit_ratio:
+                unknown_reason = "hold_unknown_until_clear"
 
         if unknown_reason is not None:
             if state.unknown_since <= 0:
                 state.unknown_since = nowstamp
+            unknown_age = nowstamp - state.unknown_since
+
+            # Delay Unknown transitions to avoid very short blips.
+            if incumbent is not None and unknown_age < policy.unknown_enter_seconds:
+                tests.reason = f"HOLD incumbent pending_unknown({unknown_reason}) age={unknown_age:.1f}s"
+                state.challenger_scanner = None
+                state.challenger_since = 0.0
+                if _debug_this_device:
+                    _LOGGER.debug(
+                        "Area: %s hold incumbent %s while unknown pending (%s, age=%.1fs)",
+                        device.name,
+                        incumbent.advert.name,
+                        unknown_reason,
+                        unknown_age,
+                    )
+                device.apply_scanner_selection(incumbent.advert)
+                return
+
             state.challenger_scanner = None
             state.challenger_since = 0.0
             tests.reason = f"UNKNOWN - {unknown_reason}"
@@ -1580,18 +1620,26 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             device.apply_scanner_selection(None, force_unknown=True)
             return
 
+        # Evidence is good enough, clear unknown timer.
         state.unknown_since = 0.0
         chosen = best
         if chosen is None:
             device.apply_scanner_selection(None)
             return
 
-        incumbent_advert = device.area_advert
-        incumbent = next((c for c in contenders if incumbent_advert is not None and c.advert is incumbent_advert), None)
-        if incumbent is None and incumbent_advert is not None:
-            incumbent = next((c for c in contenders if c.advert.scanner_address == incumbent_advert.scanner_address), None)
-
         if incumbent is None:
+            if device.area_name is not None:
+                if state.challenger_scanner != chosen.advert.scanner_address:
+                    state.challenger_scanner = chosen.advert.scanner_address
+                    state.challenger_since = nowstamp
+                if nowstamp - state.challenger_since < policy.reacquire_seconds:
+                    tests.reason = (
+                        f"HOLD pending_reacquire area={chosen.advert.area_name} "
+                        f"age={nowstamp - state.challenger_since:.1f}s"
+                    )
+                    if device.area_is_unknown:
+                        device.apply_scanner_selection(None, force_unknown=True)
+                    return
             tests.reason = "WIN initial_valid_contender"
             state.challenger_scanner = None
             state.challenger_since = 0.0
