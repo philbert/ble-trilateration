@@ -1465,8 +1465,8 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 ambiguity_ratio=1.2,
                 ambiguity_hold_seconds=16.0,
                 unknown_exit_ratio=1.45,
-                unknown_enter_seconds=20.0,
-                reacquire_seconds=12.0,
+                unknown_enter_seconds=30.0,
+                reacquire_seconds=20.0,
             )
         return BermudaDataUpdateCoordinator.MobilityPolicy(
             fast_ratio=1.8,
@@ -1665,7 +1665,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             return
 
         if incumbent is None:
-            if device.area_name is not None:
+            if device.area_name is not None and not device.area_is_unknown:
                 if state.challenger_scanner != chosen.advert.scanner_address:
                     state.challenger_scanner = chosen.advert.scanner_address
                     state.challenger_since = nowstamp

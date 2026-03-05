@@ -83,13 +83,13 @@ def test_slow_lane_prevents_quick_oscillation():
 
 
 def test_unknown_when_weak_and_ambiguous():
-    """Weak and close contenders should emit Unknown instead of phantom room picks."""
+    """Weak and close contenders with no prior area should emit Unknown, not a phantom room."""
     coordinator = _make_coordinator()
     device = _DummyDevice("dev-b", mobility_type="stationary")
 
     weak_a = _make_advert("scanner_a", "Garage", -96.0, 8.0)
     weak_b = _make_advert("scanner_b", "Roadside", -96.4, 8.2)
-    device.area_advert = weak_a
+    # No area_advert set: device has no prior area, so there is nothing to hold.
     device.adverts = {("dev-b", "scanner_a"): weak_a, ("dev-b", "scanner_b"): weak_b}
 
     coordinator._refresh_area_by_min_distance(device)
