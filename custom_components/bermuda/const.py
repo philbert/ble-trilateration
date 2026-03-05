@@ -75,8 +75,8 @@ SECRET_HEX32_RE: Final = re.compile(r"(?<![0-9a-fA-F])[0-9a-fA-F]{32}(?![0-9a-fA
 
 
 def redact_secret_hex32(text: str) -> str:
-    """Mask 32-hex secrets (for example IRKs) in log text."""
-    return SECRET_HEX32_RE.sub("[REDACTED_HEX32]", text)
+    """Mask full 32-hex secrets while preserving the first 4 chars."""
+    return SECRET_HEX32_RE.sub(lambda match: f"{match.group(0)[:4]}[REDACTED_HEX32]", text)
 
 
 class BermudaSecretFilter(logging.Filter):
