@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
 from homeassistant.config_entries import ConfigEntryState
 
 import pytest
@@ -21,6 +21,43 @@ from .const import MOCK_CONFIG
 
 
 pytest_plugins = "pytest_homeassistant_custom_component"
+
+
+@pytest.fixture(autouse=True)
+def _patch_bluetooth_for_macos():
+    """Patch bluetooth internals that fail or leak timers on macOS.
+
+    Three Linux-only code paths hit at test time on macOS:
+    1. async_load_history_from_system calls into dbus_fast via bluetooth_adapters.
+    2. create_bleak_scanner tries to import dbus_fast from bleak's BlueZ backend.
+    3. Both failures leave lingering HA event-loop timers that fail verify_cleanup.
+
+    Patching these at the module level used by the HA bluetooth component prevents
+    the crashes and lets teardown run cleanly.
+    """
+    mock_scanner = MagicMock()
+    mock_scanner.async_setup = MagicMock()
+    mock_scanner.async_start = AsyncMock()
+    mock_scanner.async_stop = AsyncMock()
+    mock_scanner.connector = None
+    mock_scanner.scanning = False
+
+    with (
+        patch(
+            "homeassistant.components.bluetooth.manager.async_load_history_from_system",
+            return_value=({}, {}),
+        ),
+        patch(
+            "homeassistant.components.bluetooth.HaScanner",
+            return_value=mock_scanner,
+        ),
+        patch("habluetooth.scanner.create_bleak_scanner", return_value=MagicMock(
+            start=AsyncMock(),
+            stop=AsyncMock(),
+            is_scanning=False,
+        )),
+    ):
+        yield
 
 
 @pytest.fixture(autouse=True)

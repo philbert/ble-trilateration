@@ -30,6 +30,7 @@ class _DummyDevice:
     def __init__(self, address: str, mobility_type: str = "moving"):
         self.address = address
         self.name = address
+        self.prefname = address
         self.mobility_type = mobility_type
         self.adverts = {}
         self.area_advert = None
@@ -38,6 +39,10 @@ class _DummyDevice:
         self.area_last_seen_id = None
         self.area_is_unknown = False
         self.diag_area_switch = None
+        self.name_by_user = None
+        self.name_devreg = None
+        self.name_bt_local_name = None
+        self.name_bt_serviceinfo = None
         self.applied: list[tuple[object | None, bool]] = []
 
     def get_mobility_type(self):

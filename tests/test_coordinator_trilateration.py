@@ -101,6 +101,27 @@ def test_trilat_unknown_when_inputs_stale():
     assert device.trilat_reason == "stale_inputs"
 
 
+def _make_scanner(coordinator, address, floor_id, x_m, y_m, anchor_enabled=True):
+    """Helper: register a scanner device in the coordinator."""
+    sc = SimpleNamespace(
+        address=address,
+        floor_id=floor_id,
+        anchor_enabled=anchor_enabled,
+        anchor_x_m=x_m,
+        anchor_y_m=y_m,
+    )
+    coordinator.devices[address] = sc
+    return sc
+
+
+def _right_triangle_anchors(coordinator, device_addr, floor_id):
+    """Three anchors forming a right triangle whose circumcenter is at (3, 4) at range 5 m."""
+    sc_a = _make_scanner(coordinator, f"{device_addr}-a", floor_id, 0.0, 0.0)
+    sc_b = _make_scanner(coordinator, f"{device_addr}-b", floor_id, 6.0, 0.0)
+    sc_c = _make_scanner(coordinator, f"{device_addr}-c", floor_id, 0.0, 8.0)
+    return sc_a, sc_b, sc_c
+
+
 def test_trilat_unknown_with_insufficient_anchors():
     """Fresh input with fewer than 3 same-floor anchors should be insufficient_anchors."""
     coordinator = _make_coordinator()
@@ -125,3 +146,239 @@ def test_trilat_unknown_with_insufficient_anchors():
     assert device.trilat_status == "unknown"
     assert device.trilat_reason == "insufficient_anchors"
     assert device.trilat_anchor_count == 1
+
+
+def test_floor_evidence_cross_floor_penalty_selects_correct_floor():
+    """Cross-floor penalty should steer floor selection to the floor with more scanners."""
+    coordinator = _make_coordinator()
+    device = _DummyDevice("dev-fev")
+
+    # 3 scanners on f1 (same RSSI as the 1 scanner on f2)
+    sc_a = _make_scanner(coordinator, "fev-a", "f1", 0.0, 0.0)
+    sc_b = _make_scanner(coordinator, "fev-b", "f1", 6.0, 0.0)
+    sc_c = _make_scanner(coordinator, "fev-c", "f1", 0.0, 8.0)
+    sc_f2 = _make_scanner(coordinator, "fev-d", "f2", 5.0, 5.0)
+
+    fresh = time.monotonic()
+    device.adverts = {
+        ("dev-fev", sc_a.address): _make_advert(sc_a, fresh, -70.0, 5.0),
+        ("dev-fev", sc_b.address): _make_advert(sc_b, fresh, -70.0, 5.0),
+        ("dev-fev", sc_c.address): _make_advert(sc_c, fresh, -70.0, 5.0),
+        ("dev-fev", sc_f2.address): _make_advert(sc_f2, fresh, -70.0, 5.0),
+    }
+
+    coordinator._refresh_trilateration_for_device(device)
+
+    state = coordinator._get_trilat_decision_state(device)
+    # 3 same-floor scanners produce higher evidence for f1 than 1 same-floor scanner does
+    # for f2 (the other three get penalised when scoring for f2).
+    assert state.floor_id == "f1"
+    # With valid triangle geometry the solver should succeed.
+    assert device.trilat_status == "ok"
+
+
+def test_anchor_qualification_respects_anchor_enabled_flag():
+    """Anchors with anchor_enabled=False must be excluded from the solve."""
+    coordinator = _make_coordinator()
+    device = _DummyDevice("dev-qual")
+
+    sc_a = _make_scanner(coordinator, "qa", "f1", 0.0, 0.0, anchor_enabled=True)
+    sc_b = _make_scanner(coordinator, "qb", "f1", 6.0, 0.0, anchor_enabled=False)
+    sc_c = _make_scanner(coordinator, "qc", "f1", 0.0, 8.0, anchor_enabled=False)
+
+    fresh = time.monotonic()
+    device.adverts = {
+        ("dev-qual", sc_a.address): _make_advert(sc_a, fresh, -70.0, 5.0),
+        ("dev-qual", sc_b.address): _make_advert(sc_b, fresh, -70.0, 5.0),
+        ("dev-qual", sc_c.address): _make_advert(sc_c, fresh, -70.0, 5.0),
+    }
+
+    coordinator._refresh_trilateration_for_device(device)
+
+    assert device.trilat_status == "unknown"
+    assert device.trilat_reason == "insufficient_anchors"
+    assert device.trilat_anchor_count == 1
+
+
+def test_anchor_qualification_requires_valid_coordinates():
+    """Anchors missing x or y coordinates must be excluded from the solve."""
+    coordinator = _make_coordinator()
+    device = _DummyDevice("dev-coords")
+
+    sc_a = _make_scanner(coordinator, "ca", "f1", 0.0, 0.0)
+    # Inject None coords directly on the scanner objects.
+    sc_b = _make_scanner(coordinator, "cb", "f1", None, 0.0)
+    sc_c = _make_scanner(coordinator, "cc", "f1", 0.0, None)
+
+    fresh = time.monotonic()
+    device.adverts = {
+        ("dev-coords", sc_a.address): _make_advert(sc_a, fresh, -70.0, 5.0),
+        ("dev-coords", sc_b.address): _make_advert(sc_b, fresh, -70.0, 5.0),
+        ("dev-coords", sc_c.address): _make_advert(sc_c, fresh, -70.0, 5.0),
+    }
+
+    coordinator._refresh_trilateration_for_device(device)
+
+    assert device.trilat_status == "unknown"
+    assert device.trilat_reason == "insufficient_anchors"
+    assert device.trilat_anchor_count == 1
+
+
+def test_trilat_ewma_resets_on_floor_change():
+    """Switching floors must reset per-advert EWMA so stale cross-floor ranges are discarded."""
+    coordinator = _make_coordinator()
+    device = _DummyDevice("dev-ewma")
+
+    sc_a = _make_scanner(coordinator, "ew-a", "f1", 0.0, 0.0)
+    sc_b1 = _make_scanner(coordinator, "ew-b1", "f2", 5.0, 0.0)
+    sc_b2 = _make_scanner(coordinator, "ew-b2", "f2", 0.0, 5.0)
+
+    fresh = time.monotonic()
+    adv_a = _make_advert(sc_a, fresh, -70.0, 4.0)
+    adv_b1 = _make_advert(sc_b1, fresh, -60.0, 3.0)
+    adv_b2 = _make_advert(sc_b2, fresh, -60.0, 3.0)
+
+    # First call: only f1 scanner visible → floor = f1, EWMA initialised.
+    device.adverts = {("dev-ewma", sc_a.address): adv_a}
+    coordinator._refresh_trilateration_for_device(device)
+    state = coordinator._get_trilat_decision_state(device)
+    assert state.floor_id == "f1"
+    assert adv_a.trilat_range_ewma_m is not None
+
+    # Expose the f2 scanners and force the challenger dwell to be already expired.
+    device.adverts = {
+        ("dev-ewma", sc_a.address): adv_a,
+        ("dev-ewma", sc_b1.address): adv_b1,
+        ("dev-ewma", sc_b2.address): adv_b2,
+    }
+    state.floor_challenger_id = "f2"
+    state.floor_challenger_since = time.monotonic() - 100.0
+
+    coordinator._refresh_trilateration_for_device(device)
+
+    assert state.floor_id == "f2", "floor should have switched to f2"
+    # Cross-floor scanner (f1) must have its EWMA cleared so stale ranges are discarded.
+    assert adv_a.trilat_range_ewma_m is None, "EWMA must be reset on floor change for cross-floor scanner"
+    # New floor's scanners get freshly initialized to rssi_distance_raw in the same call.
+    assert adv_b1.trilat_range_ewma_m == adv_b1.rssi_distance_raw
+    assert adv_b2.trilat_range_ewma_m == adv_b2.rssi_distance_raw
+
+
+def test_solve_skips_when_inputs_unchanged():
+    """Second call with identical ranges should reuse the cached solution."""
+    coordinator = _make_coordinator()
+    device = _DummyDevice("dev-skip")
+    sc_a, sc_b, sc_c = _right_triangle_anchors(coordinator, "dev-skip", "f1")
+
+    fresh = time.monotonic()
+    adverts = {
+        ("dev-skip", sc_a.address): _make_advert(sc_a, fresh, -70.0, 5.0),
+        ("dev-skip", sc_b.address): _make_advert(sc_b, fresh, -70.0, 5.0),
+        ("dev-skip", sc_c.address): _make_advert(sc_c, fresh, -70.0, 5.0),
+    }
+    device.adverts = adverts
+
+    coordinator._refresh_trilateration_for_device(device)
+    assert device.trilat_status == "ok"
+    first_x = device.trilat_x_m
+
+    coordinator._refresh_trilateration_for_device(device)
+    assert device.trilat_status == "ok"
+    assert device.trilat_reason == "skip_unchanged_inputs"
+    assert device.trilat_x_m == first_x
+
+
+def test_solve_runs_when_delta_crosses_threshold():
+    """When any EWMA range shifts by >= 0.2 m the solver must re-run."""
+    coordinator = _make_coordinator()
+    device = _DummyDevice("dev-delta")
+    sc_a, sc_b, sc_c = _right_triangle_anchors(coordinator, "dev-delta", "f1")
+
+    fresh = time.monotonic()
+    adv_a = _make_advert(sc_a, fresh, -70.0, 5.0)
+    device.adverts = {
+        ("dev-delta", sc_a.address): adv_a,
+        ("dev-delta", sc_b.address): _make_advert(sc_b, fresh, -70.0, 5.0),
+        ("dev-delta", sc_c.address): _make_advert(sc_c, fresh, -70.0, 5.0),
+    }
+
+    coordinator._refresh_trilateration_for_device(device)
+    assert device.trilat_status == "ok"
+
+    # Shift range by 0.6 m — moving alpha=0.40, so EWMA delta = 0.4*0.6 = 0.24 >= 0.2.
+    adv_a.rssi_distance_raw = 5.6
+    adv_a.rssi_distance = 5.6
+
+    coordinator._refresh_trilateration_for_device(device)
+    assert device.trilat_status == "ok"
+    assert device.trilat_reason != "skip_unchanged_inputs"
+
+
+def test_high_residual_yields_unknown():
+    """Geometrically inconsistent ranges should produce high_residual Unknown."""
+    coordinator = _make_coordinator()
+    device = _DummyDevice("dev-residual")
+
+    # Anchors far apart but all claiming the device is only 1 m away — impossible geometry.
+    sc_a = _make_scanner(coordinator, "res-a", "f1", 0.0, 0.0)
+    sc_b = _make_scanner(coordinator, "res-b", "f1", 15.0, 0.0)
+    sc_c = _make_scanner(coordinator, "res-c", "f1", 0.0, 15.0)
+
+    fresh = time.monotonic()
+    device.adverts = {
+        ("dev-residual", sc_a.address): _make_advert(sc_a, fresh, -70.0, 1.0),
+        ("dev-residual", sc_b.address): _make_advert(sc_b, fresh, -70.0, 1.0),
+        ("dev-residual", sc_c.address): _make_advert(sc_c, fresh, -70.0, 1.0),
+    }
+
+    coordinator._refresh_trilateration_for_device(device)
+
+    assert device.trilat_status == "unknown"
+    assert device.trilat_reason == "high_residual"
+
+
+def test_ambiguous_floor_yields_unknown_after_dwell():
+    """Sustained equal floor evidence should produce ambiguous_floor Unknown after hysteresis."""
+    coordinator = _make_coordinator()
+    device = _DummyDevice("dev-ambig")
+
+    # One scanner per floor with equal RSSI → perfectly tied evidence.
+    sc_f1 = _make_scanner(coordinator, "amb-f1", "f1", 0.0, 0.0)
+    sc_f2 = _make_scanner(coordinator, "amb-f2", "f2", 0.0, 0.0)
+
+    fresh = time.monotonic()
+    device.adverts = {
+        ("dev-ambig", sc_f1.address): _make_advert(sc_f1, fresh, -70.0, 4.0),
+        ("dev-ambig", sc_f2.address): _make_advert(sc_f2, fresh, -70.0, 4.0),
+    }
+
+    # First call: starts the ambiguous timer but does not yet emit Unknown.
+    coordinator._refresh_trilateration_for_device(device)
+
+    state = coordinator._get_trilat_decision_state(device)
+    assert state.floor_ambiguous_since > 0, "ambiguous timer should be started"
+
+    # Expire the timer artificially.
+    state.floor_ambiguous_since = time.monotonic() - 100.0
+
+    # Second call: dwell exceeded → ambiguous_floor Unknown.
+    coordinator._refresh_trilateration_for_device(device)
+
+    assert device.trilat_status == "unknown"
+    assert device.trilat_reason == "ambiguous_floor"
+
+
+def test_trilat_state_is_isolated_from_area_state():
+    """Trilateration updates must not write to the area decision state."""
+    coordinator = _make_coordinator()
+    coordinator._area_decision_state = {}
+    device = _DummyDevice("dev-iso")
+
+    sc = _make_scanner(coordinator, "iso-a", "f1", 0.0, 0.0)
+    fresh = time.monotonic()
+    device.adverts = {("dev-iso", sc.address): _make_advert(sc, fresh, -70.0, 4.0)}
+
+    coordinator._refresh_trilateration_for_device(device)
+
+    assert len(coordinator._area_decision_state) == 0, "trilat must not touch area state"
+    assert device.address in coordinator._trilat_decision_state
