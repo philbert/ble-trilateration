@@ -78,6 +78,7 @@ async def async_setup_entry(
             entities.append(BermudaSensorRssi(coordinator, entry, address))
             entities.append(BermudaSensorAreaLastSeen(coordinator, entry, address))
             entities.append(BermudaSensorAreaSwitchReason(coordinator, entry, address))
+            entities.append(BermudaSensorMobilityMode(coordinator, entry, address))
 
             # _LOGGER.debug("Sensor received new_device signal for %s", address)
             # We set update before add to False because we are being
@@ -450,6 +451,24 @@ class BermudaSensorAreaSwitchReason(BermudaSensor):
         if self._device.diag_area_switch is not None:
             return self._device.diag_area_switch[:255]
         return None
+
+
+class BermudaSensorMobilityMode(BermudaSensor):
+    """Diagnostic sensor exposing effective mobility mode for this device."""
+
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    @property
+    def unique_id(self):
+        return f"{self._device.unique_id}_mobility_mode"
+
+    @property
+    def name(self):
+        return "Mobility Mode"
+
+    @property
+    def native_value(self):
+        return self._device.get_mobility_type()
 
 
 class BermudaSensorAreaLastSeen(BermudaSensor, RestoreSensor):
