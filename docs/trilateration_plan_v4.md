@@ -28,6 +28,8 @@
   - `trilat_min_anchors` fixed at `3` for valid solve.
 - No per-scanner floor-penalty override in phase 1.
 - No user-exposed `trilat_update_interval_s`; run with coordinator cadence.
+- Residual rejection uses a fixed internal phase-1 constant:
+  - `_TRILAT_MAX_RESIDUAL_M = 5.0` (not user-configurable yet).
 
 ## 5. Input signals and smoothing strategy
 - Trilateration uses `rssi_distance_raw` as input to avoid double-smoothing lag.
@@ -56,6 +58,8 @@
   - apply binary cross-floor penalty:
     - if scanner floor == candidate floor: no penalty.
     - else subtract `trilat_cross_floor_penalty_db` once from RSSI before score conversion.
+- Clarification: floor scoring uses `rssi_filtered`; solver range input uses
+  `rssi_distance_raw` with trilat-specific EWMA (Section 5). These are separate pipelines.
 - Sum evidence per floor; best floor competes with current floor.
 - Floor switch uses mobility-aware hysteresis policy (same pattern as area policy):
   - moving: shorter dwell / lower margin.
@@ -69,7 +73,8 @@
 - Phase 1 weighting is explicitly uniform for deterministic behavior.
 - Quality gates:
   - minimum 3 anchors.
-  - residual threshold to reject bad geometry/outlier sets.
+  - residual threshold to reject bad geometry/outlier sets
+    (`_TRILAT_MAX_RESIDUAL_M = 5.0` in phase 1).
   - on rejection: trilat result Unknown (reason: `high_residual`).
 
 ## 9. Performance gate (solve-skip logic)
@@ -148,3 +153,22 @@
 - Solver runtime bounded by skip logic under normal coordinator cadence.
 - Real-home diagnostic accuracy target: p95 positional jitter around 4–6 m baseline in phase 1.
 - Decision on trilat-to-area integration deferred until empirical results show room-level usefulness.
+
+---
+
+## Review notes (Claude, 2026-03-05)
+
+### Comment 1 — Floor evidence vs. solver input use different RSSI streams; state this explicitly
+
+Section 7 derives floor evidence from `rssi_filtered`; Section 5 uses `rssi_distance_raw` (+ trilat EWMA) as solver range input. Both choices are correct and intentional, but an implementer reading them separately may conflate the two pipelines. Suggest adding a clarifying note in Section 7:
+
+> "Floor scoring uses `rssi_filtered` (the existing smoothed RSSI); solver range input uses `rssi_distance_raw` with the trilat-specific EWMA (Section 5). These are separate pipelines."
+
+### Comment 2 — Residual rejection threshold has no specified value or config entry
+
+Section 8 refers to a "residual threshold to reject bad geometry/outlier sets" but `trilat_max_residual_m` does not appear in the global config (Section 4) and no default value is given. Either:
+
+- add `trilat_max_residual_m` (suggested default `5.0 m`) to Section 4 as a user-configurable option, or
+- explicitly state it will be a fixed internal constant in phase 1 (e.g. `_TRILAT_MAX_RESIDUAL_M = 5.0`) and not exposed until real-world data informs a better value.
+
+Leaving it implicit risks inconsistent implementation across PRs.
