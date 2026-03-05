@@ -25,17 +25,18 @@
 - Global trilat config:
   - `trilat_enabled` (default `false`).
   - `trilat_cross_floor_penalty_db` (default conservative value, e.g. `8`).
-  - `trilat_min_anchors` fixed at `3` for valid solve.
 - No per-scanner floor-penalty override in phase 1.
 - No user-exposed `trilat_update_interval_s`; run with coordinator cadence.
-- Residual rejection uses a fixed internal phase-1 constant:
+- Solve gating uses fixed internal phase-1 constants:
+  - `_TRILAT_MIN_ANCHORS = 3` (not user-configurable yet).
   - `_TRILAT_MAX_RESIDUAL_M = 5.0` (not user-configurable yet).
+  - `_TRILAT_FLOOR_AMBIGUITY_RATIO = 0.2` (not user-configurable yet).
 
 ## 5. Input signals and smoothing strategy
 - Trilateration uses `rssi_distance_raw` as input to avoid double-smoothing lag.
 - Add trilat-specific per-anchor EWMA range:
-  - moving: faster alpha.
-  - stationary: slower alpha.
+  - moving: `alpha = 0.40`.
+  - stationary: `alpha = 0.20`.
 - Reset trilat EWMA buffers when selected floor changes to avoid stale cross-floor carryover.
 - Existing Bermuda distance smoothing remains unchanged for current entities and area logic.
 
@@ -47,7 +48,7 @@
   - advert passes existing validity/radius sanity checks.
 - Floor-specific solver anchor set in phase 1:
   - only anchors on chosen floor are passed to 2D solver.
-- If fewer than 3 eligible anchors on chosen floor:
+- If fewer than `_TRILAT_MIN_ANCHORS` eligible anchors on chosen floor:
   - trilat result becomes Unknown (reason: `insufficient_anchors`).
 - Exactly 2 anchors is always Unknown in phase 1.
 
@@ -61,6 +62,9 @@
 - Clarification: floor scoring uses `rssi_filtered`; solver range input uses
   `rssi_distance_raw` with trilat-specific EWMA (Section 5). These are separate pipelines.
 - Sum evidence per floor; best floor competes with current floor.
+- Treat floor decision as ambiguous when `(best_evidence - second_best_evidence) / total_evidence`
+  is `< _TRILAT_FLOOR_AMBIGUITY_RATIO` (phase-1 default `0.2`), and emit
+  Unknown reason `ambiguous_floor` if ambiguity persists through floor hysteresis.
 - Floor switch uses mobility-aware hysteresis policy (same pattern as area policy):
   - moving: shorter dwell / lower margin.
   - stationary: longer dwell / higher margin.
@@ -71,8 +75,11 @@
 - Objective: minimize residuals between solved point and trilat-EWMA ranges.
 - Robust loss: `soft_l1` (or Huber), with uniform anchor weights.
 - Phase 1 weighting is explicitly uniform for deterministic behavior.
+- Initial guess (`x0`) is deterministic:
+  - use last valid `(trilat_x, trilat_y)` as warm start when floor is unchanged and point is still plausible.
+  - otherwise fall back to unweighted centroid of chosen floor anchors.
 - Quality gates:
-  - minimum 3 anchors.
+  - minimum `_TRILAT_MIN_ANCHORS`.
   - residual threshold to reject bad geometry/outlier sets
     (`_TRILAT_MAX_RESIDUAL_M = 5.0` in phase 1).
   - on rejection: trilat result Unknown (reason: `high_residual`).
@@ -93,7 +100,7 @@
 - No restoration of stale last coordinates.
 - Unknown reasons are diagnostic and explicit:
   - `insufficient_anchors`
-  - `ambiguous_floor`
+  - `ambiguous_floor` (as defined in Section 7)
   - `high_residual`
   - `stale_inputs`
 - Unknown is sticky only until new evidence passes gates.
