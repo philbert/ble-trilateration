@@ -8,11 +8,11 @@ from custom_components.bermuda.const import BermudaSecretFilter, redact_secret_h
 
 
 def test_redact_secret_hex32_masks_irk_like_values() -> None:
-    """32-hex secret-like tokens should be masked."""
+    """32-hex secrets should be masked but keep their first 4 chars."""
     msg = "Private BLE Callback registered for bermuda_be40185faff50a6b18019281988aaf0a"
     redacted = redact_secret_hex32(msg)
     assert "be40185faff50a6b18019281988aaf0a" not in redacted
-    assert "[REDACTED_HEX32]" in redacted
+    assert "bermuda_be40[REDACTED_HEX32]" in redacted
 
 
 def test_secret_filter_rewrites_logrecord_message() -> None:
@@ -28,4 +28,10 @@ def test_secret_filter_rewrites_logrecord_message() -> None:
     )
     assert BermudaSecretFilter().filter(record)
     assert "bd11a32a52a032e9f5230de003d8e263" not in record.msg
-    assert "[REDACTED_HEX32]" in record.msg
+    assert "bd11[REDACTED_HEX32]" in record.msg
+
+
+def test_redaction_does_not_mask_short_irk_prefix() -> None:
+    """Short IRK prefixes (for example be40) remain visible."""
+    msg = "IRK does not resolve fc:70:2e:0d:d7:ba with be40"
+    assert redact_secret_hex32(msg) == msg
