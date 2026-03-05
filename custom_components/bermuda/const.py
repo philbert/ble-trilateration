@@ -71,6 +71,33 @@ LOGSPAM_INTERVAL = 22
 # Example: DEBUG_DEVICES = ["Phil's iPhone", "Melinda's Watch", "AA:BB:CC:DD:EE:FF"]
 DEBUG_DEVICES = ["Brown bin"]
 
+SECRET_HEX32_RE: Final = re.compile(r"(?<![0-9a-fA-F])[0-9a-fA-F]{32}(?![0-9a-fA-F])")
+
+
+def redact_secret_hex32(text: str) -> str:
+    """Mask 32-hex secrets (for example IRKs) in log text."""
+    return SECRET_HEX32_RE.sub("[REDACTED_HEX32]", text)
+
+
+class BermudaSecretFilter(logging.Filter):
+    """Redact secret-like tokens from Bermuda log records."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        redacted = redact_secret_hex32(message)
+        if redacted != message:
+            # Replace with fully formatted/redacted text to avoid leaking through args formatting.
+            record.msg = redacted
+            record.args = ()
+        return True
+
+
+def _ensure_secret_filter(logger: logging.Logger) -> None:
+    """Attach the secret redaction filter once per logger."""
+    if any(isinstance(log_filter, BermudaSecretFilter) for log_filter in logger.filters):
+        return
+    logger.addFilter(BermudaSecretFilter())
+
 
 def _debug_norm(value: str | None) -> str:
     """Normalize debug match strings to be case/spacing tolerant."""
@@ -264,6 +291,8 @@ _LOGGER: logging.Logger = logging.getLogger(__package__)
 _LOGGER_SPAM_LESS = BermudaLogSpamLess(_LOGGER, LOGSPAM_INTERVAL)
 _LOGGER_TARGET: logging.Logger = logging.getLogger(f"{__package__}.target")
 _LOGGER_TARGET_SPAM_LESS = BermudaLogSpamLess(_LOGGER_TARGET, LOGSPAM_INTERVAL)
+_ensure_secret_filter(_LOGGER)
+_ensure_secret_filter(_LOGGER_TARGET)
 
 
 STARTUP_MESSAGE = f"""
