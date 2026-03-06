@@ -154,6 +154,7 @@ class BermudaDevice(dict):
         # Per-device trilateration diagnostics.
         self.trilat_x_m: float | None = None
         self.trilat_y_m: float | None = None
+        self.trilat_z_m: float | None = None
         self.trilat_floor_id: str | None = None
         self.trilat_floor_name: str | None = None
         self.trilat_anchor_count: int = 0
@@ -686,6 +687,7 @@ class BermudaDevice(dict):
         """Store trilat Unknown outcome on this device."""
         self.trilat_x_m = None
         self.trilat_y_m = None
+        self.trilat_z_m = None
         self.trilat_floor_id = floor_id
         self.trilat_floor_name = floor_name
         self.trilat_anchor_count = anchor_count
@@ -697,6 +699,7 @@ class BermudaDevice(dict):
         self,
         x_m: float,
         y_m: float,
+        z_m: float | None,
         floor_id: str | None,
         floor_name: str | None,
         anchor_count: int,
@@ -705,6 +708,7 @@ class BermudaDevice(dict):
         """Store trilat solved outcome on this device."""
         self.trilat_x_m = x_m
         self.trilat_y_m = y_m
+        self.trilat_z_m = z_m
         self.trilat_floor_id = floor_id
         self.trilat_floor_name = floor_name
         self.trilat_anchor_count = anchor_count

@@ -108,7 +108,13 @@ from .const import (
     UPDATE_INTERVAL,
     debug_device_match,
 )
-from .trilateration import AnchorMeasurement, anchor_centroid, solve_2d_soft_l1
+from .trilateration import (
+    AnchorMeasurement,
+    anchor_centroid,
+    anchor_centroid_3d,
+    solve_2d_soft_l1,
+    solve_3d_soft_l1,
+)
 from .util import mac_explode_formats, mac_norm
 
 if TYPE_CHECKING:
@@ -1514,11 +1520,15 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         floor_ambiguous_since: float = 0.0
         last_anchor_ids: tuple[str, ...] = ()
         last_anchor_ranges: dict[str, float] = field(default_factory=dict)
+        last_anchor_z: dict[str, float | None] = field(default_factory=dict)
         last_solution_xy: tuple[float, float] | None = None
+        last_solution_z: float | None = None
+        last_solver_dimension: str = "2d"
         last_residual_m: float | None = None
         last_status: str = "unknown"
 
     _TRILAT_MIN_ANCHORS: int = 3
+    _TRILAT_MIN_ANCHORS_3D: int = 4
     _TRILAT_MAX_RESIDUAL_M: float = 5.0
     _TRILAT_FLOOR_AMBIGUITY_RATIO: float = 0.2
     _TRILAT_RANGE_DELTA_EPSILON_M: float = 0.2
@@ -2074,7 +2084,10 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 advert.trilat_range_ewma_m = None
             state.last_anchor_ids = ()
             state.last_anchor_ranges.clear()
+            state.last_anchor_z.clear()
             state.last_solution_xy = None
+            state.last_solution_z = None
+            state.last_solver_dimension = "2d"
             state.last_residual_m = None
 
         anchors: list[AnchorMeasurement] = []
@@ -2111,6 +2124,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                     x_m=float(anchor_x),
                     y_m=float(anchor_y),
                     range_m=float(advert.trilat_range_ewma_m),
+                    z_m=self.get_scanner_anchor_z(scanner.address),
                 )
             )
 
@@ -2136,21 +2150,31 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         anchors.sort(key=lambda anchor: anchor.scanner_address)
         anchor_ids = tuple(anchor.scanner_address for anchor in anchors)
         anchor_ranges = {anchor.scanner_address: anchor.range_m for anchor in anchors}
+        anchor_z = {anchor.scanner_address: anchor.z_m for anchor in anchors}
+        can_solve_3d = (
+            anchor_count >= self._TRILAT_MIN_ANCHORS_3D
+            and all(anchor.z_m is not None for anchor in anchors)
+        )
+        solver_dimension = "3d" if can_solve_3d else "2d"
 
         inputs_changed = (
             state.last_anchor_ids != anchor_ids
             or state.last_solution_xy is None
+            or state.last_solver_dimension != solver_dimension
+            or (solver_dimension == "3d" and state.last_solution_z is None)
             or any(
                 abs(anchor_ranges[address] - state.last_anchor_ranges.get(address, 1e9))
                 >= self._TRILAT_RANGE_DELTA_EPSILON_M
                 for address in anchor_ids
             )
+            or any(anchor_z[address] != state.last_anchor_z.get(address) for address in anchor_ids)
         )
 
         if not inputs_changed and state.last_solution_xy is not None and state.last_residual_m is not None:
             device.set_trilat_solution(
                 x_m=state.last_solution_xy[0],
                 y_m=state.last_solution_xy[1],
+                z_m=state.last_solution_z if state.last_solver_dimension == "3d" else None,
                 floor_id=selected_floor_id,
                 floor_name=selected_floor_name,
                 anchor_count=anchor_count,
@@ -2168,19 +2192,40 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 )
             return
 
-        centroid = anchor_centroid(anchors)
-        initial_guess = centroid
-        if state.last_solution_xy is not None and selected_floor_id == state.floor_id:
-            if math.hypot(
-                state.last_solution_xy[0] - centroid[0],
-                state.last_solution_xy[1] - centroid[1],
-            ) <= self._TRILAT_MAX_RESIDUAL_M:
-                initial_guess = state.last_solution_xy
-
-        solve_result = solve_2d_soft_l1(anchors, initial_guess=initial_guess)
+        if solver_dimension == "3d":
+            centroid_3d = anchor_centroid_3d(anchors)
+            initial_guess_3d = centroid_3d
+            if (
+                state.last_solution_xy is not None
+                and state.last_solution_z is not None
+                and selected_floor_id == state.floor_id
+            ):
+                if math.sqrt(
+                    ((state.last_solution_xy[0] - centroid_3d[0]) ** 2)
+                    + ((state.last_solution_xy[1] - centroid_3d[1]) ** 2)
+                    + ((state.last_solution_z - centroid_3d[2]) ** 2)
+                ) <= self._TRILAT_MAX_RESIDUAL_M:
+                    initial_guess_3d = (
+                        state.last_solution_xy[0],
+                        state.last_solution_xy[1],
+                        state.last_solution_z,
+                    )
+            solve_result = solve_3d_soft_l1(anchors, initial_guess=initial_guess_3d)
+        else:
+            centroid = anchor_centroid(anchors)
+            initial_guess_2d = centroid
+            if state.last_solution_xy is not None and selected_floor_id == state.floor_id:
+                if math.hypot(
+                    state.last_solution_xy[0] - centroid[0],
+                    state.last_solution_xy[1] - centroid[1],
+                ) <= self._TRILAT_MAX_RESIDUAL_M:
+                    initial_guess_2d = state.last_solution_xy
+            solve_result = solve_2d_soft_l1(anchors, initial_guess=initial_guess_2d)
 
         state.last_anchor_ids = anchor_ids
         state.last_anchor_ranges = anchor_ranges
+        state.last_anchor_z = anchor_z
+        state.last_solver_dimension = solver_dimension
 
         if (
             not solve_result.ok
@@ -2188,6 +2233,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             or solve_result.residual_rms_m > self._TRILAT_MAX_RESIDUAL_M
             or solve_result.x_m is None
             or solve_result.y_m is None
+            or (solver_dimension == "3d" and solve_result.z_m is None)
         ):
             device.set_trilat_unknown(
                 "high_residual",
@@ -2196,6 +2242,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 anchor_count=anchor_count,
             )
             state.last_solution_xy = None
+            state.last_solution_z = None
             state.last_residual_m = None
             state.last_status = "unknown"
             if _debug_this_device:
@@ -2213,25 +2260,40 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         device.set_trilat_solution(
             x_m=solve_result.x_m,
             y_m=solve_result.y_m,
+            z_m=solve_result.z_m if solver_dimension == "3d" else None,
             floor_id=selected_floor_id,
             floor_name=selected_floor_name,
             anchor_count=anchor_count,
             residual_m=solve_result.residual_rms_m,
         )
         state.last_solution_xy = (solve_result.x_m, solve_result.y_m)
+        state.last_solution_z = solve_result.z_m if solver_dimension == "3d" else None
         state.last_residual_m = solve_result.residual_rms_m
         state.last_status = "ok"
         if _debug_this_device:
-            _LOGGER_TARGET_SPAM_LESS.debug(
-                f"trilat_ok:{device.address}",
-                "Trilat: %s solved floor=%s anchors=%d x=%.3f y=%.3f residual=%.3f",
-                device.name,
-                selected_floor_name,
-                anchor_count,
-                solve_result.x_m,
-                solve_result.y_m,
-                solve_result.residual_rms_m,
-            )
+            if solver_dimension == "3d" and solve_result.z_m is not None:
+                _LOGGER_TARGET_SPAM_LESS.debug(
+                    f"trilat_ok:{device.address}",
+                    "Trilat: %s solved floor=%s anchors=%d x=%.3f y=%.3f z=%.3f residual=%.3f",
+                    device.name,
+                    selected_floor_name,
+                    anchor_count,
+                    solve_result.x_m,
+                    solve_result.y_m,
+                    solve_result.z_m,
+                    solve_result.residual_rms_m,
+                )
+            else:
+                _LOGGER_TARGET_SPAM_LESS.debug(
+                    f"trilat_ok:{device.address}",
+                    "Trilat: %s solved floor=%s anchors=%d x=%.3f y=%.3f residual=%.3f",
+                    device.name,
+                    selected_floor_name,
+                    anchor_count,
+                    solve_result.x_m,
+                    solve_result.y_m,
+                    solve_result.residual_rms_m,
+                )
 
     def _refresh_scanners(self, force=False):
         """

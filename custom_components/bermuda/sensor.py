@@ -81,6 +81,7 @@ async def async_setup_entry(
             entities.append(BermudaSensorMobilityMode(coordinator, entry, address))
             entities.append(BermudaSensorTrilatX(coordinator, entry, address))
             entities.append(BermudaSensorTrilatY(coordinator, entry, address))
+            entities.append(BermudaSensorTrilatZ(coordinator, entry, address))
             entities.append(BermudaSensorTrilatFloor(coordinator, entry, address))
             entities.append(BermudaSensorTrilatAnchorCount(coordinator, entry, address))
             entities.append(BermudaSensorTrilatStatus(coordinator, entry, address))
@@ -524,6 +525,25 @@ class BermudaSensorTrilatY(BermudaSensorTrilatX):
         if y_val is None:
             return None
         return round(y_val, 3)
+
+
+class BermudaSensorTrilatZ(BermudaSensorTrilatX):
+    """Diagnostic sensor for trilat Z coordinate."""
+
+    @property
+    def unique_id(self):
+        return f"{self._device.unique_id}_trilat_z"
+
+    @property
+    def name(self):
+        return "Trilat Z"
+
+    @property
+    def native_value(self):
+        z_val = getattr(self._device, "trilat_z_m", None)
+        if z_val is None:
+            return None
+        return round(z_val, 3)
 
 
 class BermudaSensorTrilatFloor(BermudaSensor):

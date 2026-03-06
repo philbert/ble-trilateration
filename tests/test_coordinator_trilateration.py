@@ -28,6 +28,7 @@ class _DummyDevice:
         self.trilat_anchor_count = 0
         self.trilat_x_m = None
         self.trilat_y_m = None
+        self.trilat_z_m = None
         self.trilat_residual_m = None
 
     def get_mobility_type(self):
@@ -41,13 +42,15 @@ class _DummyDevice:
         self.trilat_anchor_count = anchor_count
         self.trilat_x_m = None
         self.trilat_y_m = None
+        self.trilat_z_m = None
         self.trilat_residual_m = None
 
-    def set_trilat_solution(self, x_m, y_m, floor_id, floor_name, anchor_count, residual_m):
+    def set_trilat_solution(self, x_m, y_m, z_m, floor_id, floor_name, anchor_count, residual_m):
         self.trilat_status = "ok"
         self.trilat_reason = "ok"
         self.trilat_x_m = x_m
         self.trilat_y_m = y_m
+        self.trilat_z_m = z_m
         self.trilat_floor_id = floor_id
         self.trilat_floor_name = floor_name
         self.trilat_anchor_count = anchor_count
@@ -81,6 +84,7 @@ def _make_coordinator():
     )
     coordinator.get_scanner_anchor_x = lambda scanner_addr: getattr(coordinator.devices.get(scanner_addr), "anchor_x_m", None)
     coordinator.get_scanner_anchor_y = lambda scanner_addr: getattr(coordinator.devices.get(scanner_addr), "anchor_y_m", None)
+    coordinator.get_scanner_anchor_z = lambda scanner_addr: getattr(coordinator.devices.get(scanner_addr), "anchor_z_m", None)
     coordinator.trilat_cross_floor_penalty_db = lambda: 8.0
     return coordinator
 
@@ -101,7 +105,7 @@ def test_trilat_unknown_when_inputs_stale():
     assert device.trilat_reason == "stale_inputs"
 
 
-def _make_scanner(coordinator, address, floor_id, x_m, y_m, anchor_enabled=True):
+def _make_scanner(coordinator, address, floor_id, x_m, y_m, anchor_enabled=True, z_m=None):
     """Helper: register a scanner device in the coordinator."""
     sc = SimpleNamespace(
         address=address,
@@ -109,6 +113,7 @@ def _make_scanner(coordinator, address, floor_id, x_m, y_m, anchor_enabled=True)
         anchor_enabled=anchor_enabled,
         anchor_x_m=x_m,
         anchor_y_m=y_m,
+        anchor_z_m=z_m,
     )
     coordinator.devices[address] = sc
     return sc
@@ -312,6 +317,61 @@ def test_solve_runs_when_delta_crosses_threshold():
     coordinator._refresh_trilateration_for_device(device)
     assert device.trilat_status == "ok"
     assert device.trilat_reason != "skip_unchanged_inputs"
+
+
+def test_trilat_3d_solves_when_four_anchors_have_z():
+    """Four same-floor anchors with z coordinates should produce trilat z output."""
+    coordinator = _make_coordinator()
+    device = _DummyDevice("dev-3d")
+
+    sc_a = _make_scanner(coordinator, "3d-a", "f1", 0.0, 0.0, z_m=0.0)
+    sc_b = _make_scanner(coordinator, "3d-b", "f1", 2.0, 0.0, z_m=0.0)
+    sc_c = _make_scanner(coordinator, "3d-c", "f1", 0.0, 2.0, z_m=0.0)
+    sc_d = _make_scanner(coordinator, "3d-d", "f1", 0.0, 0.0, z_m=2.0)
+
+    fresh = time.monotonic()
+    # Target point is (1, 1, 1): distance to all anchors is sqrt(3).
+    dist = 3.0**0.5
+    device.adverts = {
+        ("dev-3d", sc_a.address): _make_advert(sc_a, fresh, -70.0, dist),
+        ("dev-3d", sc_b.address): _make_advert(sc_b, fresh, -70.0, dist),
+        ("dev-3d", sc_c.address): _make_advert(sc_c, fresh, -70.0, dist),
+        ("dev-3d", sc_d.address): _make_advert(sc_d, fresh, -70.0, dist),
+    }
+
+    coordinator._refresh_trilateration_for_device(device)
+
+    assert device.trilat_status == "ok"
+    assert device.trilat_z_m is not None
+    assert abs(device.trilat_x_m - 1.0) < 0.2
+    assert abs(device.trilat_y_m - 1.0) < 0.2
+    assert abs(device.trilat_z_m - 1.0) < 0.2
+
+
+def test_trilat_falls_back_to_2d_when_any_anchor_z_missing():
+    """When z is incomplete, solve should remain valid but z output should be None."""
+    coordinator = _make_coordinator()
+    device = _DummyDevice("dev-2d-fallback")
+
+    sc_a = _make_scanner(coordinator, "2d-a", "f1", 0.0, 0.0, z_m=0.0)
+    sc_b = _make_scanner(coordinator, "2d-b", "f1", 2.0, 0.0, z_m=0.0)
+    sc_c = _make_scanner(coordinator, "2d-c", "f1", 0.0, 2.0, z_m=0.0)
+    sc_d = _make_scanner(coordinator, "2d-d", "f1", 2.0, 2.0, z_m=None)
+
+    fresh = time.monotonic()
+    # Target point is (1, 1) in 2D: distance to all corners is sqrt(2).
+    dist = 2.0**0.5
+    device.adverts = {
+        ("dev-2d-fallback", sc_a.address): _make_advert(sc_a, fresh, -70.0, dist),
+        ("dev-2d-fallback", sc_b.address): _make_advert(sc_b, fresh, -70.0, dist),
+        ("dev-2d-fallback", sc_c.address): _make_advert(sc_c, fresh, -70.0, dist),
+        ("dev-2d-fallback", sc_d.address): _make_advert(sc_d, fresh, -70.0, dist),
+    }
+
+    coordinator._refresh_trilateration_for_device(device)
+
+    assert device.trilat_status == "ok"
+    assert device.trilat_z_m is None
 
 
 def test_high_residual_yields_unknown():
