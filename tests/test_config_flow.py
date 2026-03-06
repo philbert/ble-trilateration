@@ -15,8 +15,6 @@ from custom_components.bermuda.const import NAME
 
 # from .const import MOCK_OPTIONS
 from .const import MOCK_CONFIG
-from .const import MOCK_OPTIONS_GLOBALS
-
 
 # Here we simiulate a successful config flow from the backend.
 # Note that we use the `bypass_get_data` fixture here because
@@ -63,31 +61,12 @@ async def test_failed_config_flow(hass, error_on_get_data):
 
 # Our config flow also has an options flow, so we must test it as well.
 async def test_options_flow(hass: HomeAssistant, setup_bermuda_entry: MockConfigEntry):
-    """Test an options flow."""
-    # Go through options flow
+    """Test the slimmed options flow menu."""
     result = await hass.config_entries.options.async_init(setup_bermuda_entry.entry_id)
 
-    # Verify that the first options step is a user form
     assert result.get("type") == FlowResultType.MENU
     assert result.get("step_id") == "init"
-
-    # select the globalopts menu option
-    result = await hass.config_entries.options.async_configure(
-        result["flow_id"], user_input={"next_step_id": "globalopts"}
-    )
-
-    assert result.get("type") == FlowResultType.FORM
-    assert result.get("step_id") == "globalopts"
-
-    # Enter some fake data into the form
-    result = await hass.config_entries.options.async_configure(
-        result["flow_id"],
-        user_input=MOCK_OPTIONS_GLOBALS,
-    )
-
-    # Verify that the flow finishes
-    assert result.get("type") == FlowResultType.CREATE_ENTRY
-    assert result.get("title") == NAME
-
-    # Verify that the options were updated
-    assert setup_bermuda_entry.options == MOCK_OPTIONS_GLOBALS
+    assert result.get("menu_options") == {
+        "selectdevices": "Select Devices",
+        "calibration_samples": "Calibration Samples",
+    }

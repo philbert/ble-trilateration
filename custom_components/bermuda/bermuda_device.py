@@ -720,6 +720,51 @@ class BermudaDevice(dict):
         self.trilat_reason = "ok"
         self.trilat_residual_m = residual_m
 
+    def apply_position_classification(
+        self,
+        area_id: str | None,
+        *,
+        floor_id: str | None = None,
+        floor_name: str | None = None,
+        force_unknown: bool = False,
+    ) -> None:
+        """Apply room attribution derived from solved position rather than a scanner."""
+        old_area = self.area_name
+        self.area_advert = None
+        self.area_distance = None
+        self.area_rssi = None
+
+        if area_id is not None:
+            self._update_area_and_floor(area_id, force_unknown=False)
+            self.area_last_seen = self.area_name
+            self.area_last_seen_id = self.area_id
+            self.area_last_seen_icon = self.area_icon
+        else:
+            self.area = None
+            self.area_id = None
+            self.area_name = AREA_NAME_UNKNOWN if force_unknown else None
+            self.area_icon = ICON_DEFAULT_AREA
+            self.area_is_unknown = force_unknown
+            self.floor = None
+            self.floor_id = floor_id
+            self.floor_name = floor_name
+            self.floor_icon = ICON_DEFAULT_FLOOR
+            self.floor_level = None
+            if floor_id is not None:
+                self.floor = self.fr.async_get_floor(floor_id)
+                if self.floor is not None:
+                    self.floor_name = self.floor.name
+                    self.floor_icon = self.floor.icon or ICON_DEFAULT_FLOOR
+                    self.floor_level = self.floor.level
+
+        if (old_area != self.area_name) and self.create_sensor:
+            _LOGGER.debug(
+                "Device %s was in '%s', now '%s'",
+                self.name,
+                old_area,
+                self.area_name,
+            )
+
     def apply_scanner_selection(self, bermuda_advert: BermudaAdvert | None, force_unknown: bool = False):
         """
         Given a BermudaAdvert entry, apply the distance and area attributes
