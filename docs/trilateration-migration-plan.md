@@ -157,7 +157,7 @@ Start with the simplest useful model:
 - global slope/path-loss term,
 - global intercept term,
 - per-scanner bias term,
-- optional per-device bias term when there are enough samples for that device.
+- optional per-device bias term when there are enough samples for that device (same K ≥ 3 threshold as scanner bias, fitted as additional categorical columns in the same lstsq design matrix as the scanner bias terms).
 
 That model directly replaces the combined effect of:
 
@@ -197,6 +197,44 @@ Model rebuild triggers should also be explicit:
 - build once at coordinator startup,
 - rebuild whenever a sample is added or deleted,
 - rebuild whenever the active `anchor_layout_hash` changes.
+
+### How `sigma_m` is derived
+
+`sigma_m` is the model's per-anchor range uncertainty in metres at the current estimated range. It is derived in two steps.
+
+**Step 1 — fit-time: compute per-scanner RSSI RMSE from training residuals.**
+
+After `lstsq` fitting, for each scanner compute the root mean squared error over its training rows:
+
+```
+rssi_rmse_scanner = sqrt(mean((rssi_predicted - rssi_observed)²))
+```
+
+If a scanner has fewer than the minimum sample threshold, use the global RSSI RMSE across all training rows as its fallback. Store these per-scanner RMSE values in the fitted model object.
+
+**Step 2 — runtime: propagate RSSI uncertainty to range uncertainty.**
+
+The derivative of the log-distance model with respect to distance is:
+
+```
+d(RSSI)/d(distance) = -10 * n / (distance * ln(10))
+```
+
+Inverting this gives the range uncertainty for a given RSSI uncertainty:
+
+```
+sigma_m = sigma_rssi * distance * ln(10) / (10 * n)
+```
+
+At runtime, `sigma_rssi` is the per-scanner training RMSE from step 1. This makes `sigma_m` grow with range, which is physically correct: a 3 dB RSSI error at 10 m implies a much larger range error than the same 3 dB error at 1 m.
+
+Optionally, blend with live RSSI dispersion from `BermudaAdvert.rssi_dispersion` if that value is available:
+
+```
+sigma_rssi_effective = max(sigma_rssi_model, live_rssi_dispersion)
+```
+
+This ensures that a temporarily noisy signal inflates the uncertainty gate even when the model itself was well-fitted.
 
 Transitional fallback behavior must be explicit:
 
@@ -274,7 +312,7 @@ Use:
 - `rssi_mad` from calibration samples,
 - solve residual,
 - anchor count,
-- geometry quality,
+- geometry quality is deferred in Phase 3; anchor count is the practical proxy until a stronger geometric metric is added later,
 - room-classifier margin.
 
 That becomes the basis for:
@@ -363,7 +401,7 @@ Notes:
 2. Fit the first global-plus-scanner-bias model.
 3. Expose a coordinator-owned ranging-model service object.
 4. Wire rebuild triggers from calibration sample add/delete operations and anchor-layout changes.
-5. Add tests with synthetic anchors and synthetic samples to verify learned ranges are closer to truth than the fixed formula.
+5. Add tests with synthetic geometry: place an anchor at a known position, create a synthetic sample at a known position with a specific `rssi_median`, verify that after fitting `estimate_range()` returns a value within 15% of the true geometric distance, and that this error is smaller than what `rssi_to_metres()` produces with default parameters for the same RSSI value. Also test that fitting is refused when fewer than 5 training pairs exist, and that `sigma_m` grows with range for a fixed `sigma_rssi`.
 
 ### Phase 3: switch trilat to the learned model
 
@@ -371,7 +409,7 @@ Notes:
 2. Feed the learned range and uncertainty into trilateration.
 3. Replace `max_radius` gates with uncertainty and residual gates.
 4. If no fitted model exists for the current `anchor_layout_hash`, use the transitional legacy fallback and cap confidence low.
-5. Keep the old area resolver only as a temporary fallback during this phase.
+5. The area resolver continues to operate normally during this phase since room attribution has not yet changed. It is deleted at the start of Phase 4, not retained beyond it.
 
 ### Phase 4: room attribution from solved position
 
@@ -379,14 +417,14 @@ Notes:
 2. Use trilat position as the primary room input.
 3. Reuse the existing per-device `AreaDecisionState` by adding position-challenger fields there rather than inventing a second parallel state holder.
 4. Apply a dwell gate before committing room transitions so solve jitter does not flap rooms at boundaries.
-5. Use this explicit fallback chain:
+5. Delete the nearest-scanner area winner path at the start of this phase. Room attribution comes exclusively from solved position hereafter.
+6. Use this explicit fallback chain:
    - trilat has a usable solve and the classifier has trained rooms on this floor: use position-based room attribution,
-   - trilat has a usable solve but the floor has no trained rooms: fall back to scanner-based area,
-   - trilat is `unknown`: fall back to scanner-based area,
-   - classifier result exists but misses the margin requirement: return `Unknown`,
-   - no samples exist for the current `anchor_layout_hash`: fall back to scanner-based area until the layout is trained.
-6. Add a calibration-samples warning when the current anchor layout has fewer trained rooms than the previous layout, so anchor moves clearly signal recapture work.
-7. Delete the nearest-scanner area winner path only after the fallback cases above are either handled or intentionally retired.
+   - trilat has a usable solve but the floor has no trained rooms on this layout: keep floor attribution separate and report room/area as `Unknown`,
+   - trilat is `unknown`: keep floor attribution separate and report room/area as `Unknown`,
+   - classifier result exists but misses the margin requirement: report room/area as `Unknown`,
+   - no samples exist for the current `anchor_layout_hash`: keep floor attribution separate and report room/area as `Unknown` until the layout is trained.
+7. Add a calibration-samples warning when the current anchor layout has fewer trained rooms than the previous layout, so anchor moves clearly signal recapture work.
 
 ### Phase 5: automatic mobility mode
 
@@ -427,7 +465,7 @@ should land together so manually calibrated users see one intentional breaking c
 - Anchor moves also make rooms appear to disappear until the new layout is resampled. The UI should warn about this explicitly.
 - Some devices will have few or no per-device samples. The model must back off cleanly to global or scanner-level parameters.
 - Full deletion of `ref_power` should happen only after the learned model is proven to cover low-sample devices acceptably.
-- Rooms with no calibration samples on the current floor are untrained. The system should fall back to scanner-based area rather than punish partial sample coverage.
+- Rooms with no calibration samples on the current floor are untrained. The device should keep floor attribution separate and report room/area as `Unknown` rather than fabricating a room from the floor name.
 - Manually calibrated users will lose `attenuation`, `rssi_offset`, and `ref_power` as durable user settings in Phase 6. That is a deliberate breaking change and should be called out in release notes.
 - Users who want the new model to reflect their environment should capture calibration samples before or during the Phase 3 to Phase 6 transition.
 
