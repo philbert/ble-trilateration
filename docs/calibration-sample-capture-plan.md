@@ -104,15 +104,50 @@ Expected behavior:
 
 1. Validate inputs.
 2. Start a capture session for the selected device.
-3. Collect scanner observations for the requested duration.
-4. Aggregate observations into a sample.
-5. Evaluate sample quality.
-6. Persist the sample.
-7. Return structured result data.
+3. Return immediately with session metadata.
+4. Collect scanner observations asynchronously for the requested duration.
+5. Aggregate observations into a sample.
+6. Evaluate sample quality.
+7. Persist the sample.
 
 The service should work even if the user invokes it manually from a script or Developer Tools.
 
-### 5.2 Config flow for management
+### 5.2 Async execution contract
+
+The recorder service must not block for 60 seconds.
+
+Expected behavior:
+
+1. The service validates inputs.
+2. The service starts an in-memory capture session.
+3. The service returns immediately with session metadata.
+4. The actual recording happens asynchronously.
+5. On completion, Bermuda persists the sample and emits a completion signal.
+
+Recommended immediate service response fields:
+
+- `session_id`
+- `started_at`
+- `device_id`
+- `room_area_id`
+- `duration_s`
+
+Recommended completion signal:
+
+- Home Assistant event `bermuda_calibration_sample_captured`
+
+Recommended completion event payload:
+
+- `session_id`
+- `sample_id`
+- `device_id`
+- `room_area_id`
+- `quality_status`
+- `quality_reason`
+
+If the integration unloads or restarts mid-capture, the session should terminate cleanly and emit a failure result rather than hanging indefinitely.
+
+### 5.3 Config flow for management
 
 Add a new top-level Bermuda config flow menu entry:
 
@@ -142,6 +177,17 @@ Responsibilities:
 
 Phase 1 should support one active session per target device. It is acceptable to support only one active global session initially if that simplifies implementation.
 
+Observation collection should hook the existing coordinator update cycle rather than raw BLE advertisement callbacks.
+
+At each coordinator refresh during the capture window, the session should snapshot the current `BermudaAdvert` values for the target device and append them into the sample aggregator.
+
+This is preferred because:
+
+- it reuses Bermuda's existing observation pipeline
+- it avoids introducing a second BLE collection path
+- it naturally aligns with the proposed 1-second bucket model
+- it minimizes risk for a non-breaking first phase
+
 ## 7. What To Capture
 
 For each sample, Bermuda should store:
@@ -158,6 +204,8 @@ Room is required because the eventual system resolves to a room name.
 
 Coordinates are required because they are the physical truth used later for model fitting.
 
+Phase 1 should explicitly allow room and coordinates to disagree. Room is the user's declared semantic label. Coordinates are the user's declared physical truth. Bermuda should store both without attempting to validate that the point lies inside the named room.
+
 ## 8. Recommended Stored Shape
 
 Store sample records in Bermuda-owned persistent storage, not config entry options.
@@ -171,6 +219,7 @@ Recommended logical structure:
   "duration_s": 60,
   "device_id": "device_registry_id",
   "device_name": "Phil Phone",
+  "device_address": "AA:BB:CC:DD:EE:FF",
   "room_area_id": "living_room",
   "room_name": "Living Room",
   "position": {
@@ -183,6 +232,11 @@ Recommended logical structure:
   "anchors": {
     "AA:BB:CC:DD:EE:FF": {
       "scanner_name": "Living room proxy",
+      "anchor_position": {
+        "x_m": 5.0,
+        "y_m": 2.0,
+        "z_m": 2.2
+      },
       "packet_count": 84,
       "rssi_median": -71.5,
       "rssi_mean": -71.2,
@@ -209,6 +263,8 @@ Notes:
 
 - `room_area_id` is the canonical room key
 - `room_name` is a display snapshot
+- `device_address` is stored as a secondary stable identity hint
+- anchor coordinates are stored per observation so a sample remains self-contained even if anchors move later
 - 1-second buckets are a useful compromise between raw packet storage and summary-only storage
 - per-anchor summaries should be sufficient for phase 1 and still useful later
 
@@ -226,6 +282,14 @@ Recommended stores:
 - optionally later `calibration_model`
 
 In this phase, only `calibration_samples` is needed.
+
+Phase 1 should also define a soft retention policy so storage cannot grow without bound.
+
+Recommended initial policy:
+
+- no hard sample cap
+- warn in management views once sample count exceeds `500`
+- support manual deletion and bulk-clear actions from config flow
 
 Samples must not be stored in:
 
@@ -253,6 +317,18 @@ The hash should be derived from the current enabled anchors and their coordinate
 
 This enables future handling of moved anchors without deleting history.
 
+Recommended algorithm:
+
+1. Build a sorted list of tuples containing:
+   - scanner address
+   - anchor enabled state
+   - `x_m`
+   - `y_m`
+   - `z_m`
+2. Serialize the list deterministically as JSON.
+3. Compute SHA-256 over that JSON.
+4. Store a short display prefix and the full hash for internal comparison.
+
 Phase 1 behavior:
 
 - capture and store the hash
@@ -267,7 +343,8 @@ Phase 1 should include simple and conservative sample quality checks.
 
 Suggested checks:
 
-- minimum number of visible anchors
+- reject if fewer than `1` anchor is visible for the entire session
+- mark `poor_quality` if fewer than `3` anchors have usable observations
 - minimum packets from at least one anchor
 - session duration actually completed
 - sample not empty
@@ -339,11 +416,12 @@ The new feature should be additive only.
 ## 15. Suggested Implementation Order
 
 1. Add a calibration storage manager.
-2. Add a calibration session recorder.
-3. Add `bermuda.record_calibration_sample`.
-4. Persist finalized samples with quality metadata.
-5. Add config flow sample-management views.
-6. Add tests for storage, capture, and deletion flows.
+2. Add anchor-layout hash generation utilities.
+3. Add a calibration session recorder.
+4. Add `bermuda.record_calibration_sample`.
+5. Persist finalized samples with quality metadata.
+6. Add config flow sample-management views.
+7. Add tests for storage, capture, and deletion flows.
 
 ## 16. Test Scope For This Phase
 
@@ -351,6 +429,7 @@ Tests should cover:
 
 - service validation
 - session start/finish lifecycle
+- async completion event emission
 - observation aggregation
 - quality classification
 - persistent sample save/load
