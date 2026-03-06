@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
+import inspect
 import json
 import statistics
 from copy import deepcopy
@@ -83,6 +84,7 @@ class BermudaCalibrationManager:
         self._store = store
         self._sessions: dict[str, _CalibrationSession] = {}
         self._session_tasks: dict[str, asyncio.Task[None]] = {}
+        self._change_callbacks: list = []
 
     async def async_initialize(self) -> None:
         """Load persistent calibration data."""
@@ -154,21 +156,37 @@ class BermudaCalibrationManager:
             }
         return device_map
 
+    def register_change_callback(self, callback) -> None:
+        """Register a callback fired after stored samples change."""
+        self._change_callbacks.append(callback)
+
     async def async_delete_sample(self, sample_id: str) -> bool:
         """Delete one persisted sample."""
-        return await self._store.async_delete_sample(sample_id)
+        deleted = await self._store.async_delete_sample(sample_id)
+        if deleted:
+            await self._async_notify_changed()
+        return deleted
 
     async def async_clear_all(self) -> int:
         """Delete all persisted samples."""
-        return await self._store.async_clear_all()
+        removed = await self._store.async_clear_all()
+        if removed:
+            await self._async_notify_changed()
+        return removed
 
     async def async_clear_device(self, device_id: str) -> int:
         """Delete all samples for one device."""
-        return await self._store.async_clear_device(device_id)
+        removed = await self._store.async_clear_device(device_id)
+        if removed:
+            await self._async_notify_changed()
+        return removed
 
     async def async_clear_current_anchor_layout(self) -> int:
         """Delete samples that match the current anchor layout."""
-        return await self._store.async_clear_anchor_layout(self.current_anchor_layout_hash)
+        removed = await self._store.async_clear_anchor_layout(self.current_anchor_layout_hash)
+        if removed:
+            await self._async_notify_changed()
+        return removed
 
     async def async_start_session(
         self,
@@ -327,6 +345,7 @@ class BermudaCalibrationManager:
         if quality["status"] in {CALIBRATION_QUALITY_ACCEPTED, CALIBRATION_QUALITY_POOR}:
             await self._store.async_add_sample(sample)
             sample_id = sample["id"]
+            await self._async_notify_changed()
         self._emit_completion_event(
             session=session,
             sample_id=sample_id,
@@ -414,6 +433,13 @@ class BermudaCalibrationManager:
             return 0.0
         median = statistics.median(values)
         return float(statistics.median(abs(value - median) for value in values))
+
+    async def _async_notify_changed(self) -> None:
+        """Fire registered sample-change callbacks."""
+        for callback in list(self._change_callbacks):
+            result = callback()
+            if inspect.isawaitable(result):
+                await result
 
     def _emit_completion_event(
         self,

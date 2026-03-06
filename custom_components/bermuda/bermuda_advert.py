@@ -95,6 +95,8 @@ class BermudaAdvert(dict):
         self.tx_power: float | None = None
         self.rssi_distance: float | None = None
         self.rssi_distance_raw: float
+        self.rssi_distance_sigma_m: float | None = None
+        self.ranging_source: str = "legacy_fallback"
         self.trilat_range_ewma_m: float | None = None
         self.stale_update_count = 0  # How many times we did an update but no new stamps were found.
         self.hist_stamp: list[float] = []
@@ -327,7 +329,7 @@ class BermudaAdvert(dict):
         """
         Apply robust outlier handling + EMA and update dispersion metrics.
 
-        adjusted_rssi is expected to be raw_rssi plus scanner-specific offset.
+        adjusted_rssi is the RSSI series used for filtering and variance estimation.
         """
         window, alpha, outlier_db = self._rssi_filter_policy()
         prior = self.hist_rssi_adjusted[:window]
@@ -382,34 +384,52 @@ class BermudaAdvert(dict):
         immediately, perhaps between cycles, in order to reflect a
         setting change (such as altering a device's ref_power setting).
         """
-        # Check if we should use a device-based ref_power
-        if self.ref_power == 0:  # No user-supplied per-device value
-            # use global default
-            ref_power = self.conf_ref_power
+        raw_rssi = float(self.rssi or -127.0)
+        self.rssi_adjusted_raw = raw_rssi
+        filtered_rssi = self._update_filtered_rssi(raw_rssi)
+
+        estimate = self._coordinator.estimate_sampled_range(
+            scanner_address=self.scanner_address,
+            device=self._device,
+            filtered_rssi=filtered_rssi,
+            live_rssi_dispersion=self.rssi_dispersion,
+        )
+        if estimate is not None:
+            distance = estimate.range_m
+            self.rssi_distance_sigma_m = estimate.sigma_m
+            self.ranging_source = estimate.source
+            ref_power = None
+            attenuation = None
+            adjusted_for_fallback = None
         else:
-            ref_power = self.ref_power
+            # Check if we should use a device-based ref_power
+            if self.ref_power == 0:  # No user-supplied per-device value
+                ref_power = self.conf_ref_power
+            else:
+                ref_power = self.ref_power
 
-        adjusted_rssi = (self.rssi or -127.0) + self.conf_rssi_offset
-        self.rssi_adjusted_raw = adjusted_rssi
-        filtered_rssi = self._update_filtered_rssi(adjusted_rssi)
-
-        distance = rssi_to_metres(filtered_rssi, ref_power, self.conf_attenuation)
+            adjusted_for_fallback = filtered_rssi + self.conf_rssi_offset
+            distance = rssi_to_metres(adjusted_for_fallback, ref_power, self.conf_attenuation)
+            self.rssi_distance_sigma_m = None
+            self.ranging_source = "legacy_fallback"
+            attenuation = self.conf_attenuation
         if self._debug_this_device():
             _LOGGER_TARGET_SPAM_LESS.debug(
                 f"distance_calc:{self.device_address}:{self.scanner_address}",
                 (
-                    "Distance calc for %s->%s: raw_rssi=%s, offset=%s, adjusted=%.2f, filtered=%.2f,"
-                    " dispersion=%.2f, ref_power=%s, attenuation=%s, distance=%.2fm"
+                    "Distance calc for %s->%s: raw_rssi=%s, offset=%s, filtered=%.2f,"
+                    " dispersion=%.2f, ref_power=%s, attenuation=%s, sigma=%s, source=%s, distance=%.2fm"
                 ),
                 self._device.prefname,
                 self.scanner_device.name,
                 self.rssi,
                 self.conf_rssi_offset,
-                adjusted_rssi,
                 filtered_rssi,
                 self.rssi_dispersion,
                 ref_power,
-                self.conf_attenuation,
+                attenuation,
+                f"{self.rssi_distance_sigma_m:.2f}" if self.rssi_distance_sigma_m is not None else "None",
+                self.ranging_source,
                 distance,
             )
         self.rssi_distance_raw = distance

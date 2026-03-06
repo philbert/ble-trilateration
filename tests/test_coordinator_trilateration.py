@@ -71,6 +71,7 @@ def _make_advert(scanner, stamp, rssi, distance_raw):
         conf_rssi_offset=0.0,
         rssi_distance_raw=distance_raw,
         rssi_distance=distance_raw,
+        rssi_distance_sigma_m=0.8,
         trilat_range_ewma_m=None,
     )
 

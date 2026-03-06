@@ -23,6 +23,7 @@ def mock_coordinator():
     coordinator.get_scanner_rssi_offset.return_value = 5
     coordinator.get_scanner_attenuation.return_value = 2.0
     coordinator.get_scanner_max_radius.return_value = 20.0
+    coordinator.estimate_sampled_range.return_value = None
     coordinator.reload_all_advert_configs = MagicMock()
     return coordinator
 
@@ -200,3 +201,20 @@ def test_mobility_changes_ema_responsiveness(bermuda_advert, mock_parent_device)
     stationary = bermuda_advert._update_filtered_rssi(-70.0)
 
     assert moving > stationary
+
+
+def test_sampled_range_estimate_takes_priority(bermuda_advert, mock_coordinator):
+    """A learned sample-derived range should override the legacy fallback."""
+    mock_coordinator.estimate_sampled_range.return_value = MagicMock(
+        range_m=2.75,
+        sigma_m=0.6,
+        source="learned",
+    )
+    bermuda_advert.rssi = -68
+
+    distance = bermuda_advert._update_raw_distance(reading_is_new=False)
+
+    assert distance == pytest.approx(2.75)
+    assert bermuda_advert.rssi_distance_raw == pytest.approx(2.75)
+    assert bermuda_advert.rssi_distance_sigma_m == pytest.approx(0.6)
+    assert bermuda_advert.ranging_source == "learned"

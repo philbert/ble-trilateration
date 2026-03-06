@@ -60,6 +60,8 @@ from .bermuda_device import BermudaDevice
 from .calibration import BermudaCalibrationManager
 from .calibration_store import BermudaCalibrationStore
 from .bermuda_irk import BermudaIrkManager
+from .ranging_model import BermudaRangingModel
+from .room_classifier import BermudaRoomClassifier
 from .const import (
     _LOGGER,
     _LOGGER_SPAM_LESS,
@@ -248,6 +250,8 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         self._trilat_scanners_without_anchors: list[str] | None = None
         self.calibration_store = BermudaCalibrationStore(hass, entry.entry_id)
         self.calibration = BermudaCalibrationManager(hass, self, self.calibration_store)
+        self.ranging_model = BermudaRangingModel(self.calibration)
+        self.room_classifier = BermudaRoomClassifier(self.calibration, self.ar)
 
         # Track the list of Private BLE devices, noting their entity id
         # and current "last address".
@@ -377,10 +381,17 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
     async def async_initialize(self) -> None:
         """Initialize coordinator-owned subsystems after setup."""
         await self.calibration.async_initialize()
+        self.calibration.register_change_callback(self.async_handle_calibration_samples_changed)
+        await self.async_handle_calibration_samples_changed()
 
     async def async_shutdown(self) -> None:
         """Tear down coordinator-owned subsystems."""
         await self.calibration.async_shutdown()
+
+    async def async_handle_calibration_samples_changed(self) -> None:
+        """Rebuild sample-derived runtime helpers after calibration data changes."""
+        await self.ranging_model.async_rebuild()
+        await self.room_classifier.async_rebuild()
 
     @property
     def get_scanners(self) -> set[BermudaDevice]:
@@ -455,6 +466,38 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
 
         # Fall back to global default
         return self.options.get(CONF_MAX_RADIUS, DEFAULT_MAX_RADIUS)
+
+    def current_anchor_layout_hash(self) -> str:
+        """Return the active anchor layout hash."""
+        return self.calibration.current_anchor_layout_hash
+
+    def get_registry_id_for_device(self, device: BermudaDevice) -> str | None:
+        """Return the HA device registry id for a Bermuda device when available."""
+        if ":" in device.address:
+            if registry_device := self.dr.async_get_device(connections={(dr.CONNECTION_BLUETOOTH, device.address.upper())}):
+                return registry_device.id
+        if registry_device := self.dr.async_get_device(connections={(DOMAIN_PRIVATE_BLE_DEVICE, device.address)}):
+            return registry_device.id
+        if registry_device := self.dr.async_get_device(connections={("ibeacon", device.address)}):
+            return registry_device.id
+        return None
+
+    def estimate_sampled_range(
+        self,
+        *,
+        scanner_address: str,
+        device: BermudaDevice,
+        filtered_rssi: float | None,
+        live_rssi_dispersion: float | None = None,
+    ):
+        """Estimate range for one advert using the sample-derived model."""
+        return self.ranging_model.estimate_range(
+            layout_hash=self.current_anchor_layout_hash(),
+            scanner_address=scanner_address,
+            device_id=self.get_registry_id_for_device(device),
+            filtered_rssi=filtered_rssi,
+            live_rssi_dispersion=live_rssi_dispersion,
+        )
 
     def get_scanner_anchor_enabled(self, scanner_address: str) -> bool:
         """Return whether scanner should be used as a trilat anchor."""
@@ -853,8 +896,11 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 # Recalculate smoothed distances, last_seen etc
                 device.calculate_data()
 
-            self._refresh_areas_by_min_distance()
             self._refresh_trilateration()
+            if self.trilat_enabled():
+                self._refresh_areas_from_trilat()
+            else:
+                self._refresh_areas_by_min_distance()
             self.calibration.capture_update()
 
             # We might need to freshen deliberately on first start if no new scanners
@@ -1437,6 +1483,61 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             ):
                 self._refresh_area_by_min_distance(device)
 
+    def _refresh_areas_from_trilat(self) -> None:
+        """Set room/area for tracked devices from trilat output."""
+        layout_hash = self.current_anchor_layout_hash()
+        for device in self.devices.values():
+            if not device.create_sensor:
+                continue
+            self._refresh_area_from_trilat(device, layout_hash)
+
+    def _refresh_area_from_trilat(self, device: BermudaDevice, layout_hash: str) -> None:
+        """Resolve one device room from trilat position and trained samples."""
+        if (
+            device.trilat_status not in {"ok", "low_confidence"}
+            or device.trilat_x_m is None
+            or device.trilat_y_m is None
+        ):
+            device.apply_position_classification(
+                None,
+                floor_id=device.trilat_floor_id,
+                floor_name=device.trilat_floor_name,
+                force_unknown=True,
+            )
+            return
+
+        if not self.room_classifier.has_trained_rooms(layout_hash, device.trilat_floor_id):
+            device.apply_position_classification(
+                None,
+                floor_id=device.trilat_floor_id,
+                floor_name=device.trilat_floor_name,
+                force_unknown=True,
+            )
+            return
+
+        classification = self.room_classifier.classify(
+            layout_hash=layout_hash,
+            floor_id=device.trilat_floor_id,
+            x_m=device.trilat_x_m,
+            y_m=device.trilat_y_m,
+            z_m=device.trilat_z_m,
+        )
+        device.diag_area_switch = f"Trilat room classification: {classification.reason}"
+        if classification.area_id is not None:
+            device.apply_position_classification(
+                classification.area_id,
+                floor_id=device.trilat_floor_id,
+                floor_name=device.trilat_floor_name,
+            )
+            return
+
+        device.apply_position_classification(
+            None,
+            floor_id=device.trilat_floor_id,
+            floor_name=device.trilat_floor_name,
+            force_unknown=True,
+        )
+
     @dataclass
     class AreaTests:
         """
@@ -1559,11 +1660,13 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         last_solution_z: float | None = None
         last_solver_dimension: str = "2d"
         last_residual_m: float | None = None
+        last_mean_sigma_m: float | None = None
         last_status: str = "unknown"
 
     _TRILAT_MIN_ANCHORS: int = 3
     _TRILAT_MIN_ANCHORS_3D: int = 4
     _TRILAT_MAX_RESIDUAL_M: float = 5.0
+    _TRILAT_MAX_ANCHOR_SIGMA_M: float = 6.0
     _TRILAT_FLOOR_AMBIGUITY_RATIO: float = 0.2
     _TRILAT_RANGE_DELTA_EPSILON_M: float = 0.2
 
@@ -1598,6 +1701,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         residual_m: float | None,
         solver_dimension: str,
         floor_ambiguous: bool = False,
+        mean_sigma_m: float | None = None,
     ) -> float:
         """Compute a conservative 0..10 confidence score for the current estimate."""
         residual_term = 0.0
@@ -1606,6 +1710,9 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         anchor_target = 6.0 if solver_dimension == "3d" else 4.0
         anchor_term = min(float(anchor_count) / anchor_target, 1.0)
         score = (7.2 * residual_term) + (2.3 * anchor_term) + (0.5 if solver_dimension == "3d" else 0.0)
+        if mean_sigma_m is not None:
+            sigma_term = max(0.0, 1.0 - (mean_sigma_m / self._TRILAT_MAX_ANCHOR_SIGMA_M))
+            score = (score * 0.8) + (2.0 * sigma_term)
         if floor_ambiguous:
             score -= 2.0
         return score
@@ -2154,8 +2261,10 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             state.last_solution_z = None
             state.last_solver_dimension = "2d"
             state.last_residual_m = None
+            state.last_mean_sigma_m = None
 
         anchors: list[AnchorMeasurement] = []
+        anchor_sigmas_m: list[float] = []
         for advert in latest.values():
             if advert.stamp < nowstamp - DISTANCE_TIMEOUT:
                 continue
@@ -2174,7 +2283,8 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 continue
             if advert.rssi_distance is None:
                 continue
-            if advert.rssi_distance > self.get_scanner_max_radius(scanner.address):
+            sigma_m = getattr(advert, "rssi_distance_sigma_m", None)
+            if sigma_m is None or sigma_m > self._TRILAT_MAX_ANCHOR_SIGMA_M:
                 continue
 
             if advert.trilat_range_ewma_m is None:
@@ -2183,6 +2293,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 advert.trilat_range_ewma_m = (policy.trilat_alpha * advert.rssi_distance_raw) + (
                     (1 - policy.trilat_alpha) * advert.trilat_range_ewma_m
                 )
+            anchor_sigmas_m.append(float(sigma_m))
             anchors.append(
                 AnchorMeasurement(
                     scanner_address=scanner.address,
@@ -2194,6 +2305,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             )
 
         anchor_count = len(anchors)
+        mean_sigma_m = (sum(anchor_sigmas_m) / anchor_count) if anchor_count > 0 else None
         if anchor_count < self._TRILAT_MIN_ANCHORS:
             fallback_xy = state.last_solution_xy
             fallback_z = state.last_solution_z
@@ -2214,6 +2326,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             device.trilat_status = "low_confidence"
             device.trilat_reason = "insufficient_anchors_low_confidence"
             self._set_trilat_confidence(device, max(0.5, float(anchor_count) * 0.8))
+            state.last_mean_sigma_m = mean_sigma_m
             state.last_status = "low_confidence"
             if _debug_this_device:
                 _LOGGER_TARGET_SPAM_LESS.debug(
@@ -2266,6 +2379,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                     residual_m=state.last_residual_m,
                     solver_dimension=state.last_solver_dimension,
                     floor_ambiguous=floor_ambiguous_persisted,
+                    mean_sigma_m=state.last_mean_sigma_m,
                 ),
             )
             if _debug_this_device:
@@ -2313,6 +2427,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         state.last_anchor_ranges = anchor_ranges
         state.last_anchor_z = anchor_z
         state.last_solver_dimension = solver_dimension
+        state.last_mean_sigma_m = mean_sigma_m
 
         if (
             not solve_result.ok
@@ -2356,6 +2471,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                     residual_m=max(fallback_residual, self._TRILAT_MAX_RESIDUAL_M),
                     solver_dimension=solver_dimension,
                     floor_ambiguous=floor_ambiguous_persisted,
+                    mean_sigma_m=mean_sigma_m,
                 ),
             )
             state.last_solution_xy = fallback_xy
@@ -2394,6 +2510,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 residual_m=solve_result.residual_rms_m,
                 solver_dimension=solver_dimension,
                 floor_ambiguous=floor_ambiguous_persisted,
+                mean_sigma_m=mean_sigma_m,
             ),
         )
         if _debug_this_device:
