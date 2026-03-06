@@ -120,6 +120,7 @@ These are already aligned with the new direction and should remain.
 - `tests/test_calibration.py`
   - Keep the sample capture, storage, deletion, and service plumbing.
   - This is the correct foundation for the new system.
+  - This foundation is already largely implemented, so the first real migration work is config-flow cleanup rather than new sample-capture plumbing.
 
 - `custom_components/bermuda/select.py`
 - `custom_components/bermuda/number.py`
@@ -176,6 +177,19 @@ Important detail:
 - models must be keyed by `anchor_layout_hash`,
 - because once anchors move, old geometric truth is no longer valid.
 
+Transitional fallback behavior must be explicit:
+
+- if there is no fitted model for the current `anchor_layout_hash`, keep using the legacy RSSI-to-distance formula temporarily,
+- surface that via `source="legacy_fallback"`,
+- clamp resulting trilat confidence to low,
+- do not delete `rssi_to_metres()` until this fallback is no longer needed or an explicit no-model `unknown` path is in place.
+
+`sigma_m` should also feed the existing confidence interface directly:
+
+- fold `sigma_m` into the existing trilat confidence calculation alongside residual, anchor count, and solver dimension,
+- continue writing the result into `BermudaDevice.trilat_confidence` and `BermudaDevice.trilat_confidence_level`,
+- avoid introducing a parallel confidence path.
+
 ### 2. Make room attribution trilat-first, not strongest-scanner-first
 
 Right now room attribution still comes from scanner competition plus distance/radius gates. That is the main legacy behavior I agree with removing.
@@ -191,17 +205,37 @@ There is no HA-native room geometry in this integration, so the calibration samp
 
 Recommended first classifier:
 
-- for each room, build a labeled point cloud from its calibration samples,
-- classify the solved position with k-nearest-neighbor or centroid-plus-radius logic,
-- require minimum support and distance margin between the best and second-best rooms,
-- return `Unknown` when outside the sampled envelope.
+- filter candidate rooms to the already-resolved trilat floor,
+- treat room geometry as learned only from calibration samples for the current `anchor_layout_hash`,
+- require a minimum of 3 samples before a room is considered trained,
+- compute one centroid `(x, y, z)` and one support radius per trained room,
+- define support radius as the max centroid-to-sample distance plus a small slack margin,
+- classify the solved point by nearest centroid among rooms whose support radius contains it,
+- require a centroid-distance margin before accepting the winning room,
+- return `Unknown` when the point is inside multiple room envelopes without enough margin.
+
+Recommended initial thresholds:
+
+- minimum samples per room: `3`,
+- slack margin around support radius: about `0.5 m`,
+- winner margin versus second-best centroid: about `0.5 m`.
 
 After that works, improve it with:
 
 - per-room covariance / elliptical bounds,
 - convex hull or alpha-shape room envelopes,
-- confidence penalties when the solve residual is high,
+- k-nearest-neighbor or density-weighted scoring,
+- confidence penalties when `sigma_m` or solve residual is high,
 - confidence penalties when the solved point is far from all labeled samples.
+
+Implementation details that should be part of the plan, not deferred:
+
+- precompute room centroids, radii, and sample counts once in a coordinator-owned `RoomClassifier`,
+- invalidate and rebuild that classifier only when samples are added or deleted,
+- do not rebuild room geometry on every coordinator cycle,
+- add a new device write path for position-based attribution, for example `apply_position_classification(area_id)`,
+- that path should call the existing area/floor update logic without inventing a fake winning scanner,
+- audit downstream sensors and tracker code that currently assume `area_advert` is populated.
 
 This gives a clean migration path:
 
@@ -227,6 +261,12 @@ That becomes the basis for:
 - whether an anchor participates,
 - whether a trilat solution is `ok`, `low_confidence`, or `unknown`,
 - whether a room label should be applied or withheld.
+
+`get_scanner_max_radius()` is load-bearing in both current pipelines:
+
+- it gates contenders in `_refresh_area_by_min_distance()`,
+- it gates anchors in `_refresh_trilateration_for_device()`,
+- both call paths and both test suites need to move to the new uncertainty gates together.
 
 ## Using calibration samples to improve mobility mode
 
@@ -283,6 +323,11 @@ Then:
 3. Remove the translation and tests tied only to the deleted steps.
 4. Leave the live manual-ranging internals in place temporarily so behavior does not break during the rest of the migration.
 
+Notes:
+
+- this phase is partly de-risked already because the calibration sample lifecycle is implemented,
+- `globalopts` also has an already-commented menu-routing remnant, so cleanup can remove dead code rather than changing active behavior.
+
 ### Phase 2: add the learned ranging model
 
 1. Implement a calibration-sample reader that converts saved samples into training rows.
@@ -295,14 +340,22 @@ Then:
 1. Replace manual range computation in `BermudaAdvert`.
 2. Feed the learned range and uncertainty into trilateration.
 3. Replace `max_radius` gates with uncertainty and residual gates.
-4. Keep the old area resolver only as a temporary fallback during this phase.
+4. If no fitted model exists for the current `anchor_layout_hash`, use the transitional legacy fallback and cap confidence low.
+5. Keep the old area resolver only as a temporary fallback during this phase.
 
 ### Phase 4: room attribution from solved position
 
-1. Build a room classifier from sample point clouds keyed by `anchor_layout_hash`.
+1. Build and cache a `RoomClassifier` from sample-derived room centroids/radii keyed by `anchor_layout_hash`.
 2. Use trilat position as the primary room input.
-3. Apply confidence thresholds and return `Unknown` when the solved point is outside trained support.
-4. Delete the nearest-scanner area winner path once sample-based room attribution is stable.
+3. Apply a dwell gate before committing room transitions so solve jitter does not flap rooms at boundaries.
+4. Use this explicit fallback chain:
+   - trilat has a usable solve and the classifier has trained rooms on this floor: use position-based room attribution,
+   - trilat has a usable solve but the floor has no trained rooms: fall back to scanner-based area,
+   - trilat is `unknown`: fall back to scanner-based area,
+   - classifier result exists but misses the margin requirement: return `Unknown`,
+   - no samples exist for the current `anchor_layout_hash`: fall back to scanner-based area until the layout is trained.
+5. Add a calibration-samples warning when the current anchor layout has fewer trained rooms than the previous layout, so anchor moves clearly signal recapture work.
+6. Delete the nearest-scanner area winner path only after the fallback cases above are either handled or intentionally retired.
 
 ### Phase 5: automatic mobility mode
 
@@ -319,8 +372,9 @@ Then:
 
 1. Remove `rssi_offset`, `attenuation`, `max_radius`, and `ref_power` plumbing.
 2. Remove legacy number entities and constants.
-3. Remove the old RSSI-to-distance utility and its tests.
-4. Rewrite remaining tests around:
+3. Bump the config entry version and strip legacy option keys in `async_migrate_entry()` so stored entries do not retain orphaned calibration settings.
+4. Remove the old RSSI-to-distance utility and its tests once the no-samples path is explicitly handled.
+5. Rewrite remaining tests around:
    - learned ranges,
    - trilat confidence,
    - sample-based room attribution,
@@ -330,8 +384,10 @@ Then:
 
 - Sparse samples can produce overconfident room labels. The classifier must prefer `Unknown` over guessing.
 - Anchor moves invalidate prior geometry. Every model and room map must be scoped by `anchor_layout_hash`.
+- Anchor moves also make rooms appear to disappear until the new layout is resampled. The UI should warn about this explicitly.
 - Some devices will have few or no per-device samples. The model must back off cleanly to global or scanner-level parameters.
 - Full deletion of `ref_power` should happen only after the learned model is proven to cover low-sample devices acceptably.
+- Rooms with no calibration samples on the current floor are untrained. The system should fall back to scanner-based area rather than punish partial sample coverage.
 
 ## Bottom line
 
