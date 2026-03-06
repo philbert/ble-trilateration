@@ -30,6 +30,8 @@ class _DummyDevice:
         self.trilat_y_m = None
         self.trilat_z_m = None
         self.trilat_residual_m = None
+        self.trilat_confidence = 0.0
+        self.trilat_confidence_level = "low"
 
     def get_mobility_type(self):
         return self.mobility_type
@@ -44,6 +46,8 @@ class _DummyDevice:
         self.trilat_y_m = None
         self.trilat_z_m = None
         self.trilat_residual_m = None
+        self.trilat_confidence = 0.0
+        self.trilat_confidence_level = "low"
 
     def set_trilat_solution(self, x_m, y_m, z_m, floor_id, floor_name, anchor_count, residual_m):
         self.trilat_status = "ok"
@@ -127,8 +131,8 @@ def _right_triangle_anchors(coordinator, device_addr, floor_id):
     return sc_a, sc_b, sc_c
 
 
-def test_trilat_unknown_with_insufficient_anchors():
-    """Fresh input with fewer than 3 same-floor anchors should be insufficient_anchors."""
+def test_trilat_low_confidence_with_insufficient_anchors():
+    """With too few anchors, trilat should retain an estimate at low confidence."""
     coordinator = _make_coordinator()
     device = _DummyDevice("dev-b")
 
@@ -148,9 +152,11 @@ def test_trilat_unknown_with_insufficient_anchors():
 
     coordinator._refresh_trilateration_for_device(device)
 
-    assert device.trilat_status == "unknown"
-    assert device.trilat_reason == "insufficient_anchors"
+    assert device.trilat_status == "low_confidence"
+    assert device.trilat_reason == "insufficient_anchors_low_confidence"
     assert device.trilat_anchor_count == 1
+    assert device.trilat_x_m is not None
+    assert device.trilat_y_m is not None
 
 
 def test_floor_evidence_cross_floor_penalty_selects_correct_floor():
@@ -200,8 +206,8 @@ def test_anchor_qualification_respects_anchor_enabled_flag():
 
     coordinator._refresh_trilateration_for_device(device)
 
-    assert device.trilat_status == "unknown"
-    assert device.trilat_reason == "insufficient_anchors"
+    assert device.trilat_status == "low_confidence"
+    assert device.trilat_reason == "insufficient_anchors_low_confidence"
     assert device.trilat_anchor_count == 1
 
 
@@ -224,8 +230,8 @@ def test_anchor_qualification_requires_valid_coordinates():
 
     coordinator._refresh_trilateration_for_device(device)
 
-    assert device.trilat_status == "unknown"
-    assert device.trilat_reason == "insufficient_anchors"
+    assert device.trilat_status == "low_confidence"
+    assert device.trilat_reason == "insufficient_anchors_low_confidence"
     assert device.trilat_anchor_count == 1
 
 
@@ -374,8 +380,8 @@ def test_trilat_falls_back_to_2d_when_any_anchor_z_missing():
     assert device.trilat_z_m is None
 
 
-def test_high_residual_yields_unknown():
-    """Geometrically inconsistent ranges should produce high_residual Unknown."""
+def test_high_residual_yields_low_confidence_solution():
+    """Geometrically inconsistent ranges should keep an estimate with low confidence."""
     coordinator = _make_coordinator()
     device = _DummyDevice("dev-residual")
 
@@ -393,12 +399,14 @@ def test_high_residual_yields_unknown():
 
     coordinator._refresh_trilateration_for_device(device)
 
-    assert device.trilat_status == "unknown"
-    assert device.trilat_reason == "high_residual"
+    assert device.trilat_status == "low_confidence"
+    assert device.trilat_reason == "high_residual_low_confidence"
+    assert device.trilat_x_m is not None
+    assert device.trilat_y_m is not None
 
 
-def test_ambiguous_floor_yields_unknown_after_dwell():
-    """Sustained equal floor evidence should produce ambiguous_floor Unknown after hysteresis."""
+def test_ambiguous_floor_yields_low_confidence_after_dwell():
+    """Sustained equal floor evidence should degrade confidence, not blank coordinates."""
     coordinator = _make_coordinator()
     device = _DummyDevice("dev-ambig")
 
@@ -421,11 +429,11 @@ def test_ambiguous_floor_yields_unknown_after_dwell():
     # Expire the timer artificially.
     state.floor_ambiguous_since = time.monotonic() - 100.0
 
-    # Second call: dwell exceeded → ambiguous_floor Unknown.
+    # Second call: dwell exceeded → ambiguous floor with low confidence.
     coordinator._refresh_trilateration_for_device(device)
 
-    assert device.trilat_status == "unknown"
-    assert device.trilat_reason == "ambiguous_floor"
+    assert device.trilat_status == "low_confidence"
+    assert "low_confidence" in device.trilat_reason
 
 
 def test_trilat_state_is_isolated_from_area_state():

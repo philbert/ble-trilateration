@@ -1544,6 +1544,39 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         return math.exp(exponent)
 
     @staticmethod
+    def _trilat_confidence_band(score: float) -> str:
+        """Map a 0..10 confidence score into a coarse label."""
+        if score >= 7.0:
+            return "high"
+        if score >= 4.0:
+            return "medium"
+        return "low"
+
+    def _set_trilat_confidence(self, device: BermudaDevice, score: float) -> None:
+        """Store trilateration confidence on the device."""
+        clamped = round(max(0.0, min(10.0, score)), 1)
+        device.trilat_confidence = clamped
+        device.trilat_confidence_level = self._trilat_confidence_band(clamped)
+
+    def _compute_trilat_confidence(
+        self,
+        anchor_count: int,
+        residual_m: float | None,
+        solver_dimension: str,
+        floor_ambiguous: bool = False,
+    ) -> float:
+        """Compute a conservative 0..10 confidence score for the current estimate."""
+        residual_term = 0.0
+        if residual_m is not None:
+            residual_term = max(0.0, 1.0 - (residual_m / self._TRILAT_MAX_RESIDUAL_M))
+        anchor_target = 6.0 if solver_dimension == "3d" else 4.0
+        anchor_term = min(float(anchor_count) / anchor_target, 1.0)
+        score = (7.2 * residual_term) + (2.3 * anchor_term) + (0.5 if solver_dimension == "3d" else 0.0)
+        if floor_ambiguous:
+            score -= 2.0
+        return score
+
+    @staticmethod
     def _mobility_policy(mobility_type: str) -> MobilityPolicy:
         """Return area switching policy for the device mobility mode."""
         if mobility_type == MOBILITY_STATIONARY:
@@ -1930,6 +1963,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             for device in self.devices.values():
                 if device.create_sensor:
                     device.set_trilat_unknown("disabled")
+                    self._set_trilat_confidence(device, 0.0)
             return
 
         configured_anchor_scanners: list[str] = []
@@ -1978,6 +2012,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 anchor_count=0,
             )
             state.last_status = "unknown"
+            self._set_trilat_confidence(device, 0.0)
             if _debug_this_device:
                 _LOGGER_TARGET_SPAM_LESS.debug(
                     f"trilat_unknown:{device.address}:stale_inputs",
@@ -2004,6 +2039,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         if not evidence_inputs:
             device.set_trilat_unknown("ambiguous_floor", floor_id=state.floor_id, floor_name=self._resolve_floor_name(state.floor_id))
             state.last_status = "unknown"
+            self._set_trilat_confidence(device, 0.0)
             return
 
         floors = sorted({floor_id for floor_id, _rssi in evidence_inputs})
@@ -2029,27 +2065,22 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             and ((best_floor_score - second_floor_score) / total_floor_score) < self._TRILAT_FLOOR_AMBIGUITY_RATIO
         )
 
+        floor_ambiguous_persisted = False
         if floor_ambiguity:
             if state.floor_ambiguous_since <= 0:
                 state.floor_ambiguous_since = nowstamp
             elif nowstamp - state.floor_ambiguous_since >= policy.floor_dwell_seconds:
-                device.set_trilat_unknown(
-                    "ambiguous_floor",
-                    floor_id=state.floor_id,
-                    floor_name=self._resolve_floor_name(state.floor_id),
-                )
-                state.last_status = "unknown"
+                floor_ambiguous_persisted = True
                 if _debug_this_device:
                     _LOGGER_TARGET_SPAM_LESS.debug(
-                        f"trilat_unknown:{device.address}:ambiguous_floor",
-                        "Trilat: %s -> Unknown (ambiguous_floor) best=%s(%.3f) second=%.3f total=%.3f",
+                        f"trilat_low_conf:{device.address}:ambiguous_floor",
+                        "Trilat: %s low confidence (ambiguous_floor) best=%s(%.3f) second=%.3f total=%.3f",
                         device.name,
                         best_floor_id,
                         best_floor_score,
                         second_floor_score,
                         total_floor_score,
                     )
-                return
         else:
             state.floor_ambiguous_since = 0.0
 
@@ -2130,17 +2161,30 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
 
         anchor_count = len(anchors)
         if anchor_count < self._TRILAT_MIN_ANCHORS:
-            device.set_trilat_unknown(
-                "insufficient_anchors",
+            fallback_xy = state.last_solution_xy
+            fallback_z = state.last_solution_z
+            if fallback_xy is None:
+                fallback_xy = anchor_centroid(anchors) if anchor_count > 0 else (0.0, 0.0)
+            if fallback_z is None and anchor_count > 0 and all(anchor.z_m is not None for anchor in anchors):
+                fallback_z = anchor_centroid_3d(anchors)[2]
+
+            device.set_trilat_solution(
+                x_m=fallback_xy[0],
+                y_m=fallback_xy[1],
+                z_m=fallback_z,
                 floor_id=selected_floor_id,
                 floor_name=selected_floor_name,
                 anchor_count=anchor_count,
+                residual_m=state.last_residual_m if state.last_residual_m is not None else 0.0,
             )
-            state.last_status = "unknown"
+            device.trilat_status = "low_confidence"
+            device.trilat_reason = "insufficient_anchors_low_confidence"
+            self._set_trilat_confidence(device, max(0.5, float(anchor_count) * 0.8))
+            state.last_status = "low_confidence"
             if _debug_this_device:
                 _LOGGER_TARGET_SPAM_LESS.debug(
-                    f"trilat_unknown:{device.address}:insufficient_anchors",
-                    "Trilat: %s -> Unknown (insufficient_anchors), floor=%s anchors=%d",
+                    f"trilat_low_conf:{device.address}:insufficient_anchors",
+                    "Trilat: %s low confidence (insufficient_anchors), floor=%s anchors=%d",
                     device.name,
                     selected_floor_name,
                     anchor_count,
@@ -2181,6 +2225,15 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 residual_m=state.last_residual_m,
             )
             device.trilat_reason = "skip_unchanged_inputs"
+            self._set_trilat_confidence(
+                device,
+                self._compute_trilat_confidence(
+                    anchor_count=anchor_count,
+                    residual_m=state.last_residual_m,
+                    solver_dimension=state.last_solver_dimension,
+                    floor_ambiguous=floor_ambiguous_persisted,
+                ),
+            )
             if _debug_this_device:
                 _LOGGER_TARGET_SPAM_LESS.debug(
                     f"trilat_skip:{device.address}",
@@ -2235,20 +2288,50 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             or solve_result.y_m is None
             or (solver_dimension == "3d" and solve_result.z_m is None)
         ):
-            device.set_trilat_unknown(
-                "high_residual",
+            fallback_xy = state.last_solution_xy
+            fallback_z = state.last_solution_z
+            if solve_result.x_m is not None and solve_result.y_m is not None:
+                fallback_xy = (solve_result.x_m, solve_result.y_m)
+            elif fallback_xy is None:
+                fallback_xy = anchor_centroid(anchors)
+            if solver_dimension == "3d":
+                if solve_result.z_m is not None:
+                    fallback_z = solve_result.z_m
+                elif fallback_z is None and all(anchor.z_m is not None for anchor in anchors):
+                    fallback_z = anchor_centroid_3d(anchors)[2]
+
+            fallback_residual = solve_result.residual_rms_m
+            if fallback_residual is None:
+                fallback_residual = state.last_residual_m if state.last_residual_m is not None else (self._TRILAT_MAX_RESIDUAL_M * 1.5)
+
+            device.set_trilat_solution(
+                x_m=fallback_xy[0],
+                y_m=fallback_xy[1],
+                z_m=fallback_z if solver_dimension == "3d" else None,
                 floor_id=selected_floor_id,
                 floor_name=selected_floor_name,
                 anchor_count=anchor_count,
+                residual_m=fallback_residual,
             )
-            state.last_solution_xy = None
-            state.last_solution_z = None
-            state.last_residual_m = None
-            state.last_status = "unknown"
+            device.trilat_status = "low_confidence"
+            device.trilat_reason = "high_residual_low_confidence"
+            self._set_trilat_confidence(
+                device,
+                self._compute_trilat_confidence(
+                    anchor_count=anchor_count,
+                    residual_m=max(fallback_residual, self._TRILAT_MAX_RESIDUAL_M),
+                    solver_dimension=solver_dimension,
+                    floor_ambiguous=floor_ambiguous_persisted,
+                ),
+            )
+            state.last_solution_xy = fallback_xy
+            state.last_solution_z = fallback_z if solver_dimension == "3d" else None
+            state.last_residual_m = fallback_residual
+            state.last_status = "low_confidence"
             if _debug_this_device:
                 _LOGGER_TARGET_SPAM_LESS.debug(
-                    f"trilat_unknown:{device.address}:high_residual",
-                    "Trilat: %s -> Unknown (high_residual), floor=%s anchors=%d residual=%s reason=%s",
+                    f"trilat_low_conf:{device.address}:high_residual",
+                    "Trilat: %s low confidence (high_residual), floor=%s anchors=%d residual=%s reason=%s",
                     device.name,
                     selected_floor_name,
                     anchor_count,
@@ -2270,6 +2353,15 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         state.last_solution_z = solve_result.z_m if solver_dimension == "3d" else None
         state.last_residual_m = solve_result.residual_rms_m
         state.last_status = "ok"
+        self._set_trilat_confidence(
+            device,
+            self._compute_trilat_confidence(
+                anchor_count=anchor_count,
+                residual_m=solve_result.residual_rms_m,
+                solver_dimension=solver_dimension,
+                floor_ambiguous=floor_ambiguous_persisted,
+            ),
+        )
         if _debug_this_device:
             if solver_dimension == "3d" and solve_result.z_m is not None:
                 _LOGGER_TARGET_SPAM_LESS.debug(
