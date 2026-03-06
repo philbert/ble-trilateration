@@ -161,6 +161,8 @@ class BermudaDevice(dict):
         self.trilat_status: str = "unknown"
         self.trilat_reason: str = "stale_inputs"
         self.trilat_residual_m: float | None = None
+        self.trilat_confidence: float = 0.0
+        self.trilat_confidence_level: str = "low"
         self.adverts: dict[
             tuple[str, str], BermudaAdvert
         ] = {}  # str will be a scanner address OR a deviceaddress__scanneraddress
@@ -694,6 +696,8 @@ class BermudaDevice(dict):
         self.trilat_status = "unknown"
         self.trilat_reason = reason
         self.trilat_residual_m = None
+        self.trilat_confidence = 0.0
+        self.trilat_confidence_level = "low"
 
     def set_trilat_solution(
         self,
