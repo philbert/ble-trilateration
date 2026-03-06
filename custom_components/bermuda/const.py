@@ -53,6 +53,11 @@ DOMAIN_PRIVATE_BLE_DEVICE = "private_ble_device"
 # Signal names we are using:
 SIGNAL_DEVICE_NEW = f"{DOMAIN}-device-new"
 SIGNAL_SCANNERS_CHANGED = f"{DOMAIN}-scanners-changed"
+CALIBRATION_EVENT_SAMPLE_CAPTURED = f"{DOMAIN}_calibration_sample_captured"
+CALIBRATION_SAMPLE_WARN_THRESHOLD: Final = 500
+CALIBRATION_QUALITY_ACCEPTED: Final = "accepted"
+CALIBRATION_QUALITY_POOR: Final = "poor_quality"
+CALIBRATION_QUALITY_REJECTED: Final = "rejected"
 
 UPDATE_INTERVAL = 1.05  # Seconds between bluetooth data processing cycles
 # Note: this is separate from the CONF_UPDATE_INTERVAL which allows the

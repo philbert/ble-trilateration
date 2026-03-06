@@ -9,7 +9,6 @@ from bluetooth_data_tools import monotonic_time_coarse
 from homeassistant import config_entries
 from homeassistant.config_entries import OptionsFlowWithConfigEntry
 from homeassistant.core import callback
-from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.selector import (
     DeviceSelector,
     DeviceSelectorConfig,
@@ -45,7 +44,6 @@ from .const import (
     DEFAULT_UPDATE_INTERVAL,
     DISTANCE_INFINITE,
     DOMAIN,
-    DOMAIN_PRIVATE_BLE_DEVICE,
     NAME,
 )
 from .util import mac_redact, rssi_to_metres
@@ -134,6 +132,7 @@ class BermudaOptionsFlowHandler(OptionsFlowWithConfigEntry):
         self._last_scanner = None
         self._last_attenuation = None
         self._last_scanner_info = None
+        self._last_calibration_status: str | None = None
 
     async def async_step_init(self, user_input=None):  # pylint: disable=unused-argument
         """Manage the options."""
@@ -190,6 +189,7 @@ class BermudaOptionsFlowHandler(OptionsFlowWithConfigEntry):
                 "selectdevices": "Select Devices",
                 "calibration1_global": "Calibration 1: Global",
                 "calibration2_scanners": "Calibration 2: Scanner RSSI Offsets",
+                "calibration_samples": "Calibration Samples",
             },
             description_placeholders=messages,
         )
@@ -557,28 +557,179 @@ class BermudaOptionsFlowHandler(OptionsFlowWithConfigEntry):
             description_placeholders={"suffix": results_str},
         )
 
+    async def async_step_calibration_samples(self, user_input=None):
+        """Manage stored calibration samples."""
+        summary = self.coordinator.calibration.get_summary()
+        description = self._format_calibration_summary(summary)
+        if self._last_calibration_status:
+            description = f"{self._last_calibration_status}\n\n{description}"
+            self._last_calibration_status = None
+
+        menu_options = {"calibration_samples_summary": "Sample Summary"}
+        if summary["sample_count"] > 0:
+            menu_options["calibration_samples_delete_one"] = "Delete One Sample"
+            menu_options["calibration_samples_clear_device"] = "Clear Samples For Device"
+            menu_options["calibration_samples_clear_current_layout"] = "Clear Samples For Current Anchor Layout"
+            menu_options["calibration_samples_clear_all"] = "Clear All Samples"
+
+        return self.async_show_menu(
+            step_id="calibration_samples",
+            menu_options=menu_options,
+            description_placeholders={"summary": description},
+        )
+
+    async def async_step_calibration_samples_summary(self, user_input=None):
+        """Show calibration sample summary details."""
+        if user_input is not None:
+            return await self.async_step_calibration_samples()
+        summary = self.coordinator.calibration.get_summary()
+        return self.async_show_form(
+            step_id="calibration_samples_summary",
+            data_schema=vol.Schema({}),
+            description_placeholders={"summary": self._format_calibration_summary(summary, include_recent=True)},
+        )
+
+    async def async_step_calibration_samples_delete_one(self, user_input=None):
+        """Delete one persisted calibration sample."""
+        samples = self._get_samples_newest_first()
+        options = [
+            SelectOptionDict(value=sample["id"], label=self._format_sample_label(sample))
+            for sample in samples
+        ]
+        if user_input is not None:
+            deleted = await self.coordinator.calibration.async_delete_sample(user_input["sample_id"])
+            self._last_calibration_status = (
+                "Deleted calibration sample." if deleted else "Calibration sample was not found."
+            )
+            return await self.async_step_calibration_samples()
+
+        return self.async_show_form(
+            step_id="calibration_samples_delete_one",
+            data_schema=vol.Schema(
+                {
+                    vol.Required("sample_id"): SelectSelector(
+                        SelectSelectorConfig(options=options, multiple=False, mode=SelectSelectorMode.DROPDOWN)
+                    )
+                }
+            ),
+            description_placeholders={"summary": "Choose one saved calibration sample to delete."},
+        )
+
+    async def async_step_calibration_samples_clear_device(self, user_input=None):
+        """Delete all samples for one device."""
+        devices = self.coordinator.calibration.get_device_samples()
+        options = [
+            SelectOptionDict(
+                value=device_id,
+                label=f"{details['name']} [{details['address']}]" if details["address"] else details["name"],
+            )
+            for device_id, details in sorted(devices.items(), key=lambda item: item[1]["name"])
+        ]
+        if user_input is not None:
+            removed = await self.coordinator.calibration.async_clear_device(user_input["device_id"])
+            self._last_calibration_status = f"Deleted {removed} calibration sample(s) for the selected device."
+            return await self.async_step_calibration_samples()
+
+        return self.async_show_form(
+            step_id="calibration_samples_clear_device",
+            data_schema=vol.Schema(
+                {
+                    vol.Required("device_id"): SelectSelector(
+                        SelectSelectorConfig(options=options, multiple=False, mode=SelectSelectorMode.DROPDOWN)
+                    )
+                }
+            ),
+            description_placeholders={"summary": "Delete all saved calibration samples for one device."},
+        )
+
+    async def async_step_calibration_samples_clear_current_layout(self, user_input=None):
+        """Delete all samples for the current anchor layout."""
+        current_hash = self.coordinator.calibration.current_anchor_layout_hash
+        if user_input is not None:
+            if not user_input["confirm"]:
+                self._last_calibration_status = "Current-anchor-layout deletion was not confirmed."
+                return await self.async_step_calibration_samples()
+            removed = await self.coordinator.calibration.async_clear_current_anchor_layout()
+            self._last_calibration_status = (
+                f"Deleted {removed} calibration sample(s) for the current anchor layout."
+            )
+            return await self.async_step_calibration_samples()
+
+        return self.async_show_form(
+            step_id="calibration_samples_clear_current_layout",
+            data_schema=vol.Schema({vol.Required("confirm", default=False): vol.Coerce(bool)}),
+            description_placeholders={
+                "summary": f"Current anchor layout hash: `{current_hash[:8]}`. Confirm to delete samples for this layout."
+            },
+        )
+
+    async def async_step_calibration_samples_clear_all(self, user_input=None):
+        """Delete all persisted calibration samples."""
+        if user_input is not None:
+            if not user_input["confirm"]:
+                self._last_calibration_status = "Delete-all was not confirmed."
+                return await self.async_step_calibration_samples()
+            removed = await self.coordinator.calibration.async_clear_all()
+            self._last_calibration_status = f"Deleted {removed} calibration sample(s)."
+            return await self.async_step_calibration_samples()
+
+        return self.async_show_form(
+            step_id="calibration_samples_clear_all",
+            data_schema=vol.Schema({vol.Required("confirm", default=False): vol.Coerce(bool)}),
+            description_placeholders={"summary": "Confirm to delete all saved calibration samples."},
+        )
+
+    def _get_samples_newest_first(self) -> list[dict]:
+        """Return stored calibration samples newest first."""
+        return sorted(
+            self.coordinator.calibration.samples(),
+            key=lambda sample: sample.get("created_at", ""),
+            reverse=True,
+        )
+
+    def _format_sample_label(self, sample: dict) -> str:
+        """Create a compact label for one calibration sample."""
+        status = sample.get("quality", {}).get("status", "unknown")
+        created_at = sample.get("created_at", "")
+        room_name = sample.get("room_name", sample.get("room_area_id", "Unknown"))
+        device_name = sample.get("device_name", sample.get("device_id", "Unknown"))
+        return f"{created_at} | {room_name} | {device_name} | {status}"
+
+    def _format_calibration_summary(self, summary: dict, include_recent: bool = False) -> str:
+        """Build markdown summary for calibration samples."""
+        lines = [
+            f"Total samples: `{summary['sample_count']}`",
+            f"Current anchor layout hash: `{summary['current_layout_hash'][:8]}`",
+            f"Samples for current anchor layout: `{summary['current_layout_count']}`",
+        ]
+        if summary["sample_count"] > summary["warn_threshold"]:
+            lines.append(
+                f"Warning: sample count exceeds the soft warning threshold of `{summary['warn_threshold']}`."
+            )
+        if summary["by_room"]:
+            lines.append("")
+            lines.append("By room:")
+            for room_name, count in sorted(summary["by_room"].items()):
+                lines.append(f"- {room_name}: `{count}`")
+        if summary["by_device"]:
+            lines.append("")
+            lines.append("By device:")
+            for device_name, count in sorted(summary["by_device"].items()):
+                lines.append(f"- {device_name}: `{count}`")
+        if include_recent and summary["recent"]:
+            lines.append("")
+            lines.append("Recent samples:")
+            for sample in summary["recent"]:
+                lines.append(f"- {self._format_sample_label(sample)}")
+        return "\n".join(lines)
+
     def _get_bermuda_device_from_registry(self, registry_id: str) -> BermudaDevice | None:
         """
         Given a device registry device id, return the associated MAC address.
 
         Returns None if the id can not be resolved to a mac.
         """
-        devreg = dr.async_get(self.hass)
-        device = devreg.async_get(registry_id)
-        device_address = None
-        if device is not None:
-            for connection in device.connections:
-                if connection[0] in {
-                    DOMAIN_PRIVATE_BLE_DEVICE,
-                    dr.CONNECTION_BLUETOOTH,
-                    "ibeacon",
-                }:
-                    device_address = connection[1]
-                    break
-            if device_address is not None:
-                return self.coordinator.devices[device_address.lower()]
-        # We couldn't match the HA device id to a bermuda device mac.
-        return None
+        return self.coordinator.get_bermuda_device_from_registry_id(registry_id)
 
     async def _update_options(self):
         """Update config entry options."""

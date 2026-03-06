@@ -56,6 +56,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: BermudaConfigEntry) -> b
     if not coordinator.last_update_success:
         await on_failure()
 
+    await coordinator.async_initialize()
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
     entry.async_on_unload(entry.add_update_listener(async_reload_entry))
@@ -130,6 +131,7 @@ async def async_remove_config_entry_device(
 
 async def async_unload_entry(hass: HomeAssistant, entry: BermudaConfigEntry) -> bool:
     """Handle removal of an entry."""
+    await entry.runtime_data.coordinator.async_shutdown()
     if unload_result := await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
         _LOGGER.debug("Unloaded platforms.")
     return unload_result

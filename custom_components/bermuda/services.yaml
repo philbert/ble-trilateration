@@ -13,3 +13,29 @@ dump_devices:
       required: false
       example: "False"
       default: false
+record_calibration_sample:
+  name: Record calibration sample
+  fields:
+    device_id:
+      required: true
+      example: "abc123def456"
+    room_area_id:
+      required: true
+      example: "living_room"
+    x_m:
+      required: true
+      example: "4.2"
+    y_m:
+      required: true
+      example: "1.8"
+    z_m:
+      required: true
+      example: "1.1"
+    duration_s:
+      required: false
+      example: "60"
+      default: 60
+    notes:
+      required: false
+      example: "Near sofa"
+      default: ""

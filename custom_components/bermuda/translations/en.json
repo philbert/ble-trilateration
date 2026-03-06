@@ -81,6 +81,42 @@
         "data_description": {
           "scanner_info": "Leave at zero to accept the global default, or enter a non-zero number to offset the rssi reported by that scanner. Adjust until the estimated distance above matches the actual distance between that scanner and the selected transmitting device. Negative values will increase the distance, positive values will decrease it."
         }
+      },
+      "calibration_samples": {
+        "title": "Calibration Samples",
+        "description": "{summary}"
+      },
+      "calibration_samples_summary": {
+        "title": "Calibration Sample Summary",
+        "description": "{summary}"
+      },
+      "calibration_samples_delete_one": {
+        "title": "Delete Calibration Sample",
+        "description": "{summary}",
+        "data": {
+          "sample_id": "Saved sample"
+        }
+      },
+      "calibration_samples_clear_device": {
+        "title": "Clear Device Samples",
+        "description": "{summary}",
+        "data": {
+          "device_id": "Device"
+        }
+      },
+      "calibration_samples_clear_current_layout": {
+        "title": "Clear Current Anchor Layout Samples",
+        "description": "{summary}",
+        "data": {
+          "confirm": "Confirm deletion"
+        }
+      },
+      "calibration_samples_clear_all": {
+        "title": "Clear All Calibration Samples",
+        "description": "{summary}",
+        "data": {
+          "confirm": "Confirm deletion"
+        }
       }
     }
   },
@@ -110,6 +146,40 @@
         "redact": {
           "name": "Redact",
           "description": "Set to TRUE to ensure MAC addresses are redacted in output for privacy."
+        }
+      }
+    },
+    "record_calibration_sample": {
+      "name": "Record Calibration Sample",
+      "description": "Start an asynchronous calibration-sample capture for one tracked device.",
+      "fields": {
+        "device_id": {
+          "name": "Device",
+          "description": "Home Assistant device registry id for the tracked device to sample."
+        },
+        "room_area_id": {
+          "name": "Room Area",
+          "description": "Area id for the room label associated with this calibration point."
+        },
+        "x_m": {
+          "name": "X Coordinate",
+          "description": "Declared X coordinate in metres."
+        },
+        "y_m": {
+          "name": "Y Coordinate",
+          "description": "Declared Y coordinate in metres."
+        },
+        "z_m": {
+          "name": "Z Coordinate",
+          "description": "Declared Z coordinate in metres."
+        },
+        "duration_s": {
+          "name": "Duration",
+          "description": "Capture duration in seconds."
+        },
+        "notes": {
+          "name": "Notes",
+          "description": "Optional note stored with the sample."
         }
       }
     }

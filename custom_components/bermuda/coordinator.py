@@ -29,6 +29,7 @@ from homeassistant.core import (
     SupportsResponse,
     callback,
 )
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import (
     area_registry as ar,
 )
@@ -56,6 +57,8 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.util.dt import get_age, now
 
 from .bermuda_device import BermudaDevice
+from .calibration import BermudaCalibrationManager
+from .calibration_store import BermudaCalibrationStore
 from .bermuda_irk import BermudaIrkManager
 from .const import (
     _LOGGER,
@@ -243,6 +246,8 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         self._area_decision_state: dict[str, BermudaDataUpdateCoordinator.AreaDecisionState] = {}
         self._trilat_decision_state: dict[str, BermudaDataUpdateCoordinator.TrilatDecisionState] = {}
         self._trilat_scanners_without_anchors: list[str] | None = None
+        self.calibration_store = BermudaCalibrationStore(hass, entry.entry_id)
+        self.calibration = BermudaCalibrationManager(hass, self, self.calibration_store)
 
         # Track the list of Private BLE devices, noting their entity id
         # and current "last address".
@@ -333,6 +338,26 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             ),
             SupportsResponse.ONLY,
         )
+        self.config_entry.async_on_unload(lambda: hass.services.async_remove(DOMAIN, "dump_devices"))
+
+        hass.services.async_register(
+            DOMAIN,
+            "record_calibration_sample",
+            self.service_record_calibration_sample,
+            vol.Schema(
+                {
+                    vol.Required("device_id"): cv.string,
+                    vol.Required("room_area_id"): cv.string,
+                    vol.Required("x_m"): vol.Coerce(float),
+                    vol.Required("y_m"): vol.Coerce(float),
+                    vol.Required("z_m"): vol.Coerce(float),
+                    vol.Optional("duration_s", default=60): vol.All(vol.Coerce(int), vol.Range(min=1)),
+                    vol.Optional("notes", default=""): cv.string,
+                }
+            ),
+            SupportsResponse.OPTIONAL,
+        )
+        self.config_entry.async_on_unload(lambda: hass.services.async_remove(DOMAIN, "record_calibration_sample"))
 
         # Register for newly discovered / changed BLE devices
         if self.config_entry is not None:
@@ -348,6 +373,14 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
     @property
     def scanner_list(self):
         return self._scanner_list
+
+    async def async_initialize(self) -> None:
+        """Initialize coordinator-owned subsystems after setup."""
+        await self.calibration.async_initialize()
+
+    async def async_shutdown(self) -> None:
+        """Tear down coordinator-owned subsystems."""
+        await self.calibration.async_shutdown()
 
     @property
     def get_scanners(self) -> set[BermudaDevice]:
@@ -822,6 +855,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
 
             self._refresh_areas_by_min_distance()
             self._refresh_trilateration()
+            self.calibration.capture_update()
 
             # We might need to freshen deliberately on first start if no new scanners
             # were discovered in the first scan update. This is likely if nothing has changed
@@ -2496,6 +2530,40 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
     #             CONFDATA_SCANNERS: confdata_scanners,
     #         },
     #     )
+
+    def get_bermuda_device_from_registry_id(self, registry_id: str) -> BermudaDevice | None:
+        """Return the matching Bermuda device for a Home Assistant device id."""
+        device = self.dr.async_get(registry_id)
+        if device is None:
+            return None
+        device_address = None
+        for connection in device.connections:
+            if connection[0] in {
+                DOMAIN_PRIVATE_BLE_DEVICE,
+                dr.CONNECTION_BLUETOOTH,
+                "ibeacon",
+            }:
+                device_address = connection[1]
+                break
+        if device_address is None:
+            return None
+        return self.devices.get(str(device_address).lower())
+
+    async def service_record_calibration_sample(self, call: ServiceCall) -> ServiceResponse:
+        """Start an asynchronous calibration sample capture session."""
+        try:
+            response = await self.calibration.async_start_session(
+                device_id=call.data["device_id"],
+                room_area_id=call.data["room_area_id"],
+                x_m=call.data["x_m"],
+                y_m=call.data["y_m"],
+                z_m=call.data["z_m"],
+                duration_s=call.data.get("duration_s", 60),
+                notes=call.data.get("notes") or None,
+            )
+        except HomeAssistantError as err:
+            raise vol.Invalid(str(err)) from err
+        return response
 
     async def service_dump_devices(self, call: ServiceCall) -> ServiceResponse:  # pylint: disable=unused-argument;
         """Return a dump of beacon advertisements by receiver."""
