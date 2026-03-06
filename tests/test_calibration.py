@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from bluetooth_data_tools import monotonic_time_coarse
 from homeassistant import data_entry_flow
@@ -55,33 +56,40 @@ async def test_record_calibration_sample_service(hass: HomeAssistant, setup_berm
 
     unsub = hass.bus.async_listen(CALIBRATION_EVENT_SAMPLE_CAPTURED, _capture_event)
     try:
-        response = await hass.services.async_call(
-            DOMAIN,
-            "record_calibration_sample",
-            {
-                "device_id": device_entry.id,
-                "room_area_id": area.id,
-                "x_m": 4.2,
-                "y_m": 1.8,
-                "z_m": 1.1,
-                "duration_s": 1,
-                "notes": "Near sofa",
-            },
-            blocking=True,
-            return_response=True,
-        )
+        with patch("custom_components.bermuda.calibration.persistent_notification.async_create") as notify_mock:
+            response = await hass.services.async_call(
+                DOMAIN,
+                "record_calibration_sample",
+                {
+                    "device_id": device_entry.id,
+                    "room_area_id": area.id,
+                    "x_m": 4.2,
+                    "y_m": 1.8,
+                    "z_m": 1.1,
+                    "duration_s": 1,
+                    "notes": "Near sofa",
+                },
+                blocking=True,
+                return_response=True,
+            )
 
-        assert response["device_id"] == device_entry.id
-        session_id = response["session_id"]
+            assert response["device_id"] == device_entry.id
+            assert isinstance(response["expected_complete_at"], str)
+            assert "T" in response["expected_complete_at"]
+            session_id = response["session_id"]
 
-        coordinator.calibration.capture_update()
-        await coordinator.calibration._async_finalize_session(session_id)
+            coordinator.calibration.capture_update()
+            await coordinator.calibration._async_finalize_session(session_id)
 
-        task = coordinator.calibration._session_tasks.pop(session_id)
-        task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await task
-        await hass.async_block_till_done()
+            task = coordinator.calibration._session_tasks.pop(session_id)
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+            await hass.async_block_till_done()
+
+            notify_mock.assert_called_once()
+            assert "Bermuda calibration sample complete" == notify_mock.call_args.kwargs["title"]
+            assert notify_mock.call_args.kwargs["notification_id"] == f"bermuda_calibration_{session_id}"
     finally:
         unsub()
 

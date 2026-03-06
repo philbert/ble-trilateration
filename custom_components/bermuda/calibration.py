@@ -9,10 +9,12 @@ import json
 import statistics
 from copy import deepcopy
 from dataclasses import dataclass, field
+from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from bluetooth_data_tools import monotonic_time_coarse
+from homeassistant.components import persistent_notification
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import device_registry as dr
@@ -219,7 +221,7 @@ class BermudaCalibrationManager:
             "device_id": device_id,
             "room_area_id": room_area_id,
             "duration_s": duration_s,
-            "expected_complete_at": (started_dt.timestamp() + duration_s),
+            "expected_complete_at": (started_dt + timedelta(seconds=duration_s)).isoformat(),
         }
 
     async def _async_wait_and_finalize(self, session_id: str) -> None:
@@ -432,4 +434,19 @@ class BermudaCalibrationManager:
                 "quality_status": quality_status,
                 "quality_reason": quality_reason,
             },
+        )
+        title = "Bermuda calibration sample complete"
+        message = (
+            f"Device: {session.device_name}\n"
+            f"Room: {session.room_name}\n"
+            f"Status: {quality_status}\n"
+            f"Sample ID: {sample_id or 'not_saved'}"
+        )
+        if quality_reason is not None:
+            message += f"\nReason: {quality_reason}"
+        persistent_notification.async_create(
+            self.hass,
+            message,
+            title=title,
+            notification_id=f"bermuda_calibration_{session.session_id}",
         )
