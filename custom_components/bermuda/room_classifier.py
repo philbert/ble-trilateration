@@ -7,6 +7,8 @@ import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from .const import DEFAULT_ROOM_RADIUS_M
+
 if TYPE_CHECKING:
     from homeassistant.helpers.area_registry import AreaRegistry
 
@@ -16,7 +18,6 @@ _LOGGER = logging.getLogger(__name__)
 
 
 MIN_ROOM_SAMPLE_COUNT = 1
-ROOM_RADIUS_SLACK_M = 0.5
 ROOM_MARGIN_M = 0.5
 
 
@@ -52,7 +53,7 @@ class BermudaRoomClassifier:
 
     async def async_rebuild(self) -> None:
         """Rebuild all room prototypes from current calibration samples."""
-        grouped: dict[tuple[str, str], list[tuple[float, float, float]]] = {}
+        grouped: dict[tuple[str, str], list[tuple[float, float, float, float]]] = {}
         for sample in self._calibration.samples():
             if sample.get("quality", {}).get("status") == "rejected":
                 continue
@@ -62,9 +63,12 @@ class BermudaRoomClassifier:
             x_m = position.get("x_m")
             y_m = position.get("y_m")
             z_m = position.get("z_m")
+            room_radius_m = float(sample.get("room_radius_m", DEFAULT_ROOM_RADIUS_M))
             if not layout_hash or not area_id or x_m is None or y_m is None or z_m is None:
                 continue
-            grouped.setdefault((layout_hash, area_id), []).append((float(x_m), float(y_m), float(z_m)))
+            grouped.setdefault((layout_hash, area_id), []).append(
+                (float(x_m), float(y_m), float(z_m), room_radius_m)
+            )
 
         layouts: dict[str, list[_RoomPrototype]] = {}
         for (layout_hash, area_id), positions in grouped.items():
@@ -83,14 +87,15 @@ class BermudaRoomClassifier:
             centroid_y_m = sum(pos[1] for pos in positions) / len(positions)
             centroid_z_m = sum(pos[2] for pos in positions) / len(positions)
             radius_m = 0.0
-            for pos_x, pos_y, pos_z in positions:
+            for pos_x, pos_y, pos_z, declared_radius_m in positions:
                 radius_m = max(
                     radius_m,
                     math.sqrt(
                         ((pos_x - centroid_x_m) ** 2)
                         + ((pos_y - centroid_y_m) ** 2)
                         + ((pos_z - centroid_z_m) ** 2)
-                    ),
+                    )
+                    + declared_radius_m,
                 )
             layouts.setdefault(layout_hash, []).append(
                 _RoomPrototype(
@@ -99,7 +104,7 @@ class BermudaRoomClassifier:
                     centroid_x_m=centroid_x_m,
                     centroid_y_m=centroid_y_m,
                     centroid_z_m=centroid_z_m,
-                    radius_m=radius_m + ROOM_RADIUS_SLACK_M,
+                    radius_m=radius_m,
                     sample_count=len(positions),
                 )
             )

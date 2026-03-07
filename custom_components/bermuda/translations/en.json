@@ -173,6 +173,10 @@
           "name": "Z Coordinate",
           "description": "Declared Z coordinate in metres."
         },
+        "room_radius_m": {
+          "name": "Room Radius",
+          "description": "Declared room-support radius in metres for this calibration point."
+        },
         "duration_s": {
           "name": "Duration",
           "description": "Capture duration in seconds."

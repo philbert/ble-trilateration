@@ -86,6 +86,7 @@ from .const import (
     DEFAULT_DEVTRACK_TIMEOUT,
     DEFAULT_MAX_RADIUS,
     DEFAULT_MAX_VELOCITY,
+    DEFAULT_ROOM_RADIUS_M,
     DEFAULT_REF_POWER,
     DEFAULT_SMOOTHING_SAMPLES,
     DEFAULT_TRILAT_CROSS_FLOOR_PENALTY_DB,
@@ -355,6 +356,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                     vol.Required("x_m"): vol.Coerce(float),
                     vol.Required("y_m"): vol.Coerce(float),
                     vol.Required("z_m"): vol.Coerce(float),
+                    vol.Optional("room_radius_m", default=DEFAULT_ROOM_RADIUS_M): vol.Coerce(float),
                     vol.Optional("duration_s", default=60): vol.All(vol.Coerce(int), vol.Range(min=1)),
                     vol.Optional("notes", default=""): cv.string,
                 }
@@ -2672,6 +2674,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 x_m=call.data["x_m"],
                 y_m=call.data["y_m"],
                 z_m=call.data["z_m"],
+                room_radius_m=call.data.get("room_radius_m", DEFAULT_ROOM_RADIUS_M),
                 duration_s=call.data.get("duration_s", 60),
                 notes=call.data.get("notes") or None,
             )

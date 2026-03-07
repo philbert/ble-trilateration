@@ -27,6 +27,7 @@ from .const import (
     CALIBRATION_QUALITY_POOR,
     CALIBRATION_QUALITY_REJECTED,
     CALIBRATION_SAMPLE_WARN_THRESHOLD,
+    DEFAULT_ROOM_RADIUS_M,
     DISTANCE_TIMEOUT,
     DOMAIN_PRIVATE_BLE_DEVICE,
 )
@@ -65,6 +66,7 @@ class _CalibrationSession:
     room_area_id: str
     room_name: str
     position: dict[str, float]
+    room_radius_m: float
     notes: str | None
     anchors: dict[str, _AnchorObservationAccumulator] = field(default_factory=dict)
 
@@ -196,6 +198,7 @@ class BermudaCalibrationManager:
         x_m: float,
         y_m: float,
         z_m: float,
+        room_radius_m: float = DEFAULT_ROOM_RADIUS_M,
         duration_s: int = 60,
         notes: str | None = None,
     ) -> dict[str, Any]:
@@ -203,6 +206,8 @@ class BermudaCalibrationManager:
         await self._store.async_ensure_loaded()
         if duration_s < 1:
             raise HomeAssistantError("Calibration duration must be at least 1 second.")
+        if room_radius_m <= 0:
+            raise HomeAssistantError("Calibration room radius must be greater than 0 metres.")
 
         device = self._resolve_device_from_registry_id(device_id)
         if device is None:
@@ -227,6 +232,7 @@ class BermudaCalibrationManager:
             room_area_id=room_area_id,
             room_name=area.name,
             position={"x_m": float(x_m), "y_m": float(y_m), "z_m": float(z_m)},
+            room_radius_m=float(room_radius_m),
             notes=notes,
         )
         self._sessions[session.session_id] = session
@@ -238,6 +244,7 @@ class BermudaCalibrationManager:
             "started_at": session.started_at,
             "device_id": device_id,
             "room_area_id": room_area_id,
+            "room_radius_m": float(room_radius_m),
             "duration_s": duration_s,
             "expected_complete_at": (started_dt + timedelta(seconds=duration_s)).isoformat(),
         }
@@ -402,6 +409,7 @@ class BermudaCalibrationManager:
             "room_area_id": session.room_area_id,
             "room_name": session.room_name,
             "position": deepcopy(session.position),
+            "room_radius_m": session.room_radius_m,
             "anchor_layout_hash": self.current_anchor_layout_hash,
             "notes": session.notes,
             "anchors": anchors,

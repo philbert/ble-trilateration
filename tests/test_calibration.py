@@ -76,6 +76,7 @@ async def test_record_calibration_sample_service(hass: HomeAssistant, setup_berm
             assert response["device_id"] == device_entry.id
             assert isinstance(response["expected_complete_at"], str)
             assert "T" in response["expected_complete_at"]
+            assert response["room_radius_m"] == 1.0
             session_id = response["session_id"]
 
             coordinator.calibration.capture_update()
@@ -103,6 +104,7 @@ async def test_record_calibration_sample_service(hass: HomeAssistant, setup_berm
     sample = samples[0]
     assert sample["room_area_id"] == area.id
     assert sample["position"] == {"x_m": 4.2, "y_m": 1.8, "z_m": 1.1}
+    assert sample["room_radius_m"] == 1.0
     assert len(sample["anchors"]) == 3
     first_anchor = next(iter(sample["anchors"].values()))
     assert "count" not in first_anchor["buckets_1s"][0]
@@ -125,6 +127,7 @@ async def test_calibration_store_management(hass: HomeAssistant, setup_bermuda_e
             "room_area_id": "living_room",
             "room_name": "Living Room",
             "position": {"x_m": 1.0, "y_m": 2.0, "z_m": 1.0},
+            "room_radius_m": 1.0,
             "anchor_layout_hash": layout_hash,
             "anchors": {},
             "quality": {"status": "accepted", "eligible_anchor_count": 3, "reason": None},
@@ -140,6 +143,7 @@ async def test_calibration_store_management(hass: HomeAssistant, setup_bermuda_e
             "room_area_id": "office",
             "room_name": "Office",
             "position": {"x_m": 3.0, "y_m": 4.0, "z_m": 1.0},
+            "room_radius_m": 1.0,
             "anchor_layout_hash": "different_layout",
             "anchors": {},
             "quality": {"status": "accepted", "eligible_anchor_count": 3, "reason": None},
@@ -171,6 +175,7 @@ async def test_calibration_store_migrates_to_subdir(hass: HomeAssistant, setup_b
                     "room_area_id": "living_room",
                     "room_name": "Living Room",
                     "position": {"x_m": 1.0, "y_m": 2.0, "z_m": 1.0},
+                    "room_radius_m": 1.0,
                     "anchor_layout_hash": coordinator.calibration.current_anchor_layout_hash,
                     "anchors": {},
                     "quality": {"status": "accepted", "eligible_anchor_count": 3, "reason": None},
@@ -199,6 +204,7 @@ async def test_calibration_samples_options_flow(hass: HomeAssistant, setup_bermu
             "room_area_id": "living_room",
             "room_name": "Living Room",
             "position": {"x_m": 1.0, "y_m": 2.0, "z_m": 1.0},
+            "room_radius_m": 1.0,
             "anchor_layout_hash": coordinator.calibration.current_anchor_layout_hash,
             "anchors": {},
             "quality": {"status": "accepted", "eligible_anchor_count": 3, "reason": None},
