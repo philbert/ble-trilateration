@@ -117,6 +117,44 @@
         "data": {
           "confirm": "Confirm deletion"
         }
+      },
+      "topology": {
+        "title": "Topology",
+        "description": "{summary}"
+      },
+      "topology_summary": {
+        "title": "Topology Summary",
+        "description": "{summary}"
+      },
+      "topology_add_group": {
+        "title": "Add Connector Group",
+        "description": "{summary}",
+        "data": {
+          "name": "Group name",
+          "area_ids": "Areas"
+        }
+      },
+      "topology_edit_select": {
+        "title": "Edit Connector Group",
+        "description": "{summary}",
+        "data": {
+          "group_id": "Connector group"
+        }
+      },
+      "topology_edit_group": {
+        "title": "Edit Connector Group",
+        "description": "{summary}",
+        "data": {
+          "name": "Group name",
+          "area_ids": "Areas"
+        }
+      },
+      "topology_delete_group": {
+        "title": "Delete Connector Group",
+        "description": "{summary}",
+        "data": {
+          "group_id": "Connector group"
+        }
       }
     }
   },
@@ -173,9 +211,9 @@
           "name": "Z Coordinate",
           "description": "Declared Z coordinate in metres."
         },
-        "room_radius_m": {
-          "name": "Room Radius",
-          "description": "Declared room-support radius in metres for this calibration point."
+        "sample_radius_m": {
+          "name": "Sample Radius",
+          "description": "Declared support radius in metres for this calibration point."
         },
         "duration_s": {
           "name": "Duration",

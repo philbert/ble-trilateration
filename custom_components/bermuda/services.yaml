@@ -31,7 +31,7 @@ record_calibration_sample:
     z_m:
       required: true
       example: "1.1"
-    room_radius_m:
+    sample_radius_m:
       required: false
       example: "1.0"
       default: 1.0

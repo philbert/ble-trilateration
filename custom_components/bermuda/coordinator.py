@@ -72,6 +72,7 @@ from .const import (
     BDADDR_TYPE_NOT_MAC48,
     BDADDR_TYPE_RANDOM_RESOLVABLE,
     CONF_ATTENUATION,
+    CONF_CONNECTOR_GROUPS,
     CONF_DEVICES,
     CONF_DEVTRACK_TIMEOUT,
     CONF_MAX_RADIUS,
@@ -86,7 +87,7 @@ from .const import (
     DEFAULT_DEVTRACK_TIMEOUT,
     DEFAULT_MAX_RADIUS,
     DEFAULT_MAX_VELOCITY,
-    DEFAULT_ROOM_RADIUS_M,
+    DEFAULT_SAMPLE_RADIUS_M,
     DEFAULT_REF_POWER,
     DEFAULT_SMOOTHING_SAMPLES,
     DEFAULT_TRILAT_CROSS_FLOOR_PENALTY_DB,
@@ -253,6 +254,9 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         self.calibration = BermudaCalibrationManager(hass, self, self.calibration_store)
         self.ranging_model = BermudaRangingModel(self.calibration)
         self.room_classifier = BermudaRoomClassifier(self.calibration, self.ar)
+        self._connector_groups_by_id: dict[str, dict] = {}
+        self._connector_area_to_group_id: dict[str, str] = {}
+        self._connector_group_floor_ids: dict[str, set[str]] = {}
 
         # Track the list of Private BLE devices, noting their entity id
         # and current "last address".
@@ -303,6 +307,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         self.options[CONF_SMOOTHING_SAMPLES] = DEFAULT_SMOOTHING_SAMPLES
         self.options[CONF_UPDATE_INTERVAL] = DEFAULT_UPDATE_INTERVAL
         self.options[CONF_RSSI_OFFSETS] = {}
+        self.options[CONF_CONNECTOR_GROUPS] = []
         self.options[CONF_TRILAT_ENABLED] = DEFAULT_TRILAT_ENABLED
         self.options[CONF_TRILAT_CROSS_FLOOR_PENALTY_DB] = DEFAULT_TRILAT_CROSS_FLOOR_PENALTY_DB
 
@@ -321,10 +326,13 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                     CONF_REF_POWER,
                     CONF_SMOOTHING_SAMPLES,
                     CONF_RSSI_OFFSETS,
+                    CONF_CONNECTOR_GROUPS,
                     CONF_TRILAT_ENABLED,
                     CONF_TRILAT_CROSS_FLOOR_PENALTY_DB,
                 ):
                     self.options[key] = val
+
+        self._rebuild_connector_topology()
 
         self.devices: dict[str, BermudaDevice] = {}
         # self.updaters: dict[str, BermudaPBDUCoordinator] = {}
@@ -356,7 +364,8 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                     vol.Required("x_m"): vol.Coerce(float),
                     vol.Required("y_m"): vol.Coerce(float),
                     vol.Required("z_m"): vol.Coerce(float),
-                    vol.Optional("room_radius_m", default=DEFAULT_ROOM_RADIUS_M): vol.Coerce(float),
+                    vol.Optional("sample_radius_m"): vol.Coerce(float),
+                    vol.Optional("room_radius_m"): vol.Coerce(float),
                     vol.Optional("duration_s", default=60): vol.All(vol.Coerce(int), vol.Range(min=1)),
                     vol.Optional("notes", default=""): cv.string,
                 }
@@ -1497,6 +1506,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             or device.trilat_x_m is None
             or device.trilat_y_m is None
         ):
+            device.diag_area_switch = "KDE room classification: trilat_unavailable"
             device.apply_position_classification(
                 None,
                 floor_id=device.trilat_floor_id,
@@ -1506,6 +1516,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             return
 
         if not self.room_classifier.has_trained_rooms(layout_hash, device.trilat_floor_id):
+            device.diag_area_switch = "KDE room classification: no_trained_rooms"
             device.apply_position_classification(
                 None,
                 floor_id=device.trilat_floor_id,
@@ -1521,7 +1532,14 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             y_m=device.trilat_y_m,
             z_m=device.trilat_z_m,
         )
-        device.diag_area_switch = f"Trilat room classification: {classification.reason}"
+        device.diag_area_switch = (
+            "KDE room classification: "
+            f"{classification.reason} "
+            f"best={classification.best_area_id or 'none'} "
+            f"score={classification.best_score:.2f} "
+            f"second={classification.second_score:.2f} "
+            f"topk_used={classification.topk_used}"
+        )
         if classification.area_id is not None:
             device.apply_position_classification(
                 classification.area_id,
@@ -1668,6 +1686,8 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
     _TRILAT_MAX_ANCHOR_SIGMA_M: float = 6.0
     _TRILAT_FLOOR_AMBIGUITY_RATIO: float = 0.2
     _TRILAT_RANGE_DELTA_EPSILON_M: float = 0.2
+    _NON_CONNECTOR_EXTRA_FLOOR_SWITCH_MARGIN: float = 0.18
+    _NON_CONNECTOR_EXTRA_FLOOR_DWELL_S: float = 12.0
 
     @staticmethod
     def _score_rssi(rssi_filtered: float | None) -> float:
@@ -2078,6 +2098,69 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             return None
         return floor.name
 
+    def _rebuild_connector_topology(self) -> None:
+        """Rebuild runtime connector-group lookup tables from config options."""
+        self._connector_groups_by_id = {}
+        self._connector_area_to_group_id = {}
+        self._connector_group_floor_ids = {}
+        for raw_group in self.options.get(CONF_CONNECTOR_GROUPS, []):
+            group_id = str(raw_group.get("id") or "").strip()
+            area_ids = [str(area_id) for area_id in raw_group.get("area_ids", []) if str(area_id).strip()]
+            if not group_id or not area_ids:
+                continue
+            floor_ids: set[str] = set()
+            for area_id in area_ids:
+                area = self.ar.async_get_area(area_id)
+                if area is None or area.floor_id is None:
+                    continue
+                floor_ids.add(area.floor_id)
+                self._connector_area_to_group_id[area_id] = group_id
+            self._connector_groups_by_id[group_id] = {
+                "id": group_id,
+                "name": str(raw_group.get("name") or group_id),
+                "area_ids": area_ids,
+            }
+            self._connector_group_floor_ids[group_id] = floor_ids
+
+    def group_for_area(self, area_id: str | None) -> str | None:
+        """Return connector-group id for an area, if any."""
+        if area_id is None:
+            return None
+        return self._connector_area_to_group_id.get(area_id)
+
+    def group_has_floor(self, group_id: str | None, floor_id: str | None) -> bool:
+        """Return whether a connector group spans a floor."""
+        if group_id is None or floor_id is None:
+            return False
+        return floor_id in self._connector_group_floor_ids.get(group_id, set())
+
+    def challenger_floor_is_connector_authorized(self, previous_floor_id: str | None, challenger_floor_id: str | None) -> bool:
+        """Return whether any connector group links the previous and challenger floors."""
+        if previous_floor_id is None or challenger_floor_id is None:
+            return False
+        if previous_floor_id == challenger_floor_id:
+            return True
+        for floor_ids in self._connector_group_floor_ids.values():
+            if previous_floor_id in floor_ids and challenger_floor_id in floor_ids:
+                return True
+        return False
+
+    def _stable_area_id_for_topology(self, device: BermudaDevice) -> str | None:
+        """Return the most recent stable area id for topology checks."""
+        if device.area_id is not None and not device.area_is_unknown:
+            return device.area_id
+        return device.area_last_seen_id
+
+    def _stable_floor_id_for_topology(self, device: BermudaDevice) -> str | None:
+        """Resolve stable floor id from current or last stable area."""
+        stable_area_id = self._stable_area_id_for_topology(device)
+        if stable_area_id is None:
+            return None
+        area = self.ar.async_get_area(stable_area_id)
+        if area is None:
+            return None
+        return area.floor_id
+
     def _async_manage_repair_trilat_without_anchors(self, scannerlist: list[str]):
         """Raise/clear repair when trilat is enabled but no anchors are configured."""
         if self._trilat_scanners_without_anchors != scannerlist:
@@ -2232,11 +2315,28 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         elif best_floor_id != state.floor_id:
             current_floor_score = floor_evidence.get(state.floor_id, 0.0)
             floor_margin = (best_floor_score - current_floor_score) / max(best_floor_score, 1e-9)
-            if floor_margin >= policy.floor_switch_margin:
+            previous_stable_floor_id = self._stable_floor_id_for_topology(device)
+            connector_authorized = True
+            if self._connector_groups_by_id and previous_stable_floor_id is not None:
+                connector_authorized = self.challenger_floor_is_connector_authorized(
+                    previous_stable_floor_id,
+                    best_floor_id,
+                )
+            required_margin = policy.floor_switch_margin
+            required_dwell = policy.floor_dwell_seconds
+            if (
+                self._connector_groups_by_id
+                and previous_stable_floor_id is not None
+                and not connector_authorized
+            ):
+                required_margin += self._NON_CONNECTOR_EXTRA_FLOOR_SWITCH_MARGIN
+                required_dwell += self._NON_CONNECTOR_EXTRA_FLOOR_DWELL_S
+
+            if floor_margin >= required_margin:
                 if state.floor_challenger_id != best_floor_id:
                     state.floor_challenger_id = best_floor_id
                     state.floor_challenger_since = nowstamp
-                elif nowstamp - state.floor_challenger_since >= policy.floor_dwell_seconds:
+                elif nowstamp - state.floor_challenger_since >= required_dwell:
                     state.floor_id = best_floor_id
                     state.floor_challenger_id = None
                     state.floor_challenger_since = 0.0
@@ -2667,6 +2767,9 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
 
     async def service_record_calibration_sample(self, call: ServiceCall) -> ServiceResponse:
         """Start an asynchronous calibration sample capture session."""
+        sample_radius_m = call.data.get("sample_radius_m")
+        if sample_radius_m is None:
+            sample_radius_m = call.data.get("room_radius_m", DEFAULT_SAMPLE_RADIUS_M)
         try:
             response = await self.calibration.async_start_session(
                 device_id=call.data["device_id"],
@@ -2674,7 +2777,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 x_m=call.data["x_m"],
                 y_m=call.data["y_m"],
                 z_m=call.data["z_m"],
-                room_radius_m=call.data.get("room_radius_m", DEFAULT_ROOM_RADIUS_M),
+                sample_radius_m=sample_radius_m,
                 duration_s=call.data.get("duration_s", 60),
                 notes=call.data.get("notes") or None,
             )

@@ -58,7 +58,7 @@ CALIBRATION_SAMPLE_WARN_THRESHOLD: Final = 500
 CALIBRATION_QUALITY_ACCEPTED: Final = "accepted"
 CALIBRATION_QUALITY_POOR: Final = "poor_quality"
 CALIBRATION_QUALITY_REJECTED: Final = "rejected"
-DEFAULT_ROOM_RADIUS_M: Final = 1.0
+DEFAULT_SAMPLE_RADIUS_M: Final = 1.0
 
 UPDATE_INTERVAL = 1.05  # Seconds between bluetooth data processing cycles
 # Note: this is separate from the CONF_UPDATE_INTERVAL which allows the
@@ -269,6 +269,7 @@ DOCS[CONF_REF_POWER] = "Default RSSI for signal at 1 metre."
 CONF_SAVE_AND_CLOSE = "save_and_close"
 CONF_SCANNER_INFO = "scanner_info"
 CONF_RSSI_OFFSETS = "rssi_offsets"
+CONF_CONNECTOR_GROUPS = "connector_groups"
 CONF_TRILAT_ENABLED, DEFAULT_TRILAT_ENABLED = "trilat_enabled", True
 CONF_TRILAT_CROSS_FLOOR_PENALTY_DB, DEFAULT_TRILAT_CROSS_FLOOR_PENALTY_DB = "trilat_cross_floor_penalty_db", 8.0
 

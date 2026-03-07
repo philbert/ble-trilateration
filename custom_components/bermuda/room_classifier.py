@@ -1,13 +1,14 @@
-"""Calibration-sample room classifier for Bermuda."""
+"""Calibration-sample KDE room classifier for Bermuda."""
 
 from __future__ import annotations
 
 import logging
 import math
+from collections import defaultdict
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from .const import DEFAULT_ROOM_RADIUS_M
+from .const import DEFAULT_SAMPLE_RADIUS_M
 
 if TYPE_CHECKING:
     from homeassistant.helpers.area_registry import AreaRegistry
@@ -16,9 +17,10 @@ if TYPE_CHECKING:
 
 _LOGGER = logging.getLogger(__name__)
 
-
-MIN_ROOM_SAMPLE_COUNT = 1
-ROOM_MARGIN_M = 0.5
+ROOM_KERNEL_Z_WEIGHT = 0.15
+ROOM_SCORE_MIN = 0.15
+ROOM_SCORE_RATIO_MIN = 1.25
+K_CAP = 3
 
 
 @dataclass(frozen=True)
@@ -27,19 +29,22 @@ class RoomClassification:
 
     area_id: str | None
     reason: str
+    best_area_id: str | None = None
+    best_score: float = 0.0
+    second_score: float = 0.0
+    topk_used: int = 0
 
 
 @dataclass(frozen=True)
-class _RoomPrototype:
-    """Trained room envelope for one layout."""
+class _SampleKernel:
+    """One persisted calibration sample represented as a soft kernel."""
 
     area_id: str
     floor_id: str | None
-    centroid_x_m: float
-    centroid_y_m: float
-    centroid_z_m: float
-    radius_m: float
-    sample_count: int
+    x_m: float
+    y_m: float
+    z_m: float
+    sigma_m: float
 
 
 class BermudaRoomClassifier:
@@ -49,11 +54,11 @@ class BermudaRoomClassifier:
         """Initialise classifier cache."""
         self._calibration = calibration
         self._area_registry = area_registry
-        self._layouts: dict[str, list[_RoomPrototype]] = {}
+        self._layouts: dict[str, list[_SampleKernel]] = {}
 
     async def async_rebuild(self) -> None:
-        """Rebuild all room prototypes from current calibration samples."""
-        grouped: dict[tuple[str, str], list[tuple[float, float, float, float]]] = {}
+        """Rebuild all room kernels from current calibration samples."""
+        layouts: dict[str, list[_SampleKernel]] = defaultdict(list)
         for sample in self._calibration.samples():
             if sample.get("quality", {}).get("status") == "rejected":
                 continue
@@ -63,16 +68,13 @@ class BermudaRoomClassifier:
             x_m = position.get("x_m")
             y_m = position.get("y_m")
             z_m = position.get("z_m")
-            room_radius_m = float(sample.get("room_radius_m", DEFAULT_ROOM_RADIUS_M))
-            if not layout_hash or not area_id or x_m is None or y_m is None or z_m is None:
-                continue
-            grouped.setdefault((layout_hash, area_id), []).append(
-                (float(x_m), float(y_m), float(z_m), room_radius_m)
+            sigma_m = float(
+                sample.get(
+                    "sample_radius_m",
+                    sample.get("room_radius_m", DEFAULT_SAMPLE_RADIUS_M),
+                )
             )
-
-        layouts: dict[str, list[_RoomPrototype]] = {}
-        for (layout_hash, area_id), positions in grouped.items():
-            if len(positions) < MIN_ROOM_SAMPLE_COUNT:
+            if not layout_hash or not area_id or x_m is None or y_m is None or z_m is None:
                 continue
             area = self._area_registry.async_get_area(area_id)
             if area is None:
@@ -83,36 +85,21 @@ class BermudaRoomClassifier:
                     area_id,
                 )
                 continue
-            centroid_x_m = sum(pos[0] for pos in positions) / len(positions)
-            centroid_y_m = sum(pos[1] for pos in positions) / len(positions)
-            centroid_z_m = sum(pos[2] for pos in positions) / len(positions)
-            radius_m = 0.0
-            for pos_x, pos_y, pos_z, declared_radius_m in positions:
-                radius_m = max(
-                    radius_m,
-                    math.sqrt(
-                        ((pos_x - centroid_x_m) ** 2)
-                        + ((pos_y - centroid_y_m) ** 2)
-                        + ((pos_z - centroid_z_m) ** 2)
-                    )
-                    + declared_radius_m,
-                )
-            layouts.setdefault(layout_hash, []).append(
-                _RoomPrototype(
+            layouts[layout_hash].append(
+                _SampleKernel(
                     area_id=area_id,
                     floor_id=area.floor_id,
-                    centroid_x_m=centroid_x_m,
-                    centroid_y_m=centroid_y_m,
-                    centroid_z_m=centroid_z_m,
-                    radius_m=radius_m,
-                    sample_count=len(positions),
+                    x_m=float(x_m),
+                    y_m=float(y_m),
+                    z_m=float(z_m),
+                    sigma_m=max(float(sigma_m), 0.1),
                 )
             )
-        self._layouts = layouts
+        self._layouts = dict(layouts)
 
     def has_trained_rooms(self, layout_hash: str, floor_id: str | None) -> bool:
         """Return whether trained rooms exist for a layout/floor pair."""
-        return any(room.floor_id == floor_id for room in self._layouts.get(layout_hash, []))
+        return any(sample.floor_id == floor_id for sample in self._layouts.get(layout_hash, []))
 
     def classify(
         self,
@@ -123,32 +110,56 @@ class BermudaRoomClassifier:
         y_m: float,
         z_m: float | None,
     ) -> RoomClassification:
-        """Classify one solved position."""
+        """Classify one solved position using per-sample Gaussian kernels."""
         if floor_id is None:
             return RoomClassification(area_id=None, reason="missing_floor")
 
-        rooms = [room for room in self._layouts.get(layout_hash, []) if room.floor_id == floor_id]
-        if not rooms:
+        samples = [sample for sample in self._layouts.get(layout_hash, []) if sample.floor_id == floor_id]
+        if not samples:
             return RoomClassification(area_id=None, reason="no_trained_rooms")
 
         position_z = 0.0 if z_m is None else z_m
-        containing: list[tuple[float, _RoomPrototype]] = []
-        for room in rooms:
-            centroid_distance = math.sqrt(
-                ((x_m - room.centroid_x_m) ** 2)
-                + ((y_m - room.centroid_y_m) ** 2)
-                + ((position_z - room.centroid_z_m) ** 2)
+        room_scores: dict[str, list[float]] = defaultdict(list)
+        for sample in samples:
+            dx = x_m - sample.x_m
+            dy = y_m - sample.y_m
+            dz = position_z - sample.z_m
+            d2 = (dx * dx) + (dy * dy) + (ROOM_KERNEL_Z_WEIGHT * dz * dz)
+            sample_score = math.exp(-0.5 * d2 / (sample.sigma_m * sample.sigma_m))
+            room_scores[sample.area_id].append(sample_score)
+
+        ranked_rooms: list[tuple[float, str, int]] = []
+        for area_id, scores in room_scores.items():
+            top_scores = sorted(scores, reverse=True)[:K_CAP]
+            ranked_rooms.append((sum(top_scores) / len(top_scores), area_id, len(top_scores)))
+        ranked_rooms.sort(key=lambda row: (row[0], row[1]), reverse=True)
+
+        best_score, best_area_id, topk_used = ranked_rooms[0]
+        second_score = ranked_rooms[1][0] if len(ranked_rooms) > 1 else 0.0
+
+        if best_score < ROOM_SCORE_MIN:
+            return RoomClassification(
+                area_id=None,
+                reason="weak_room_evidence",
+                best_area_id=best_area_id,
+                best_score=best_score,
+                second_score=second_score,
+                topk_used=topk_used,
             )
-            if centroid_distance <= room.radius_m:
-                containing.append((centroid_distance, room))
-
-        if not containing:
-            return RoomClassification(area_id=None, reason="outside_trained_support")
-
-        containing.sort(key=lambda item: item[0])
-        best_distance, best_room = containing[0]
-        if len(containing) > 1:
-            second_distance = containing[1][0]
-            if (second_distance - best_distance) < ROOM_MARGIN_M:
-                return RoomClassification(area_id=None, reason="margin_not_met")
-        return RoomClassification(area_id=best_room.area_id, reason="ok")
+        if len(ranked_rooms) > 1 and (best_score / max(second_score, 1e-9)) < ROOM_SCORE_RATIO_MIN:
+            return RoomClassification(
+                area_id=None,
+                reason="room_ambiguity",
+                best_area_id=best_area_id,
+                best_score=best_score,
+                second_score=second_score,
+                topk_used=topk_used,
+            )
+        return RoomClassification(
+            area_id=best_area_id,
+            reason="ok",
+            best_area_id=best_area_id,
+            best_score=best_score,
+            second_score=second_score,
+            topk_used=topk_used,
+        )

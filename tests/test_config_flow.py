@@ -5,6 +5,8 @@ from __future__ import annotations
 from homeassistant import config_entries
 from homeassistant import data_entry_flow
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import area_registry as ar
+from homeassistant.helpers import floor_registry as fr
 
 # from homeassistant.core import HomeAssistant  # noqa: F401
 from homeassistant.data_entry_flow import FlowResultType
@@ -69,4 +71,120 @@ async def test_options_flow(hass: HomeAssistant, setup_bermuda_entry: MockConfig
     assert result.get("menu_options") == {
         "selectdevices": "Select Devices",
         "calibration_samples": "Calibration Samples",
+        "topology": "Topology",
     }
+
+
+async def test_topology_options_flow_add_edit_delete_group(hass: HomeAssistant, setup_bermuda_entry: MockConfigEntry):
+    """Topology options flow should add, edit and delete connector groups."""
+    floors = fr.async_get(hass)
+    ground = floors.async_create("Ground floor", level=0)
+    upper = floors.async_create("Upper floor", level=1)
+    areas = ar.async_get(hass)
+    living = areas.async_create("Living Room", floor_id=ground.floor_id)
+    landing = areas.async_create("Landing", floor_id=upper.floor_id)
+
+    result = await hass.config_entries.options.async_init(setup_bermuda_entry.entry_id)
+    result = await hass.config_entries.options.async_configure(result["flow_id"], user_input={"next_step_id": "topology"})
+    assert result["type"] == FlowResultType.MENU
+    assert result["step_id"] == "topology"
+
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"],
+        user_input={"next_step_id": "topology_add_group"},
+    )
+    assert result["type"] == FlowResultType.FORM
+    assert result["step_id"] == "topology_add_group"
+
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"],
+        user_input={"name": "Stairs", "area_ids": [living.id, landing.id]},
+    )
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    assert len(result["data"]["connector_groups"]) == 1
+
+    hass.config_entries.async_update_entry(setup_bermuda_entry, options=result["data"])
+
+    result = await hass.config_entries.options.async_init(setup_bermuda_entry.entry_id)
+    result = await hass.config_entries.options.async_configure(result["flow_id"], user_input={"next_step_id": "topology"})
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"],
+        user_input={"next_step_id": "topology_edit_select"},
+    )
+    group_id = setup_bermuda_entry.options["connector_groups"][0]["id"]
+    result = await hass.config_entries.options.async_configure(result["flow_id"], user_input={"group_id": group_id})
+    assert result["type"] == FlowResultType.FORM
+    assert result["step_id"] == "topology_edit_group"
+
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"],
+        user_input={"name": "Main stairs", "area_ids": [living.id, landing.id]},
+    )
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    assert result["data"]["connector_groups"][0]["name"] == "Main stairs"
+
+    hass.config_entries.async_update_entry(setup_bermuda_entry, options=result["data"])
+
+    result = await hass.config_entries.options.async_init(setup_bermuda_entry.entry_id)
+    result = await hass.config_entries.options.async_configure(result["flow_id"], user_input={"next_step_id": "topology"})
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"],
+        user_input={"next_step_id": "topology_delete_group"},
+    )
+    result = await hass.config_entries.options.async_configure(result["flow_id"], user_input={"group_id": group_id})
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    assert result["data"]["connector_groups"] == []
+
+
+async def test_topology_options_flow_rejects_invalid_groups(hass: HomeAssistant, setup_bermuda_entry: MockConfigEntry):
+    """Topology options flow should reject groups without floors, cross-floor span or unique areas."""
+    floors = fr.async_get(hass)
+    ground = floors.async_create("Ground floor", level=0)
+    upper = floors.async_create("Upper floor", level=1)
+    areas = ar.async_get(hass)
+    living = areas.async_create("Living Room", floor_id=ground.floor_id)
+    kitchen = areas.async_create("Kitchen", floor_id=ground.floor_id)
+    landing = areas.async_create("Landing", floor_id=upper.floor_id)
+    attic = areas.async_create("Attic")
+
+    result = await hass.config_entries.options.async_init(setup_bermuda_entry.entry_id)
+    result = await hass.config_entries.options.async_configure(result["flow_id"], user_input={"next_step_id": "topology"})
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"],
+        user_input={"next_step_id": "topology_add_group"},
+    )
+
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"],
+        user_input={"name": "Invalid", "area_ids": [living.id, attic.id]},
+    )
+    assert result["type"] == FlowResultType.FORM
+    assert "must be assigned to a floor" in result["description_placeholders"]["summary"]
+
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"],
+        user_input={"name": "Same floor", "area_ids": [living.id, kitchen.id]},
+    )
+    assert result["type"] == FlowResultType.FORM
+    assert "span at least two floors" in result["description_placeholders"]["summary"]
+
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"],
+        user_input={"name": "Valid", "area_ids": [living.id, landing.id]},
+    )
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+
+    hass.config_entries.async_update_entry(setup_bermuda_entry, options=result["data"])
+
+    result = await hass.config_entries.options.async_init(setup_bermuda_entry.entry_id)
+    result = await hass.config_entries.options.async_configure(result["flow_id"], user_input={"next_step_id": "topology"})
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"],
+        user_input={"next_step_id": "topology_add_group"},
+    )
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"],
+        user_input={"name": "Duplicate", "area_ids": [living.id, kitchen.id, landing.id]},
+    )
+    assert result["type"] == FlowResultType.FORM
+    assert "already used by another connector group" in result["description_placeholders"]["summary"]

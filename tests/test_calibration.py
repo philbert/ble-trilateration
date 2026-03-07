@@ -76,7 +76,7 @@ async def test_record_calibration_sample_service(hass: HomeAssistant, setup_berm
             assert response["device_id"] == device_entry.id
             assert isinstance(response["expected_complete_at"], str)
             assert "T" in response["expected_complete_at"]
-            assert response["room_radius_m"] == 1.0
+            assert response["sample_radius_m"] == 1.0
             session_id = response["session_id"]
 
             coordinator.calibration.capture_update()
@@ -104,12 +104,72 @@ async def test_record_calibration_sample_service(hass: HomeAssistant, setup_berm
     sample = samples[0]
     assert sample["room_area_id"] == area.id
     assert sample["position"] == {"x_m": 4.2, "y_m": 1.8, "z_m": 1.1}
-    assert sample["room_radius_m"] == 1.0
+    assert sample["sample_radius_m"] == 1.0
     assert len(sample["anchors"]) == 3
     first_anchor = next(iter(sample["anchors"].values()))
     assert "count" not in first_anchor["buckets_1s"][0]
     assert "rssi_median" not in first_anchor["buckets_1s"][0]
     assert "rssi" in first_anchor["buckets_1s"][0]
+
+
+async def test_record_calibration_sample_service_accepts_legacy_room_radius(hass: HomeAssistant, setup_bermuda_entry):
+    """Legacy room_radius_m service input should still be accepted temporarily."""
+    coordinator = setup_bermuda_entry.runtime_data.coordinator
+
+    area = ar.async_get(hass).async_create("Living Room")
+    devreg = dr.async_get(hass)
+    device_entry = devreg.async_get_or_create(
+        config_entry_id=setup_bermuda_entry.entry_id,
+        connections={(dr.CONNECTION_BLUETOOTH, "AA:BB:CC:DD:EE:11")},
+        name="Phil Phone",
+    )
+
+    target = BermudaDevice("aa:bb:cc:dd:ee:11", coordinator)
+    target.name = "Phil Phone"
+    coordinator.devices[target.address] = target
+
+    scanner = BermudaDevice("aa:bb:cc:dd:10:11", coordinator)
+    scanner.name = "Scanner"
+    scanner.anchor_enabled = True
+    scanner.anchor_x_m = 0.0
+    scanner.anchor_y_m = 1.0
+    scanner.anchor_z_m = 2.0
+    coordinator.devices[scanner.address] = scanner
+    coordinator._scanner_list.add(scanner.address)
+    target.adverts[(target.address, scanner.address)] = SimpleNamespace(
+        scanner_address=scanner.address,
+        stamp=monotonic_time_coarse(),
+        rssi=-65.0,
+    )
+
+    response = await hass.services.async_call(
+        DOMAIN,
+        "record_calibration_sample",
+        {
+            "device_id": device_entry.id,
+            "room_area_id": area.id,
+            "x_m": 4.2,
+            "y_m": 1.8,
+            "z_m": 1.1,
+            "room_radius_m": 1.4,
+            "duration_s": 1,
+        },
+        blocking=True,
+        return_response=True,
+    )
+
+    session_id = response["session_id"]
+    coordinator.calibration.capture_update()
+    await coordinator.calibration._async_finalize_session(session_id)
+
+    task = coordinator.calibration._session_tasks.pop(session_id)
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+    sample = coordinator.calibration.samples()[0]
+    assert sample["sample_radius_m"] == 1.4
+    assert "room_radius_m" not in sample
 
 
 async def test_calibration_store_management(hass: HomeAssistant, setup_bermuda_entry):
@@ -127,7 +187,7 @@ async def test_calibration_store_management(hass: HomeAssistant, setup_bermuda_e
             "room_area_id": "living_room",
             "room_name": "Living Room",
             "position": {"x_m": 1.0, "y_m": 2.0, "z_m": 1.0},
-            "room_radius_m": 1.0,
+            "sample_radius_m": 1.0,
             "anchor_layout_hash": layout_hash,
             "anchors": {},
             "quality": {"status": "accepted", "eligible_anchor_count": 3, "reason": None},
@@ -143,7 +203,7 @@ async def test_calibration_store_management(hass: HomeAssistant, setup_bermuda_e
             "room_area_id": "office",
             "room_name": "Office",
             "position": {"x_m": 3.0, "y_m": 4.0, "z_m": 1.0},
-            "room_radius_m": 1.0,
+            "sample_radius_m": 1.0,
             "anchor_layout_hash": "different_layout",
             "anchors": {},
             "quality": {"status": "accepted", "eligible_anchor_count": 3, "reason": None},
@@ -175,7 +235,7 @@ async def test_calibration_store_migrates_to_subdir(hass: HomeAssistant, setup_b
                     "room_area_id": "living_room",
                     "room_name": "Living Room",
                     "position": {"x_m": 1.0, "y_m": 2.0, "z_m": 1.0},
-                    "room_radius_m": 1.0,
+                    "sample_radius_m": 1.0,
                     "anchor_layout_hash": coordinator.calibration.current_anchor_layout_hash,
                     "anchors": {},
                     "quality": {"status": "accepted", "eligible_anchor_count": 3, "reason": None},
@@ -204,7 +264,7 @@ async def test_calibration_samples_options_flow(hass: HomeAssistant, setup_bermu
             "room_area_id": "living_room",
             "room_name": "Living Room",
             "position": {"x_m": 1.0, "y_m": 2.0, "z_m": 1.0},
-            "room_radius_m": 1.0,
+            "sample_radius_m": 1.0,
             "anchor_layout_hash": coordinator.calibration.current_anchor_layout_hash,
             "anchors": {},
             "quality": {"status": "accepted", "eligible_anchor_count": 3, "reason": None},

@@ -15,11 +15,13 @@ from homeassistant.helpers.selector import (
     SelectSelectorConfig,
     SelectSelectorMode,
 )
+from uuid import uuid4
 
 from .const import (
     ADDR_TYPE_IBEACON,
     ADDR_TYPE_PRIVATE_BLE_DEVICE,
     BDADDR_TYPE_RANDOM_RESOLVABLE,
+    CONF_CONNECTOR_GROUPS,
     CONF_DEVICES,
     DISTANCE_INFINITE,
     DOMAIN,
@@ -105,6 +107,8 @@ class BermudaOptionsFlowHandler(OptionsFlowWithConfigEntry):
         super().__init__(config_entry)
         self.coordinator: BermudaDataUpdateCoordinator
         self._last_calibration_status: str | None = None
+        self._last_topology_status: str | None = None
+        self._editing_connector_group_id: str | None = None
 
     async def async_step_init(self, user_input=None):  # pylint: disable=unused-argument
         """Manage the options."""
@@ -159,6 +163,7 @@ class BermudaOptionsFlowHandler(OptionsFlowWithConfigEntry):
             menu_options={
                 "selectdevices": "Select Devices",
                 "calibration_samples": "Calibration Samples",
+                "topology": "Topology",
             },
             description_placeholders=messages,
         )
@@ -419,6 +424,210 @@ class BermudaOptionsFlowHandler(OptionsFlowWithConfigEntry):
             for sample in summary["recent"]:
                 lines.append(f"- {self._format_sample_label(sample)}")
         return "\n".join(lines)
+
+    async def async_step_topology(self, user_input=None):
+        """Manage connector-group topology."""
+        summary = self._format_topology_summary()
+        description = summary
+        if self._last_topology_status:
+            description = f"{self._last_topology_status}\n\n{description}"
+            self._last_topology_status = None
+
+        menu_options = {
+            "topology_summary": "Topology Summary",
+            "topology_add_group": "Add Connector Group",
+        }
+        if self._connector_groups():
+            menu_options["topology_edit_select"] = "Edit Connector Group"
+            menu_options["topology_delete_group"] = "Delete Connector Group"
+
+        return self.async_show_menu(
+            step_id="topology",
+            menu_options=menu_options,
+            description_placeholders={"summary": description},
+        )
+
+    async def async_step_topology_summary(self, user_input=None):
+        """Show connector-group topology summary."""
+        if user_input is not None:
+            return await self.async_step_topology()
+        return self.async_show_form(
+            step_id="topology_summary",
+            data_schema=vol.Schema({}),
+            description_placeholders={"summary": self._format_topology_summary(include_groups=True)},
+        )
+
+    async def async_step_topology_add_group(self, user_input=None):
+        """Create a connector group."""
+        return await self._async_step_topology_group_form(step_id="topology_add_group", user_input=user_input)
+
+    async def async_step_topology_edit_select(self, user_input=None):
+        """Choose connector group to edit."""
+        groups = self._connector_groups()
+        options = [
+            SelectOptionDict(value=group["id"], label=self._format_connector_group_label(group))
+            for group in groups
+        ]
+        if user_input is not None:
+            self._editing_connector_group_id = user_input["group_id"]
+            return await self.async_step_topology_edit_group()
+
+        return self.async_show_form(
+            step_id="topology_edit_select",
+            data_schema=vol.Schema(
+                {
+                    vol.Required("group_id"): SelectSelector(
+                        SelectSelectorConfig(options=options, multiple=False, mode=SelectSelectorMode.DROPDOWN)
+                    )
+                }
+            ),
+            description_placeholders={"summary": "Choose one connector group to edit."},
+        )
+
+    async def async_step_topology_edit_group(self, user_input=None):
+        """Edit a connector group."""
+        return await self._async_step_topology_group_form(
+            step_id="topology_edit_group",
+            user_input=user_input,
+            group_id=self._editing_connector_group_id,
+        )
+
+    async def async_step_topology_delete_group(self, user_input=None):
+        """Delete a connector group."""
+        groups = self._connector_groups()
+        options = [
+            SelectOptionDict(value=group["id"], label=self._format_connector_group_label(group))
+            for group in groups
+        ]
+        if user_input is not None:
+            group_id = user_input["group_id"]
+            groups = [group for group in groups if group["id"] != group_id]
+            self.options[CONF_CONNECTOR_GROUPS] = groups
+            self._last_topology_status = "Deleted connector group."
+            return await self._update_options()
+
+        return self.async_show_form(
+            step_id="topology_delete_group",
+            data_schema=vol.Schema(
+                {
+                    vol.Required("group_id"): SelectSelector(
+                        SelectSelectorConfig(options=options, multiple=False, mode=SelectSelectorMode.DROPDOWN)
+                    )
+                }
+            ),
+            description_placeholders={"summary": "Choose one connector group to delete."},
+        )
+
+    async def _async_step_topology_group_form(self, step_id: str, user_input=None, group_id: str | None = None):
+        """Add or edit a connector group."""
+        groups = self._connector_groups()
+        group = next((item for item in groups if item["id"] == group_id), None)
+        status = ""
+        if user_input is not None:
+            area_ids = list(user_input["area_ids"])
+            valid, status = self._validate_connector_group(area_ids, editing_group_id=group_id)
+            if valid:
+                payload = {
+                    "id": group_id or f"connector_{uuid4().hex[:8]}",
+                    "name": str(user_input.get("name") or "").strip(),
+                    "area_ids": area_ids,
+                }
+                next_groups = [item for item in groups if item["id"] != payload["id"]]
+                next_groups.append(payload)
+                next_groups.sort(key=lambda item: (str(item.get("name") or ""), item["id"]))
+                self.options[CONF_CONNECTOR_GROUPS] = next_groups
+                self._last_topology_status = "Saved connector group."
+                self._editing_connector_group_id = None
+                return await self._update_options()
+
+        area_options = self._topology_area_options()
+        description = self._format_topology_summary(include_groups=True)
+        if status:
+            description = f"{status}\n\n{description}"
+
+        return self.async_show_form(
+            step_id=step_id,
+            data_schema=vol.Schema(
+                {
+                    vol.Optional("name", default="" if group is None else group.get("name", "")): str,
+                    vol.Required(
+                        "area_ids",
+                        default=[] if group is None else group.get("area_ids", []),
+                    ): SelectSelector(SelectSelectorConfig(options=area_options, multiple=True)),
+                }
+            ),
+            description_placeholders={"summary": description},
+        )
+
+    def _connector_groups(self) -> list[dict]:
+        """Return configured connector groups."""
+        return list(self.options.get(CONF_CONNECTOR_GROUPS, []))
+
+    def _topology_area_options(self) -> list[SelectOptionDict]:
+        """Return all Home Assistant areas with floor labels."""
+        options = []
+        for area in sorted(self.coordinator.ar.async_list_areas(), key=lambda item: item.name):
+            floor_name = "No floor"
+            if area.floor_id is not None:
+                floor = self.coordinator.fr.async_get_floor(area.floor_id)
+                if floor is not None:
+                    floor_name = floor.name
+            options.append(SelectOptionDict(value=area.id, label=f"{area.name} ({floor_name})"))
+        return options
+
+    def _format_connector_group_label(self, group: dict) -> str:
+        """Format connector group label for selectors."""
+        name = str(group.get("name") or group["id"])
+        area_names = []
+        for area_id in group.get("area_ids", []):
+            area = self.coordinator.ar.async_get_area(area_id)
+            area_names.append(area.name if area is not None else area_id)
+        return f"{name} | {', '.join(area_names)}"
+
+    def _format_topology_summary(self, include_groups: bool = False) -> str:
+        """Build a compact connector-topology summary."""
+        groups = self._connector_groups()
+        lines = [f"Connector groups: `{len(groups)}`"]
+        if not groups:
+            lines.append("")
+            lines.append("No connector groups are configured.")
+            return "\n".join(lines)
+        if include_groups:
+            lines.append("")
+            lines.append("Groups:")
+            for group in groups:
+                lines.append(f"- {self._format_connector_group_label(group)}")
+        return "\n".join(lines)
+
+    def _validate_connector_group(self, area_ids: list[str], editing_group_id: str | None = None) -> tuple[bool, str]:
+        """Validate connector-group area selection."""
+        unique_area_ids = list(dict.fromkeys(area_ids))
+        if len(unique_area_ids) < 2:
+            return False, "Connector groups must include at least two areas."
+
+        floors: set[str] = set()
+        for area_id in unique_area_ids:
+            area = self.coordinator.ar.async_get_area(area_id)
+            if area is None:
+                return False, f"Area `{area_id}` no longer exists."
+            if area.floor_id is None:
+                return False, f"Area `{area.name}` must be assigned to a floor."
+            floors.add(area.floor_id)
+
+        if len(floors) < 2:
+            return False, "Connector groups must span at least two floors."
+
+        for group in self._connector_groups():
+            if group["id"] == editing_group_id:
+                continue
+            overlap = set(unique_area_ids).intersection(group.get("area_ids", []))
+            if overlap:
+                overlap_area_id = sorted(overlap)[0]
+                area = self.coordinator.ar.async_get_area(overlap_area_id)
+                area_name = area.name if area is not None else overlap_area_id
+                return False, f"Area `{area_name}` is already used by another connector group."
+
+        return True, ""
 
     async def _update_options(self):
         """Update config entry options."""

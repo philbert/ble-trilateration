@@ -32,6 +32,10 @@ class _DummyDevice:
         self.trilat_residual_m = None
         self.trilat_confidence = 0.0
         self.trilat_confidence_level = "low"
+        self.area_id = None
+        self.area_last_seen_id = None
+        self.area_is_unknown = False
+        self.diag_area_switch = None
 
     def get_mobility_type(self):
         return self.mobility_type
@@ -82,7 +86,11 @@ def _make_coordinator():
     coordinator.devices = {}
     coordinator._scanners = set()
     coordinator._trilat_decision_state = {}
+    coordinator._connector_groups_by_id = {}
+    coordinator._connector_area_to_group_id = {}
+    coordinator._connector_group_floor_ids = {}
     coordinator.fr = SimpleNamespace(async_get_floor=lambda floor_id: SimpleNamespace(name=f"Floor {floor_id}"))
+    coordinator.ar = SimpleNamespace(async_get_area=lambda _area_id: None)
     coordinator.get_scanner_max_radius = lambda _scanner: 20.0
     coordinator.get_scanner_anchor_enabled = lambda scanner_addr: bool(
         getattr(coordinator.devices.get(scanner_addr), "anchor_enabled", False)
@@ -274,6 +282,127 @@ def test_trilat_ewma_resets_on_floor_change():
     # New floor's scanners get freshly initialized to rssi_distance_raw in the same call.
     assert adv_b1.trilat_range_ewma_m == adv_b1.rssi_distance_raw
     assert adv_b2.trilat_range_ewma_m == adv_b2.rssi_distance_raw
+
+
+def test_floor_switch_uses_base_policy_when_floors_share_connector_group():
+    """Linked floors should use the existing floor-switch margin/dwell."""
+    coordinator = _make_coordinator()
+    device = _DummyDevice("dev-topology-linked")
+    device.area_id = "living"
+
+    sc_f1 = _make_scanner(coordinator, "linked-f1", "f1", 0.0, 0.0)
+    sc_f2a = _make_scanner(coordinator, "linked-f2a", "f2", 5.0, 0.0)
+    sc_f2b = _make_scanner(coordinator, "linked-f2b", "f2", 0.0, 5.0)
+
+    coordinator.ar = SimpleNamespace(
+        async_get_area=lambda area_id: {
+            "living": SimpleNamespace(id="living", floor_id="f1"),
+            "stairs_f1": SimpleNamespace(id="stairs_f1", floor_id="f1"),
+            "stairs_f2": SimpleNamespace(id="stairs_f2", floor_id="f2"),
+        }.get(area_id)
+    )
+    coordinator.options = {
+        "connector_groups": [
+            {"id": "stairs", "name": "Stairs", "area_ids": ["stairs_f1", "stairs_f2"]}
+        ]
+    }
+    coordinator._rebuild_connector_topology()
+
+    fresh = time.monotonic()
+    device.adverts = {
+        ("dev-topology-linked", sc_f1.address): _make_advert(sc_f1, fresh, -74.0, 4.0),
+        ("dev-topology-linked", sc_f2a.address): _make_advert(sc_f2a, fresh, -70.0, 3.0),
+        ("dev-topology-linked", sc_f2b.address): _make_advert(sc_f2b, fresh, -70.0, 3.0),
+    }
+    state = coordinator._get_trilat_decision_state(device)
+    state.floor_id = "f1"
+    state.floor_challenger_id = "f2"
+    state.floor_challenger_since = time.monotonic() - 10.0
+
+    coordinator._refresh_trilateration_for_device(device)
+
+    assert state.floor_id == "f2"
+
+
+def test_floor_switch_requires_extra_margin_and_dwell_without_connector_group():
+    """Unlinked floors should need the topology penalty before switching."""
+    coordinator = _make_coordinator()
+    device = _DummyDevice("dev-topology-unlinked")
+    device.area_id = "living"
+
+    sc_f1 = _make_scanner(coordinator, "unlinked-f1", "f1", 0.0, 0.0)
+    sc_f2a = _make_scanner(coordinator, "unlinked-f2a", "f2", 5.0, 0.0)
+    sc_f2b = _make_scanner(coordinator, "unlinked-f2b", "f2", 0.0, 5.0)
+
+    coordinator.ar = SimpleNamespace(
+        async_get_area=lambda area_id: {
+            "living": SimpleNamespace(id="living", floor_id="f1"),
+            "stairs_f1": SimpleNamespace(id="stairs_f1", floor_id="f1"),
+            "stairs_f3": SimpleNamespace(id="stairs_f3", floor_id="f3"),
+        }.get(area_id)
+    )
+    coordinator.options = {
+        "connector_groups": [
+            {"id": "stairs", "name": "Stairs", "area_ids": ["stairs_f1", "stairs_f3"]}
+        ]
+    }
+    coordinator._rebuild_connector_topology()
+
+    fresh = time.monotonic()
+    device.adverts = {
+        ("dev-topology-unlinked", sc_f1.address): _make_advert(sc_f1, fresh, -74.0, 4.0),
+        ("dev-topology-unlinked", sc_f2a.address): _make_advert(sc_f2a, fresh, -70.0, 3.0),
+        ("dev-topology-unlinked", sc_f2b.address): _make_advert(sc_f2b, fresh, -70.0, 3.0),
+    }
+    state = coordinator._get_trilat_decision_state(device)
+    state.floor_id = "f1"
+    state.floor_challenger_id = "f2"
+    state.floor_challenger_since = time.monotonic() - 10.0
+
+    coordinator._refresh_trilateration_for_device(device)
+
+    assert state.floor_id == "f1"
+    assert state.floor_challenger_id == "f2"
+
+
+def test_floor_switch_uses_area_last_seen_when_current_area_unknown():
+    """Topology should fall back to area_last_seen_id when area_id is unknown."""
+    coordinator = _make_coordinator()
+    device = _DummyDevice("dev-topology-last-seen")
+    device.area_is_unknown = True
+    device.area_last_seen_id = "stairs_f1"
+
+    sc_f1 = _make_scanner(coordinator, "lastseen-f1", "f1", 0.0, 0.0)
+    sc_f2a = _make_scanner(coordinator, "lastseen-f2a", "f2", 5.0, 0.0)
+    sc_f2b = _make_scanner(coordinator, "lastseen-f2b", "f2", 0.0, 5.0)
+
+    coordinator.ar = SimpleNamespace(
+        async_get_area=lambda area_id: {
+            "stairs_f1": SimpleNamespace(id="stairs_f1", floor_id="f1"),
+            "stairs_f2": SimpleNamespace(id="stairs_f2", floor_id="f2"),
+        }.get(area_id)
+    )
+    coordinator.options = {
+        "connector_groups": [
+            {"id": "stairs", "name": "Stairs", "area_ids": ["stairs_f1", "stairs_f2"]}
+        ]
+    }
+    coordinator._rebuild_connector_topology()
+
+    fresh = time.monotonic()
+    device.adverts = {
+        ("dev-topology-last-seen", sc_f1.address): _make_advert(sc_f1, fresh, -74.0, 4.0),
+        ("dev-topology-last-seen", sc_f2a.address): _make_advert(sc_f2a, fresh, -70.0, 3.0),
+        ("dev-topology-last-seen", sc_f2b.address): _make_advert(sc_f2b, fresh, -70.0, 3.0),
+    }
+    state = coordinator._get_trilat_decision_state(device)
+    state.floor_id = "f1"
+    state.floor_challenger_id = "f2"
+    state.floor_challenger_since = time.monotonic() - 10.0
+
+    coordinator._refresh_trilateration_for_device(device)
+
+    assert state.floor_id == "f2"
 
 
 def test_solve_skips_when_inputs_unchanged():
