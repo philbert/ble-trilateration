@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from custom_components.bermuda.const import DISTANCE_TIMEOUT
 from custom_components.bermuda.coordinator import BermudaDataUpdateCoordinator
@@ -84,11 +85,13 @@ def _make_coordinator():
     coordinator = object.__new__(BermudaDataUpdateCoordinator)
     coordinator.options = {}
     coordinator.devices = {}
-    coordinator._scanners = set()
+    coordinator._scanners = []
     coordinator._trilat_decision_state = {}
+    coordinator._broken_timestamp_sync_scanners = None
     coordinator._connector_groups_by_id = {}
     coordinator._connector_area_to_group_id = {}
     coordinator._connector_group_floor_ids = {}
+    coordinator.hass = object()
     coordinator.fr = SimpleNamespace(async_get_floor=lambda floor_id: SimpleNamespace(name=f"Floor {floor_id}"))
     coordinator.ar = SimpleNamespace(async_get_area=lambda _area_id: None)
     coordinator.get_scanner_max_radius = lambda _scanner: 20.0
@@ -118,17 +121,26 @@ def test_trilat_unknown_when_inputs_stale():
     assert device.trilat_reason == "stale_inputs"
 
 
-def _make_scanner(coordinator, address, floor_id, x_m, y_m, anchor_enabled=True, z_m=None):
+def _make_scanner(coordinator, address, floor_id, x_m, y_m, anchor_enabled=True, z_m=None, sync_state="synchronized"):
     """Helper: register a scanner device in the coordinator."""
     sc = SimpleNamespace(
         address=address,
+        name=address,
         floor_id=floor_id,
         anchor_enabled=anchor_enabled,
         anchor_x_m=x_m,
         anchor_y_m=y_m,
         anchor_z_m=z_m,
+        timestamp_sync_diagnostics=lambda: {
+            "state": sync_state,
+            "last_scanner_backward_s": None,
+            "recent_max_backward_s": 0.0,
+            "recent_scanner_regressions": 0,
+            "recent_stale_advert_drops": 0,
+        },
     )
     coordinator.devices[address] = sc
+    coordinator._scanners.append(sc)
     return sc
 
 
@@ -218,6 +230,57 @@ def test_anchor_qualification_respects_anchor_enabled_flag():
     assert device.trilat_status == "low_confidence"
     assert device.trilat_reason == "insufficient_anchors_low_confidence"
     assert device.trilat_anchor_count == 1
+
+
+def test_trilat_excludes_unstable_scanners_from_floor_and_anchor_selection():
+    """Unstable scanners should be ignored for trilat input selection."""
+    coordinator = _make_coordinator()
+    device = _DummyDevice("dev-sync")
+
+    sc_a = _make_scanner(coordinator, "sync-a", "f1", 0.0, 0.0)
+    sc_b = _make_scanner(coordinator, "sync-b", "f1", 6.0, 0.0)
+    sc_c = _make_scanner(coordinator, "sync-c", "f1", 0.0, 8.0, sync_state="unstable")
+
+    fresh = time.monotonic()
+    device.adverts = {
+        ("dev-sync", sc_a.address): _make_advert(sc_a, fresh, -70.0, 5.0),
+        ("dev-sync", sc_b.address): _make_advert(sc_b, fresh, -70.0, 5.0),
+        ("dev-sync", sc_c.address): _make_advert(sc_c, fresh, -70.0, 5.0),
+    }
+
+    coordinator._refresh_trilateration_for_device(device)
+
+    assert device.trilat_status == "low_confidence"
+    assert device.trilat_reason == "insufficient_anchors_low_confidence"
+    assert device.trilat_anchor_count == 2
+
+
+def test_broken_scanner_sync_raises_notification_and_clears_when_recovered():
+    """Broken scanners should raise a persistent notification until they recover."""
+    coordinator = _make_coordinator()
+    broken_scanner = _make_scanner(coordinator, "broken-a", "f1", 0.0, 0.0, sync_state="broken")
+
+    with (
+        patch("custom_components.bermuda.coordinator.persistent_notification.async_create") as create_mock,
+        patch("custom_components.bermuda.coordinator.persistent_notification.async_dismiss") as dismiss_mock,
+    ):
+        coordinator._async_manage_broken_timestamp_sync_notification()
+
+        create_mock.assert_called_once()
+        dismiss_mock.assert_called_once()
+        assert broken_scanner.address in create_mock.call_args.args[1]
+
+        broken_scanner.timestamp_sync_diagnostics = lambda: {
+            "state": "synchronized",
+            "last_scanner_backward_s": None,
+            "recent_max_backward_s": 0.0,
+            "recent_scanner_regressions": 0,
+            "recent_stale_advert_drops": 0,
+        }
+
+        coordinator._async_manage_broken_timestamp_sync_notification()
+
+        assert dismiss_mock.call_count == 2
 
 
 def test_anchor_qualification_requires_valid_coordinates():

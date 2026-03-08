@@ -17,6 +17,7 @@ import yaml
 from bluetooth_data_tools import monotonic_time_coarse
 from habluetooth import BaseHaScanner
 from homeassistant.components import bluetooth
+from homeassistant.components import persistent_notification
 from homeassistant.components.bluetooth.api import _get_manager
 from homeassistant.const import MAJOR_VERSION as HA_VERSION_MAJ
 from homeassistant.const import MINOR_VERSION as HA_VERSION_MIN
@@ -184,6 +185,8 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
 
     """
 
+    _BROKEN_PROXY_SYNC_NOTIFICATION_ID = "bermuda_broken_proxy_timestamp_sync"
+
     def __init__(
         self,
         hass: HomeAssistant,
@@ -250,6 +253,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         self._area_decision_state: dict[str, BermudaDataUpdateCoordinator.AreaDecisionState] = {}
         self._trilat_decision_state: dict[str, BermudaDataUpdateCoordinator.TrilatDecisionState] = {}
         self._trilat_scanners_without_anchors: list[str] | None = None
+        self._broken_timestamp_sync_scanners: list[str] | None = None
         self.calibration_store = BermudaCalibrationStore(hass, entry.entry_id)
         self.calibration = BermudaCalibrationManager(hass, self, self.calibration_store)
         self.ranging_model = BermudaRangingModel(self.calibration)
@@ -2080,10 +2084,33 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         device.apply_scanner_selection(chosen.advert)
 
     @staticmethod
-    def _latest_adverts_by_scanner(device: BermudaDevice):
+    def _scanner_timestamp_sync_state(scanner: BermudaDevice) -> str:
+        """Return scanner timestamp-sync state with safe defaults for tests and local scanners."""
+        diagnostics = getattr(scanner, "timestamp_sync_diagnostics", None)
+        if callable(diagnostics):
+            state = diagnostics().get("state")
+            if isinstance(state, str):
+                return state
+        state_method = getattr(scanner, "timestamp_sync_state", None)
+        if callable(state_method):
+            state = state_method()
+            if isinstance(state, str):
+                return state
+        return "synchronized"
+
+    def _scanner_blocks_trilateration(self, scanner: BermudaDevice) -> bool:
+        """Return whether a scanner should be ignored for trilat due to bad timestamps."""
+        block_method = getattr(scanner, "blocks_trilateration_for_timestamp_sync", None)
+        if callable(block_method):
+            return bool(block_method())
+        return self._scanner_timestamp_sync_state(scanner) in {"unstable", "broken"}
+
+    def _latest_adverts_by_scanner(self, device: BermudaDevice):
         """Return latest advert per scanner for the device."""
         latest: dict[str, BermudaAdvert] = {}
         for advert in device.adverts.values():
+            if self._scanner_blocks_trilateration(advert.scanner_device):
+                continue
             prior = latest.get(advert.scanner_address)
             if prior is None or advert.stamp > prior.stamp:
                 latest[advert.scanner_address] = advert
@@ -2179,8 +2206,41 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                     is_fixable=False,
                 )
 
+    def _async_manage_broken_timestamp_sync_notification(self) -> None:
+        """Raise or clear a persistent notification for scanners in broken sync state."""
+        broken_scanners: list[str] = []
+        for scanner in sorted(self._scanners, key=lambda item: item.name):
+            if self._scanner_timestamp_sync_state(scanner) != "broken":
+                continue
+            diagnostics = scanner.timestamp_sync_diagnostics()
+            broken_scanners.append(
+                (
+                    f"- {scanner.name} [{scanner.address}]"
+                    f" last={diagnostics.get('last_scanner_backward_s')!s}s"
+                    f" max_recent={diagnostics.get('recent_max_backward_s')!s}s"
+                    f" recent_regressions={diagnostics.get('recent_scanner_regressions')}"
+                    f" recent_stale_drops={diagnostics.get('recent_stale_advert_drops')}"
+                )
+            )
+        if self._broken_timestamp_sync_scanners == broken_scanners:
+            return
+        self._broken_timestamp_sync_scanners = broken_scanners
+        persistent_notification.async_dismiss(self.hass, self._BROKEN_PROXY_SYNC_NOTIFICATION_ID)
+        if not broken_scanners:
+            return
+        persistent_notification.async_create(
+            self.hass,
+            "Bermuda has stopped using these scanners for trilateration because their "
+            "timestamp sync state is `broken`:\n\n"
+            + "\n".join(broken_scanners)
+            + "\n\nTry restarting the affected proxy and watch its `Timestamp Sync` sensor.",
+            title="Bermuda proxy timestamp sync problem",
+            notification_id=self._BROKEN_PROXY_SYNC_NOTIFICATION_ID,
+        )
+
     def _refresh_trilateration(self) -> None:
         """Refresh trilateration diagnostics for all tracked devices."""
+        self._async_manage_broken_timestamp_sync_notification()
         if not self.trilat_enabled():
             self._async_manage_repair_trilat_without_anchors([])
             for device in self.devices.values():

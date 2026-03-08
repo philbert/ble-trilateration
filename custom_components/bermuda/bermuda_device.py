@@ -639,6 +639,7 @@ class BermudaDevice(dict):
             state = "synchronized"
         return {
             "state": state,
+            "blocks_trilateration": state in {"unstable", "broken"},
             "is_remote_scanner": self.is_remote_scanner,
             "recent_window_s": self._TIMESTAMP_SYNC_WINDOW_S,
             "recent_scanner_regressions": recent_scanner_events,
@@ -661,6 +662,14 @@ class BermudaDevice(dict):
             if self.scanner_stale_advert_drop_last_at is None
             else round(nowstamp - self.scanner_stale_advert_drop_last_at, 1),
         }
+
+    def timestamp_sync_state(self) -> str:
+        """Return the current timestamp sync state label."""
+        return str(self.timestamp_sync_diagnostics()["state"])
+
+    def blocks_trilateration_for_timestamp_sync(self) -> bool:
+        """Return whether timestamp instability should exclude this scanner from trilat."""
+        return bool(self.timestamp_sync_diagnostics()["blocks_trilateration"])
 
     @callback
     def async_handle_pble_callback(
