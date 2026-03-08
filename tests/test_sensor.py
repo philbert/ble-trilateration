@@ -53,10 +53,45 @@ async def test_scanner_timestamp_sync_sensor_exposes_runtime_health(hass) -> Non
     await hass.async_block_till_done()
 
     ent_reg = er.async_get(hass)
-    entity_id = ent_reg.async_get_entity_id("sensor", DOMAIN, f"{scanner.unique_id}_timestamp_sync")
+    entity_id = ent_reg.async_get_entity_id("sensor", DOMAIN, f"{scanner.address_wifi_mac}_timestamp_sync")
     state = hass.states.get(entity_id)
     assert state is not None
     assert state.state == "unstable"
     assert state.attributes["recent_scanner_regressions"] == 1
     assert state.attributes["recent_stale_advert_drops"] == 1
     assert state.attributes["recent_max_backward_s"] == 3.2
+
+
+async def test_scanner_timestamp_sync_removes_stale_legacy_unique_id(hass) -> None:
+    """Old timestamp-sync entities should be pruned when scanner identity stabilizes."""
+    entry = MockConfigEntry(domain=DOMAIN, data=MOCK_CONFIG, entry_id="test-sensor-cleanup", title=NAME)
+    entry.add_to_hass(hass)
+
+    ent_reg = er.async_get(hass)
+    stale_entry = ent_reg.async_get_or_create(
+        "sensor",
+        DOMAIN,
+        "AA:BB:CC:DD:EE:99_timestamp_sync",
+        config_entry=entry,
+        suggested_object_id="legacy_timestamp_sync",
+    )
+
+    with patch("custom_components.bermuda.BermudaDataUpdateCoordinator.async_refresh"):
+        assert await async_setup_component(hass, DOMAIN, {})
+
+    await hass.async_block_till_done()
+    coordinator = entry.runtime_data.coordinator
+
+    scanner = BermudaDevice("AA:BB:CC:DD:EE:99", coordinator)
+    scanner._is_scanner = True  # noqa: SLF001 - test helper
+    scanner._is_remote_scanner = True  # noqa: SLF001 - test helper
+    scanner.address_ble_mac = "AA:BB:CC:DD:EE:99"
+    scanner.address_wifi_mac = "11:22:33:44:55:66"
+    scanner.unique_id = scanner.address_wifi_mac
+    coordinator.devices[scanner.address] = scanner
+    coordinator.scanner_list_add(scanner)
+
+    await hass.async_block_till_done()
+
+    assert ent_reg.async_get(stale_entry.entity_id) is None
+    assert ent_reg.async_get_entity_id("sensor", DOMAIN, f"{scanner.address_wifi_mac}_timestamp_sync") is not None

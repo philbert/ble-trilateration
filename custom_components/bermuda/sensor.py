@@ -14,6 +14,7 @@ from homeassistant.const import (
 )
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
+from homeassistant.helpers import entity_registry as er
 
 from .const import (
     _LOGGER,
@@ -115,6 +116,7 @@ async def async_setup_entry(
                 # until they are all filled out.
                 return
 
+        _remove_stale_timestamp_sync_entities(hass, entry.entry_id, coordinator)
         entities = []
         for scanner in coordinator.scanner_list:
             if scanner not in created_scanner_devices:
@@ -155,6 +157,46 @@ async def async_setup_entry(
             BermudaVisibleDeviceCount(coordinator, entry),
         )
     )
+
+
+TIMESTAMP_SYNC_SUFFIX = "_timestamp_sync"
+
+
+def _remove_stale_timestamp_sync_entities(
+    hass: HomeAssistant,
+    entry_id: str,
+    coordinator: BermudaDataUpdateCoordinator,
+) -> None:
+    """Remove stale timestamp-sync entities created with older scanner IDs."""
+    entity_registry = er.async_get(hass)
+    stale_unique_ids: set[str] = set()
+    valid_unique_ids: set[str] = set()
+
+    for scanner_address in coordinator.scanner_list:
+        scanner = coordinator.devices.get(scanner_address)
+        if scanner is None:
+            continue
+        stable_scanner_id = scanner.address_wifi_mac or scanner.address
+        valid_unique_ids.add(f"{stable_scanner_id}{TIMESTAMP_SYNC_SUFFIX}")
+        for candidate in {
+            scanner.address,
+            getattr(scanner, "address_ble_mac", None),
+            getattr(scanner, "unique_id", None),
+        }:
+            if candidate is None or candidate == stable_scanner_id:
+                continue
+            stale_unique_ids.add(f"{candidate}{TIMESTAMP_SYNC_SUFFIX}")
+
+    if not stale_unique_ids:
+        return
+
+    for entity_entry in er.async_entries_for_config_entry(entity_registry, entry_id):
+        if entity_entry.domain != "sensor":
+            continue
+        if entity_entry.unique_id in valid_unique_ids:
+            continue
+        if entity_entry.unique_id in stale_unique_ids:
+            entity_registry.async_remove(entity_entry.entity_id)
 
 
 class BermudaSensor(BermudaEntity, SensorEntity):
@@ -618,7 +660,8 @@ class BermudaSensorScannerTimestampSync(BermudaSensor):
 
     @property
     def unique_id(self):
-        return f"{self._device.unique_id}_timestamp_sync"
+        stable_scanner_id = self._device.address_wifi_mac or self._device.address
+        return f"{stable_scanner_id}{TIMESTAMP_SYNC_SUFFIX}"
 
     @property
     def name(self):
