@@ -43,6 +43,7 @@ async def async_setup_entry(
 
     created_devices: list[str] = []  # list of already-created devices
     created_scanners: dict[str, list[str]] = {}  # list of scanner:address for created entities
+    created_scanner_devices: list[str] = []
 
     @callback
     def device_new(address: str) -> None:
@@ -116,6 +117,9 @@ async def async_setup_entry(
 
         entities = []
         for scanner in coordinator.scanner_list:
+            if scanner not in created_scanner_devices:
+                entities.append(BermudaSensorScannerTimestampSync(coordinator, entry, scanner))
+                created_scanner_devices.append(scanner)
             for address in created_devices:
                 if address not in created_scanners.get(scanner, []):
                     _LOGGER.debug(
@@ -605,6 +609,34 @@ class BermudaSensorPositionConfidence(BermudaSensor):
     @property
     def extra_state_attributes(self) -> Mapping[str, Any] | None:
         return {"level": getattr(self._device, "trilat_confidence_level", "low")}
+
+
+class BermudaSensorScannerTimestampSync(BermudaSensor):
+    """Diagnostic sensor for scanner timestamp synchronization health."""
+
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    @property
+    def unique_id(self):
+        return f"{self._device.unique_id}_timestamp_sync"
+
+    @property
+    def name(self):
+        return "Timestamp Sync"
+
+    @property
+    def native_value(self):
+        return self._device.timestamp_sync_diagnostics()["state"]
+
+    @property
+    def entity_registry_enabled_default(self) -> bool:
+        return True
+
+    @property
+    def extra_state_attributes(self) -> Mapping[str, Any] | None:
+        diagnostics = dict(self._device.timestamp_sync_diagnostics())
+        diagnostics.pop("state", None)
+        return diagnostics
 
 
 class BermudaSensorAreaLastSeen(BermudaSensor, RestoreSensor):

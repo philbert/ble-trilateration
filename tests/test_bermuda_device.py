@@ -72,6 +72,23 @@ def test_async_as_scanner_update(bermuda_scanner, mock_scanner):
     assert bermuda_scanner.last_seen > 0
 
 
+def test_timestamp_sync_diagnostics_record_regressions(bermuda_scanner):
+    """Scanner timestamp diagnostics should summarize regressions and dropped adverts."""
+    bermuda_scanner._is_scanner = True  # noqa: SLF001 - test helper
+    bermuda_scanner._is_remote_scanner = True  # noqa: SLF001 - test helper
+
+    bermuda_scanner.record_scanner_timestamp_regression(3.2)
+    bermuda_scanner.record_stale_advert_drop(1.1)
+
+    diagnostics = bermuda_scanner.timestamp_sync_diagnostics()
+
+    assert diagnostics["state"] == "unstable"
+    assert diagnostics["recent_scanner_regressions"] == 1
+    assert diagnostics["recent_stale_advert_drops"] == 1
+    assert diagnostics["max_scanner_backward_s"] == 3.2
+    assert diagnostics["max_stale_advert_drop_s"] == 1.1
+
+
 def test_async_as_scanner_get_stamp(bermuda_scanner, mock_scanner, mock_remote_scanner):
     """Test async_as_scanner_get_stamp method."""
     bermuda_scanner.async_as_scanner_init(mock_scanner)

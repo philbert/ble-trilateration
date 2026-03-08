@@ -174,6 +174,7 @@ class BermudaAdvert(dict):
             if self.stamp > new_stamp:
                 # The existing stamp is NEWER, bail but complain on the way.
                 self.stale_update_count += 1
+                self.scanner_device.record_stale_advert_drop(self.stamp - new_stamp)
                 _LOGGER.debug("Advert from %s for %s is OLDER than last recorded", scanner.name, self._device.name)
                 return
 

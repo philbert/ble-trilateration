@@ -13,6 +13,7 @@ for them, so we can use them to contribute towards measurements.
 from __future__ import annotations
 
 import binascii
+from collections import deque
 import re
 from typing import TYPE_CHECKING, Final
 
@@ -75,6 +76,8 @@ class BermudaDevice(dict):
     We're not storing this as an Entity because we don't want all devices to
     become entities in homeassistant, since there might be a _lot_ of them.
     """
+
+    _TIMESTAMP_SYNC_WINDOW_S: Final = 300.0
 
     def __hash__(self) -> int:
         """A BermudaDevice can be uniquely identified by the address used."""
@@ -163,6 +166,16 @@ class BermudaDevice(dict):
         self.trilat_residual_m: float | None = None
         self.trilat_confidence: float = 0.0
         self.trilat_confidence_level: str = "low"
+        self.scanner_timestamp_regression_count: int = 0
+        self.scanner_timestamp_regression_max_s: float = 0.0
+        self.scanner_timestamp_regression_last_s: float | None = None
+        self.scanner_timestamp_regression_last_at: float | None = None
+        self.scanner_timestamp_regression_recent_s: deque[tuple[float, float]] = deque(maxlen=256)
+        self.scanner_stale_advert_drop_count: int = 0
+        self.scanner_stale_advert_drop_max_s: float = 0.0
+        self.scanner_stale_advert_drop_last_s: float | None = None
+        self.scanner_stale_advert_drop_last_at: float | None = None
+        self.scanner_stale_advert_drop_recent_s: deque[tuple[float, float]] = deque(maxlen=256)
         self.adverts: dict[
             tuple[str, str], BermudaAdvert
         ] = {}  # str will be a scanner address OR a deviceaddress__scanneraddress
@@ -520,6 +533,7 @@ class BermudaDevice(dict):
         if scannerstamp > self.last_seen:
             self.last_seen = scannerstamp
         elif self.last_seen - scannerstamp > 0.8:  # For some reason small future-offsets are common.
+            self.record_scanner_timestamp_regression(self.last_seen - scannerstamp)
             _LOGGER.debug(
                 "Scanner stamp for %s went backwards %.2fs. new %f < last %f",
                 self.name,
@@ -567,6 +581,86 @@ class BermudaDevice(dict):
                 return None
         # Probably a usb / BlueZ device.
         return None
+
+    def _prune_timestamp_sync_events(self, nowstamp: float | None = None) -> None:
+        """Drop old timestamp sync events outside the rolling window."""
+        if nowstamp is None:
+            nowstamp = monotonic_time_coarse()
+        cutoff = nowstamp - self._TIMESTAMP_SYNC_WINDOW_S
+        while self.scanner_timestamp_regression_recent_s and self.scanner_timestamp_regression_recent_s[0][0] < cutoff:
+            self.scanner_timestamp_regression_recent_s.popleft()
+        while self.scanner_stale_advert_drop_recent_s and self.scanner_stale_advert_drop_recent_s[0][0] < cutoff:
+            self.scanner_stale_advert_drop_recent_s.popleft()
+
+    def record_scanner_timestamp_regression(self, delta_s: float) -> None:
+        """Record a backwards jump in the scanner-level timestamp feed."""
+        nowstamp = monotonic_time_coarse()
+        delta_s = float(max(delta_s, 0.0))
+        self.scanner_timestamp_regression_count += 1
+        self.scanner_timestamp_regression_max_s = max(self.scanner_timestamp_regression_max_s, delta_s)
+        self.scanner_timestamp_regression_last_s = delta_s
+        self.scanner_timestamp_regression_last_at = nowstamp
+        self.scanner_timestamp_regression_recent_s.append((nowstamp, delta_s))
+        self._prune_timestamp_sync_events(nowstamp)
+
+    def record_stale_advert_drop(self, delta_s: float) -> None:
+        """Record a dropped advert caused by a backwards per-device stamp."""
+        nowstamp = monotonic_time_coarse()
+        delta_s = float(max(delta_s, 0.0))
+        self.scanner_stale_advert_drop_count += 1
+        self.scanner_stale_advert_drop_max_s = max(self.scanner_stale_advert_drop_max_s, delta_s)
+        self.scanner_stale_advert_drop_last_s = delta_s
+        self.scanner_stale_advert_drop_last_at = nowstamp
+        self.scanner_stale_advert_drop_recent_s.append((nowstamp, delta_s))
+        self._prune_timestamp_sync_events(nowstamp)
+
+    def timestamp_sync_diagnostics(self) -> dict[str, object]:
+        """Return a compact runtime summary of scanner timestamp health."""
+        nowstamp = monotonic_time_coarse()
+        self._prune_timestamp_sync_events(nowstamp)
+        recent_scanner_events = len(self.scanner_timestamp_regression_recent_s)
+        recent_drop_events = len(self.scanner_stale_advert_drop_recent_s)
+        recent_max_scanner_delta = max((delta for _stamp, delta in self.scanner_timestamp_regression_recent_s), default=0.0)
+        recent_max_drop_delta = max((delta for _stamp, delta in self.scanner_stale_advert_drop_recent_s), default=0.0)
+        recent_max_delta = max(recent_max_scanner_delta, recent_max_drop_delta)
+        if not self.is_scanner:
+            state = "not_scanner"
+        elif not self.is_remote_scanner:
+            state = "local"
+        elif recent_max_delta >= 60.0:
+            state = "broken"
+        elif recent_max_delta >= 2.0 or (recent_scanner_events + recent_drop_events) >= 5:
+            state = "unstable"
+        elif (recent_scanner_events + recent_drop_events) > 0:
+            state = "drifting"
+        elif self.scanner_timestamp_regression_count or self.scanner_stale_advert_drop_count:
+            state = "recovered"
+        else:
+            state = "synchronized"
+        return {
+            "state": state,
+            "is_remote_scanner": self.is_remote_scanner,
+            "recent_window_s": self._TIMESTAMP_SYNC_WINDOW_S,
+            "recent_scanner_regressions": recent_scanner_events,
+            "recent_stale_advert_drops": recent_drop_events,
+            "recent_max_backward_s": round(recent_max_delta, 3),
+            "lifetime_scanner_regressions": self.scanner_timestamp_regression_count,
+            "lifetime_stale_advert_drops": self.scanner_stale_advert_drop_count,
+            "max_scanner_backward_s": round(self.scanner_timestamp_regression_max_s, 3),
+            "max_stale_advert_drop_s": round(self.scanner_stale_advert_drop_max_s, 3),
+            "last_scanner_backward_s": None
+            if self.scanner_timestamp_regression_last_s is None
+            else round(self.scanner_timestamp_regression_last_s, 3),
+            "last_stale_advert_drop_s": None
+            if self.scanner_stale_advert_drop_last_s is None
+            else round(self.scanner_stale_advert_drop_last_s, 3),
+            "last_scanner_backward_age_s": None
+            if self.scanner_timestamp_regression_last_at is None
+            else round(nowstamp - self.scanner_timestamp_regression_last_at, 1),
+            "last_stale_advert_drop_age_s": None
+            if self.scanner_stale_advert_drop_last_at is None
+            else round(nowstamp - self.scanner_stale_advert_drop_last_at, 1),
+        }
 
     @callback
     def async_handle_pble_callback(
