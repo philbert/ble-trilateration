@@ -34,6 +34,7 @@ def _create_scanner(coordinator, address: str) -> BermudaDevice:
     scanner._is_scanner = True  # noqa: SLF001 - test helper to mark as scanner
     scanner._is_remote_scanner = True  # noqa: SLF001 - test helper to mark as remote proxy
     scanner.address_wifi_mac = address
+    scanner.address_ble_mac = address
     coordinator.devices[scanner.address] = scanner
     coordinator.scanner_list_add(scanner)
     return scanner
@@ -53,7 +54,7 @@ async def test_scanner_timestamp_sync_sensor_exposes_runtime_health(hass) -> Non
     await hass.async_block_till_done()
 
     ent_reg = er.async_get(hass)
-    entity_id = ent_reg.async_get_entity_id("sensor", DOMAIN, f"{scanner.address_wifi_mac}_timestamp_sync")
+    entity_id = ent_reg.async_get_entity_id("sensor", DOMAIN, f"{scanner.address_ble_mac}_timestamp_sync")
     state = hass.states.get(entity_id)
     assert state is not None
     assert state.state == "unstable"
@@ -71,7 +72,7 @@ async def test_scanner_timestamp_sync_removes_stale_legacy_unique_id(hass) -> No
     stale_entry = ent_reg.async_get_or_create(
         "sensor",
         DOMAIN,
-        "AA:BB:CC:DD:EE:99_timestamp_sync",
+        "11:22:33:44:55:66_timestamp_sync",
         config_entry=entry,
         suggested_object_id="legacy_timestamp_sync",
     )
@@ -94,4 +95,4 @@ async def test_scanner_timestamp_sync_removes_stale_legacy_unique_id(hass) -> No
     await hass.async_block_till_done()
 
     assert ent_reg.async_get(stale_entry.entity_id) is None
-    assert ent_reg.async_get_entity_id("sensor", DOMAIN, f"{scanner.address_wifi_mac}_timestamp_sync") is not None
+    assert ent_reg.async_get_entity_id("sensor", DOMAIN, f"{scanner.address_ble_mac}_timestamp_sync") is not None

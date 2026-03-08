@@ -14,12 +14,14 @@ from homeassistant.const import (
 )
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 
 from .const import (
     _LOGGER,
     ADDR_TYPE_IBEACON,
     ADDR_TYPE_PRIVATE_BLE_DEVICE,
+    DOMAIN,
     SIGNAL_DEVICE_NEW,
     SIGNAL_SCANNERS_CHANGED,
 )
@@ -176,10 +178,11 @@ def _remove_stale_timestamp_sync_entities(
         scanner = coordinator.devices.get(scanner_address)
         if scanner is None:
             continue
-        stable_scanner_id = scanner.address_wifi_mac or scanner.address
+        stable_scanner_id = scanner.address_ble_mac or scanner.address
         valid_unique_ids.add(f"{stable_scanner_id}{TIMESTAMP_SYNC_SUFFIX}")
         for candidate in {
             scanner.address,
+            getattr(scanner, "address_wifi_mac", None),
             getattr(scanner, "address_ble_mac", None),
             getattr(scanner, "unique_id", None),
         }:
@@ -660,8 +663,18 @@ class BermudaSensorScannerTimestampSync(BermudaSensor):
 
     @property
     def unique_id(self):
-        stable_scanner_id = self._device.address_wifi_mac or self._device.address
+        stable_scanner_id = self._device.address_ble_mac or self._device.address
         return f"{stable_scanner_id}{TIMESTAMP_SYNC_SUFFIX}"
+
+    @property
+    def device_info(self):
+        """Attach timestamp sync to the proxy/Bluetooth device, not the host integration device."""
+        proxy_identifier = self._device.address_ble_mac or self._device.address
+        return {
+            "identifiers": {(DOMAIN, proxy_identifier)},
+            "connections": {(dr.CONNECTION_BLUETOOTH, proxy_identifier.upper())},
+            "name": self._device.name,
+        }
 
     @property
     def name(self):
