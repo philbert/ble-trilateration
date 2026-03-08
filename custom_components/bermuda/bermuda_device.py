@@ -78,6 +78,7 @@ class BermudaDevice(dict):
     """
 
     _TIMESTAMP_SYNC_WINDOW_S: Final = 300.0
+    _TIMESTAMP_SYNC_RECOVERY_S: Final = 900.0
 
     def __hash__(self) -> int:
         """A BermudaDevice can be uniquely identified by the address used."""
@@ -623,6 +624,10 @@ class BermudaDevice(dict):
         recent_max_scanner_delta = max((delta for _stamp, delta in self.scanner_timestamp_regression_recent_s), default=0.0)
         recent_max_drop_delta = max((delta for _stamp, delta in self.scanner_stale_advert_drop_recent_s), default=0.0)
         recent_max_delta = max(recent_max_scanner_delta, recent_max_drop_delta)
+        last_problem_at = max(
+            (stamp for stamp in (self.scanner_timestamp_regression_last_at, self.scanner_stale_advert_drop_last_at) if stamp is not None),
+            default=None,
+        )
         if not self.is_scanner:
             state = "not_scanner"
         elif not self.is_remote_scanner:
@@ -633,7 +638,11 @@ class BermudaDevice(dict):
             state = "unstable"
         elif (recent_scanner_events + recent_drop_events) > 0:
             state = "drifting"
-        elif self.scanner_timestamp_regression_count or self.scanner_stale_advert_drop_count:
+        elif (
+            (self.scanner_timestamp_regression_count or self.scanner_stale_advert_drop_count)
+            and last_problem_at is not None
+            and (nowstamp - last_problem_at) < self._TIMESTAMP_SYNC_RECOVERY_S
+        ):
             state = "recovered"
         else:
             state = "synchronized"
@@ -642,6 +651,7 @@ class BermudaDevice(dict):
             "blocks_trilateration": state in {"unstable", "broken"},
             "is_remote_scanner": self.is_remote_scanner,
             "recent_window_s": self._TIMESTAMP_SYNC_WINDOW_S,
+            "recovery_cooldown_s": self._TIMESTAMP_SYNC_RECOVERY_S,
             "recent_scanner_regressions": recent_scanner_events,
             "recent_stale_advert_drops": recent_drop_events,
             "recent_max_backward_s": round(recent_max_delta, 3),
