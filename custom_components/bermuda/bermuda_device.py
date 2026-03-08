@@ -63,6 +63,7 @@ if TYPE_CHECKING:
     from bleak.backends.scanner import AdvertisementData
 
     from .coordinator import BermudaDataUpdateCoordinator
+    from homeassistant.helpers.device_registry import DeviceEntry
 
 
 class BermudaDevice(dict):
@@ -79,6 +80,7 @@ class BermudaDevice(dict):
 
     _TIMESTAMP_SYNC_WINDOW_S: Final = 300.0
     _TIMESTAMP_SYNC_RECOVERY_S: Final = 900.0
+    _SCANNER_DEVICE_PREFIX: Final = "scanner:"
 
     def __hash__(self) -> int:
         """A BermudaDevice can be uniquely identified by the address used."""
@@ -102,6 +104,11 @@ class BermudaDevice(dict):
         self.options = self._coordinator.options
         self.unique_id: str | None = _address  # mac address formatted.
         self.address_type = BDADDR_TYPE_UNKNOWN
+        self.scanner_entity_key: str | None = None
+        self.scanner_manufacturer: str | None = None
+        self.scanner_model: str | None = None
+        self.scanner_sw_version: str | None = None
+        self.scanner_hw_version: str | None = None
 
         self.ar = ar.async_get(self._coordinator.hass)
         self.fr = fr.async_get(self._coordinator.hass)
@@ -271,6 +278,53 @@ class BermudaDevice(dict):
     def is_remote_scanner(self):
         return self._is_remote_scanner
 
+    @property
+    def scanner_identity_ready(self) -> bool:
+        """Return True when scanner entities can use a stable Bermuda-owned identity."""
+        return self.scanner_entity_key is not None
+
+    @property
+    def scanner_device_identifier(self) -> str | None:
+        """Return the Bermuda-owned device identifier for this scanner."""
+        if self.scanner_entity_key is None:
+            return None
+        return f"{self._SCANNER_DEVICE_PREFIX}{self.scanner_entity_key}"
+
+    def scanner_entity_unique_id(self, suffix: str) -> str:
+        """Return a canonical unique_id for a scanner-owned Bermuda entity."""
+        if self.scanner_device_identifier is None:
+            raise ValueError(f"Scanner {self.address} does not have a canonical scanner identity yet")
+        return f"{self.scanner_device_identifier}:{suffix}"
+
+    def scanner_legacy_identifier_aliases(self) -> set[str]:
+        """Return legacy Bermuda identifiers that have previously been used for this scanner."""
+        aliases = {
+            self.address,
+            self.address_ble_mac,
+            self.address_wifi_mac,
+            self.unique_id,
+            self.scanner_entity_key,
+        }
+        if self.scanner_device_identifier is not None:
+            aliases.add(self.scanner_device_identifier.removeprefix(self._SCANNER_DEVICE_PREFIX))
+        return {alias for alias in aliases if alias}
+
+    def _capture_scanner_metadata(self, device_entry: DeviceEntry | None) -> None:
+        """Copy descriptive metadata from a matched Home Assistant device entry."""
+        if device_entry is None:
+            return
+        self.scanner_manufacturer = self.scanner_manufacturer or device_entry.manufacturer
+        self.scanner_model = self.scanner_model or device_entry.model
+        self.scanner_sw_version = self.scanner_sw_version or device_entry.sw_version
+        self.scanner_hw_version = self.scanner_hw_version or device_entry.hw_version
+
+    def _ensure_scanner_entity_key(self, preferred_key: str | None = None) -> None:
+        """Assign the immutable canonical Bermuda scanner key once."""
+        if self.scanner_entity_key is not None:
+            return
+        scanner_key = mac_norm(preferred_key or self.address_ble_mac or self.address)
+        self.scanner_entity_key = scanner_key
+
     def async_as_scanner_nolonger(self):
         """Call when this device is unregistered as a BaseHaScanner."""
         self._is_scanner = False
@@ -299,10 +353,10 @@ class BermudaDevice(dict):
             self._is_remote_scanner = True
         else:
             self._is_remote_scanner = False
-        self._coordinator.scanner_list_add(self)
 
         # Find the relevant device entries in HA for this scanner and apply the names, addresses etc
         self.async_as_scanner_resolve_device_entries()
+        self._coordinator.scanner_list_add(self)
 
         # Call the per-update processor as well, but only
         # if this is our first ha_scanner.
@@ -392,6 +446,7 @@ class BermudaDevice(dict):
                 self._hascanner.name,
                 self._hascanner.source,
             )
+            self._ensure_scanner_entity_key()
             return
 
         # We found the device entry and have created our scannerdevice,
@@ -410,12 +465,14 @@ class BermudaDevice(dict):
             self.entry_id = scanner_devreg_bt.id
             _bt_name_by_user = scanner_devreg_bt.name_by_user
             _bt_name = scanner_devreg_bt.name
+            self._capture_scanner_metadata(scanner_devreg_bt)
         if scanner_devreg_mac is not None:
             # Only apply if the bt device entry hasn't been applied:
             _area_id = _area_id or scanner_devreg_mac.area_id
             self.entry_id = self.entry_id or scanner_devreg_mac.id
             _mac_name = scanner_devreg_mac.name
             _mac_name_by_user = scanner_devreg_mac.name_by_user
+            self._capture_scanner_metadata(scanner_devreg_mac)
 
         # As of ESPHome 2025.3.0 (via aioesphomeapi 29.3.1) ESPHome proxies now
         # report their BLE MAC address instead of their WIFI MAC in the hascanner
@@ -425,6 +482,7 @@ class BermudaDevice(dict):
         self.unique_id = scanner_devreg_mac_address or scanner_devreg_bt_address or self._hascanner.source
         self.address_ble_mac = scanner_devreg_bt_address or scanner_devreg_mac_address or self._hascanner.source
         self.address_wifi_mac = scanner_devreg_mac_address
+        self._ensure_scanner_entity_key(scanner_devreg_bt_address or self.address_ble_mac or self.address)
 
         # Populate the possible metadevice source MACs so that we capture any
         # data the scanner is sending (Shelly's already send broadcasts, and

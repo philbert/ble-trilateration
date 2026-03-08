@@ -122,14 +122,19 @@ class BermudaEntity(CoordinatorEntity):
         model = None
 
         if self._device.is_scanner:
-            # ESPHome proxies prior to 2025.3 report their WIFI MAC for any address,
-            # except for received iBeacons.
-            connections = {
-                # Keeps the distance_to entities the same across pre/post 2025.3
-                (dr.CONNECTION_NETWORK_MAC, (self._device.address_wifi_mac or self._device.address).lower()),
-                # Ensures we can also match the Bluetooth integration entities.
-                (dr.CONNECTION_BLUETOOTH, (self._device.address_ble_mac or self._device.address).upper()),
+            device_info = {
+                "identifiers": {(domain_name, self._device.scanner_device_identifier or self._device.address)},
+                "name": self._device.name,
             }
+            if self._device.scanner_manufacturer is not None:
+                device_info["manufacturer"] = self._device.scanner_manufacturer
+            if self._device.scanner_model is not None:
+                device_info["model"] = self._device.scanner_model
+            if self._device.scanner_sw_version is not None:
+                device_info["sw_version"] = self._device.scanner_sw_version
+            if self._device.scanner_hw_version is not None:
+                device_info["hw_version"] = self._device.scanner_hw_version
+            return device_info
         elif self._device.address_type == ADDR_TYPE_IBEACON:
             # ibeacon doesn't (yet) actually set a "connection", but
             # this "matches" what it stores for identifier.
@@ -221,3 +226,16 @@ class BermudaGlobalEntity(CoordinatorEntity):
             "identifiers": {(DOMAIN, "BERMUDA_GLOBAL")},
             "name": "Bermuda Global",
         }
+
+
+class BermudaScannerEntity(BermudaEntity):
+    """Base class for Bermuda-owned scanner/proxy entities."""
+
+    @property
+    def device_info(self):
+        """Return device info for the dedicated Bermuda proxy device."""
+        return super().device_info
+
+    def scanner_unique_id(self, suffix: str) -> str:
+        """Build a canonical unique_id for a scanner-owned entity."""
+        return self._device.scanner_entity_unique_id(suffix)

@@ -17,6 +17,7 @@ from homeassistant.helpers.entity_registry import async_migrate_entries
 
 from .const import _LOGGER, DOMAIN, PLATFORMS, STARTUP_MESSAGE
 from .coordinator import BermudaDataUpdateCoordinator
+from .scanner_registry import cleanup_scanner_device_registry
 from .util import mac_math_offset, mac_norm
 
 if TYPE_CHECKING:
@@ -57,6 +58,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: BermudaConfigEntry) -> b
         await on_failure()
 
     await coordinator.async_initialize()
+    cleanup_scanner_device_registry(hass, entry.entry_id, coordinator)
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
     entry.async_on_unload(entry.add_update_listener(async_reload_entry))
@@ -111,12 +113,24 @@ async def async_remove_config_entry_device(
                 # the identifier should be the base device address, and
                 # may have "_range" or some other per-sensor suffix.
                 # The address might be a mac address, IRK or iBeacon uuid
-                address = ident.split("_")[0]
+                if ident.startswith("scanner:"):
+                    address = ident.removeprefix("scanner:")
+                else:
+                    address = ident.split("_")[0]
         except KeyError:
             pass
     if address is not None:
         try:
-            coordinator.devices[mac_norm(address)].create_sensor = False
+            normalized_address = mac_norm(address)
+            if normalized_address in coordinator.devices:
+                coordinator.devices[normalized_address].create_sensor = False
+            else:
+                for device in coordinator.devices.values():
+                    if device.is_scanner and device.scanner_entity_key == normalized_address:
+                        device.create_sensor = False
+                        break
+                else:
+                    raise KeyError(normalized_address)
         except KeyError:
             _LOGGER.warning("Failed to locate device entry for %s", address)
         return True

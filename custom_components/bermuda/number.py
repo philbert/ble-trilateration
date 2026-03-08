@@ -16,7 +16,8 @@ from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers import entity_registry as er
 
 from .const import SIGNAL_DEVICE_NEW, SIGNAL_SCANNERS_CHANGED
-from .entity import BermudaEntity
+from .entity import BermudaEntity, BermudaScannerEntity
+from .scanner_registry import cleanup_scanner_device_registry, scanner_legacy_unique_id_candidates
 
 if TYPE_CHECKING:
     from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -32,7 +33,8 @@ async def async_setup_entry(
 ) -> None:
     """Load Number entities for a config entry."""
     coordinator: BermudaDataUpdateCoordinator = entry.runtime_data.coordinator
-    _remove_legacy_scanner_numbers(hass, entry.entry_id)
+    _remove_legacy_scanner_numbers(hass, entry.entry_id, coordinator)
+    cleanup_scanner_device_registry(hass, entry.entry_id, coordinator)
 
     created_devices = []  # list of devices we've already created entities for
     created_scanner_entities = []  # list of scanner addresses we've created config entities for
@@ -65,9 +67,11 @@ async def async_setup_entry(
     @callback
     def scanners_changed() -> None:
         """Create per-scanner configuration Number entities."""
+        _remove_legacy_scanner_numbers(hass, entry.entry_id, coordinator)
+        cleanup_scanner_device_registry(hass, entry.entry_id, coordinator)
         entities = []
         for address, device in coordinator.devices.items():
-            if device.is_scanner and address not in created_scanner_entities:
+            if device.is_scanner and device.scanner_identity_ready and address not in created_scanner_entities:
                 entities.append(BermudaScannerAnchorX(coordinator, entry, address))
                 entities.append(BermudaScannerAnchorY(coordinator, entry, address))
                 entities.append(BermudaScannerAnchorZ(coordinator, entry, address))
@@ -92,14 +96,39 @@ LEGACY_SCANNER_NUMBER_SUFFIXES = (
     "_max_radius",
 )
 
-
-def _remove_legacy_scanner_numbers(hass: HomeAssistant, entry_id: str) -> None:
-    """Remove entity-registry entries for retired per-scanner calibration numbers."""
+def _remove_legacy_scanner_numbers(
+    hass: HomeAssistant,
+    entry_id: str,
+    coordinator: BermudaDataUpdateCoordinator,
+) -> None:
+    """Remove entity-registry entries for retired or pre-canonical scanner numbers."""
     entity_registry = er.async_get(hass)
+    stale_anchor_ids: set[str] = set()
+    valid_anchor_ids: set[str] = set()
+
+    for scanner in coordinator.get_scanners:
+        if not scanner.scanner_identity_ready:
+            continue
+        valid_anchor_ids.update(
+            {
+                scanner.scanner_entity_unique_id("anchor_x"),
+                scanner.scanner_entity_unique_id("anchor_y"),
+                scanner.scanner_entity_unique_id("anchor_z"),
+            }
+        )
+        stale_anchor_ids.update(scanner_legacy_unique_id_candidates(scanner, "anchor_x_m"))
+        stale_anchor_ids.update(scanner_legacy_unique_id_candidates(scanner, "anchor_y_m"))
+        stale_anchor_ids.update(scanner_legacy_unique_id_candidates(scanner, "anchor_z_m"))
+
     for entity_entry in er.async_entries_for_config_entry(entity_registry, entry_id):
         if entity_entry.domain != "number":
             continue
         if entity_entry.unique_id.endswith(LEGACY_SCANNER_NUMBER_SUFFIXES):
+            entity_registry.async_remove(entity_entry.entity_id)
+            continue
+        if entity_entry.unique_id in valid_anchor_ids:
+            continue
+        if entity_entry.unique_id in stale_anchor_ids:
             entity_registry.async_remove(entity_entry.entity_id)
 
 
@@ -183,7 +212,7 @@ class BermudaNumber(BermudaEntity, RestoreNumber):
     #     return "mdi:bluetooth-connect" if self._device.zone == STATE_HOME else "mdi:bluetooth-off"
 
 
-class _BermudaScannerAnchorCoordinate(BermudaEntity, RestoreNumber):
+class _BermudaScannerAnchorCoordinate(BermudaScannerEntity, RestoreNumber):
     """Base class for scanner anchor coordinate configuration numbers."""
 
     _attr_should_poll = False
@@ -229,7 +258,7 @@ class _BermudaScannerAnchorCoordinate(BermudaEntity, RestoreNumber):
     @property
     def unique_id(self):
         """Uniquely identify this entity."""
-        return f"{self._device.unique_id}_{self._coord_suffix}"
+        return self.scanner_unique_id(self._coord_suffix.removesuffix("_m"))
 
     @property
     def name(self):

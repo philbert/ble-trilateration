@@ -14,7 +14,6 @@ from homeassistant.const import (
 )
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
-from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 
 from .const import (
@@ -25,7 +24,14 @@ from .const import (
     SIGNAL_DEVICE_NEW,
     SIGNAL_SCANNERS_CHANGED,
 )
-from .entity import BermudaEntity, BermudaGlobalEntity
+from .entity import BermudaEntity, BermudaGlobalEntity, BermudaScannerEntity
+from .scanner_registry import (
+    cleanup_scanner_device_registry,
+    scanner_canonical_sensor_unique_id,
+    scanner_legacy_unique_id_candidates,
+    scanner_range_canonical_unique_id,
+    scanner_range_legacy_unique_id_candidates,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -109,18 +115,13 @@ async def async_setup_entry(
         # go over time. So we need to maintain our matrix of which ones we have already
         # spun-up so we don't duplicate any.
 
-        for scanner in coordinator.get_scanners:
-            if (
-                scanner.is_remote_scanner is None  # usb/HCI scanner's are fine.
-                or (scanner.is_remote_scanner and scanner.address_wifi_mac is None)
-            ):
-                # This scanner doesn't have a wifi mac yet, bail out
-                # until they are all filled out.
-                return
-
-        _remove_stale_timestamp_sync_entities(hass, entry.entry_id, coordinator)
+        _remove_stale_scanner_sensor_entities(hass, entry.entry_id, coordinator, created_devices)
+        cleanup_scanner_device_registry(hass, entry.entry_id, coordinator)
         entities = []
         for scanner in coordinator.scanner_list:
+            scanner_device = coordinator.devices.get(scanner)
+            if scanner_device is None or not scanner_device.scanner_identity_ready:
+                continue
             if scanner not in created_scanner_devices:
                 entities.append(BermudaSensorScannerTimestampSync(coordinator, entry, scanner))
                 created_scanner_devices.append(scanner)
@@ -161,34 +162,32 @@ async def async_setup_entry(
     )
 
 
-TIMESTAMP_SYNC_SUFFIX = "_timestamp_sync"
-
-
-def _remove_stale_timestamp_sync_entities(
+def _remove_stale_scanner_sensor_entities(
     hass: HomeAssistant,
     entry_id: str,
     coordinator: BermudaDataUpdateCoordinator,
+    tracked_addresses: list[str],
 ) -> None:
-    """Remove stale timestamp-sync entities created with older scanner IDs."""
+    """Remove stale scanner sensor entities created with pre-canonical IDs."""
     entity_registry = er.async_get(hass)
     stale_unique_ids: set[str] = set()
     valid_unique_ids: set[str] = set()
 
     for scanner_address in coordinator.scanner_list:
         scanner = coordinator.devices.get(scanner_address)
-        if scanner is None:
+        if scanner is None or not scanner.scanner_identity_ready:
             continue
-        stable_scanner_id = scanner.address_ble_mac or scanner.address
-        valid_unique_ids.add(f"{stable_scanner_id}{TIMESTAMP_SYNC_SUFFIX}")
-        for candidate in {
-            scanner.address,
-            getattr(scanner, "address_wifi_mac", None),
-            getattr(scanner, "address_ble_mac", None),
-            getattr(scanner, "unique_id", None),
-        }:
-            if candidate is None or candidate == stable_scanner_id:
+        valid_unique_ids.add(scanner_canonical_sensor_unique_id(scanner, "timestamp_sync"))
+        stale_unique_ids.update(scanner_legacy_unique_id_candidates(scanner, "timestamp_sync"))
+
+        for tracked_address in tracked_addresses:
+            tracked_device = coordinator.devices.get(tracked_address)
+            if tracked_device is None:
                 continue
-            stale_unique_ids.add(f"{candidate}{TIMESTAMP_SYNC_SUFFIX}")
+            valid_unique_ids.add(scanner_range_canonical_unique_id(tracked_device, scanner, "range"))
+            valid_unique_ids.add(scanner_range_canonical_unique_id(tracked_device, scanner, "range_raw"))
+            stale_unique_ids.update(scanner_range_legacy_unique_id_candidates(tracked_device, scanner, "range"))
+            stale_unique_ids.update(scanner_range_legacy_unique_id_candidates(tracked_device, scanner, "range_raw"))
 
     if not stale_unique_ids:
         return
@@ -418,8 +417,7 @@ class BermudaSensorScannerRange(BermudaSensorRange):
 
     @property
     def unique_id(self):
-        # Retaining legacy wifi mac for unique_id
-        return f"{self._device.unique_id}_{self._scanner.address_wifi_mac or self._scanner.address}_range"
+        return scanner_range_canonical_unique_id(self._device, self._scanner, "range")
 
     @property
     def name(self):
@@ -459,10 +457,7 @@ class BermudaSensorScannerRangeRaw(BermudaSensorScannerRange):
 
     @property
     def unique_id(self):
-        # Using address_wifi_mac as a legacy action, because esphome changed from
-        # sending WIFI MAC to BLE MAC as its source address, in ESPHome 2025.3.0
-        #
-        return f"{self._device.unique_id}_{self._scanner.address_wifi_mac or self._scanner.address}_range_raw"
+        return scanner_range_canonical_unique_id(self._device, self._scanner, "range_raw")
 
     @property
     def name(self):
@@ -656,25 +651,22 @@ class BermudaSensorPositionConfidence(BermudaSensor):
         return {"level": getattr(self._device, "trilat_confidence_level", "low")}
 
 
-class BermudaSensorScannerTimestampSync(BermudaSensor):
+class BermudaSensorScannerTimestampSync(BermudaScannerEntity, SensorEntity):
     """Diagnostic sensor for scanner timestamp synchronization health."""
 
     _attr_entity_category = EntityCategory.DIAGNOSTIC
 
-    @property
-    def unique_id(self):
-        stable_scanner_id = self._device.address_ble_mac or self._device.address
-        return f"{stable_scanner_id}{TIMESTAMP_SYNC_SUFFIX}"
+    def __init__(
+        self,
+        coordinator: BermudaDataUpdateCoordinator,
+        config_entry: BermudaConfigEntry,
+        address: str,
+    ) -> None:
+        super().__init__(coordinator, config_entry, address)
 
     @property
-    def device_info(self):
-        """Attach timestamp sync to the proxy/Bluetooth device, not the host integration device."""
-        proxy_identifier = self._device.address_ble_mac or self._device.address
-        return {
-            "identifiers": {(DOMAIN, proxy_identifier)},
-            "connections": {(dr.CONNECTION_BLUETOOTH, proxy_identifier.upper())},
-            "name": self._device.name,
-        }
+    def unique_id(self):
+        return self.scanner_unique_id("timestamp_sync")
 
     @property
     def name(self):
