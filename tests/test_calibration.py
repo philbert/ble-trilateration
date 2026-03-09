@@ -415,8 +415,13 @@ async def test_calibration_layout_mismatch_repair_flow_updates_samples(
     result = await flow.async_step_init()
     assert result["type"] == data_entry_flow.FlowResultType.FORM
     assert result["step_id"] == "confirm"
+    assert "update_stored_sample_geometry" in result["data_schema"].schema
 
-    result = await flow.async_step_confirm({})
+    result = await flow.async_step_confirm({"update_stored_sample_geometry": False})
+    assert result["type"] == data_entry_flow.FlowResultType.FORM
+    assert result["errors"] == {"base": "confirm_required"}
+
+    result = await flow.async_step_confirm({"update_stored_sample_geometry": True})
     assert result["type"] == data_entry_flow.FlowResultType.CREATE_ENTRY
     assert coordinator.calibration.samples()[0]["anchor_layout_hash"] == coordinator.calibration.current_anchor_layout_hash
     assert coordinator.calibration.get_layout_mismatch_summary() is None
@@ -476,6 +481,7 @@ async def test_calibration_layout_mismatch_repair_flow_renders_without_runtime_d
 
     assert result["type"] == data_entry_flow.FlowResultType.FORM
     assert result["step_id"] == "confirm"
+    assert "update_stored_sample_geometry" in result["data_schema"].schema
 
 
 async def test_calibration_samples_options_flow(hass: HomeAssistant, setup_bermuda_entry):
