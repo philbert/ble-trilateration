@@ -32,6 +32,7 @@ def _create_scanner(coordinator, address: str) -> BermudaDevice:
     """Helper to register a scanner device with the coordinator."""
     scanner = BermudaDevice(address, coordinator)
     scanner._is_scanner = True  # noqa: SLF001 - test helper to mark as scanner
+    scanner._is_remote_scanner = False  # noqa: SLF001 - test helper to mark as resolved scanner
     coordinator.devices[scanner.address] = scanner
     coordinator.scanner_list_add(scanner)
     return scanner
@@ -80,3 +81,43 @@ async def test_legacy_scanner_number_entities_removed_on_setup(hass) -> None:
     await hass.async_block_till_done()
 
     assert ent_reg.async_get(stale_entry.entity_id) is None
+
+
+async def test_scanner_anchor_numbers_persist_to_storage(hass) -> None:
+    """Anchor coordinate updates should also be mirrored into Bermuda storage."""
+    entry = await setup_integration(hass)
+    coordinator = entry.runtime_data.coordinator
+
+    scanner = _create_scanner(coordinator, "AA:BB:CC:DD:EE:03")
+    await hass.async_block_till_done()
+
+    ent_reg = er.async_get(hass)
+    anchor_x = ent_reg.async_get_entity_id("number", DOMAIN, f"{scanner.unique_id}_anchor_x_m")
+    anchor_y = ent_reg.async_get_entity_id("number", DOMAIN, f"{scanner.unique_id}_anchor_y_m")
+    anchor_z = ent_reg.async_get_entity_id("number", DOMAIN, f"{scanner.unique_id}_anchor_z_m")
+
+    await hass.services.async_call("number", "set_value", {"entity_id": anchor_x, "value": 1.2}, blocking=True)
+    await hass.services.async_call("number", "set_value", {"entity_id": anchor_y, "value": 3.4}, blocking=True)
+    await hass.services.async_call("number", "set_value", {"entity_id": anchor_z, "value": 5.6}, blocking=True)
+
+    stored = await coordinator.scanner_anchor_store.async_get_coordinates(scanner)
+    assert stored == {"anchor_x_m": 1.2, "anchor_y_m": 3.4, "anchor_z_m": 5.6}
+
+
+async def test_scanner_anchor_numbers_restore_from_storage(hass) -> None:
+    """Anchor coordinates should restore from Bermuda storage when restore-state is absent."""
+    entry = await setup_integration(hass)
+    coordinator = entry.runtime_data.coordinator
+
+    stored_scanner = BermudaDevice("AA:BB:CC:DD:EE:04", coordinator)
+    stored_scanner.anchor_x_m = 7.8
+    stored_scanner.anchor_y_m = 9.1
+    stored_scanner.anchor_z_m = 2.3
+    await coordinator.scanner_anchor_store.async_save_scanner(stored_scanner)
+
+    scanner = _create_scanner(coordinator, "AA:BB:CC:DD:EE:04")
+    await hass.async_block_till_done()
+
+    assert scanner.anchor_x_m == 7.8
+    assert scanner.anchor_y_m == 9.1
+    assert scanner.anchor_z_m == 2.3
