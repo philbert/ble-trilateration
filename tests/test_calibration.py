@@ -219,36 +219,10 @@ async def test_calibration_store_management(hass: HomeAssistant, setup_bermuda_e
     assert coordinator.calibration.samples() == []
 
 
-async def test_calibration_store_migrates_to_subdir(hass: HomeAssistant, setup_bermuda_entry):
-    """Legacy root storage should migrate into the bermuda_samples subdir."""
+async def test_calibration_store_uses_stable_shared_key(hass: HomeAssistant, setup_bermuda_entry):
+    """Calibration samples should use the stable shared Bermuda storage key."""
     coordinator = setup_bermuda_entry.runtime_data.coordinator
-    old_store = coordinator.calibration_store._legacy_store
-    await old_store.async_save(
-        {
-            "samples": [
-                {
-                    "id": "legacy_sample",
-                    "created_at": "2026-03-06T12:00:00+00:00",
-                    "device_id": "legacy_device",
-                    "device_name": "Legacy Device",
-                    "device_address": "aa:bb:cc:dd:ee:03",
-                    "room_area_id": "living_room",
-                    "room_name": "Living Room",
-                    "position": {"x_m": 1.0, "y_m": 2.0, "z_m": 1.0},
-                    "sample_radius_m": 1.0,
-                    "anchor_layout_hash": coordinator.calibration.current_anchor_layout_hash,
-                    "anchors": {},
-                    "quality": {"status": "accepted", "eligible_anchor_count": 3, "reason": None},
-                }
-            ]
-        }
-    )
-
-    migrated_store = coordinator.calibration_store.__class__(hass, setup_bermuda_entry.entry_id)
-    await migrated_store.async_load()
-
-    assert migrated_store.samples[0]["id"] == "legacy_sample"
-    assert migrated_store._store.key.startswith("bermuda_samples/")
+    assert coordinator.calibration_store._store.key == "bermuda/calibration_samples"
 
 
 async def test_calibration_samples_options_flow(hass: HomeAssistant, setup_bermuda_entry):

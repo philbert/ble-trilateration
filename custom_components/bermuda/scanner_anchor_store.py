@@ -15,8 +15,8 @@ if TYPE_CHECKING:
     from .bermuda_device import BermudaDevice
 
 STORAGE_VERSION = 1
-STORAGE_SUBDIR = "bermuda_scanners"
-STORAGE_KEY = f"{STORAGE_SUBDIR}/{DOMAIN}.scanner_anchors"
+STORAGE_SUBDIR = "bermuda"
+STORAGE_KEY = f"{STORAGE_SUBDIR}/scanner_anchors"
 
 
 class BermudaScannerAnchorStore:

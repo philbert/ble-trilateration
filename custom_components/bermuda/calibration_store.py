@@ -8,10 +8,8 @@ from typing import Any
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.storage import Store
 
-from .const import DOMAIN
-
 STORAGE_VERSION = 1
-STORAGE_SUBDIR = "bermuda_samples"
+STORAGE_KEY = "bermuda/calibration_samples"
 
 
 class BermudaCalibrationStore:
@@ -19,10 +17,8 @@ class BermudaCalibrationStore:
 
     def __init__(self, hass: HomeAssistant, entry_id: str) -> None:
         """Initialise store wrapper."""
-        self._old_key = f"{DOMAIN}.calibration_samples.{entry_id}"
-        self._new_key = f"{STORAGE_SUBDIR}/{self._old_key}"
-        self._store = Store[dict[str, Any]](hass, STORAGE_VERSION, self._new_key)
-        self._legacy_store = Store[dict[str, Any]](hass, STORAGE_VERSION, self._old_key)
+        del entry_id
+        self._store = Store[dict[str, Any]](hass, STORAGE_VERSION, STORAGE_KEY)
         self._data: dict[str, Any] = {"samples": []}
         self._loaded = False
 
@@ -31,14 +27,6 @@ class BermudaCalibrationStore:
         if self._loaded:
             return
         loaded = await self._store.async_load()
-        if loaded is None:
-            loaded = await self._legacy_store.async_load()
-            if isinstance(loaded, dict) and isinstance(loaded.get("samples"), list):
-                self._data = loaded
-                await self._store.async_save(self._data)
-                await self._legacy_store.async_remove()
-                self._loaded = True
-                return
         if isinstance(loaded, dict) and isinstance(loaded.get("samples"), list):
             self._data = loaded
         self._loaded = True
