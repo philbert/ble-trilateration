@@ -33,6 +33,17 @@ class CalibrationLayoutMismatchRepairFlow(RepairsFlow):
     ) -> data_entry_flow.FlowResult:
         """Handle the confirmation step."""
         if user_input is not None:
+            if not user_input.get("update_stored_sample_geometry", False):
+                return self.async_show_form(
+                    step_id="confirm",
+                    data_schema=vol.Schema(
+                        {
+                            vol.Required("update_stored_sample_geometry", default=False): bool,
+                        }
+                    ),
+                    errors={"base": "confirm_required"},
+                    description_placeholders=self._description_placeholders(),
+                )
             coordinator = self._get_coordinator()
             if coordinator is None:
                 return self.async_abort(reason="entry_not_found")
@@ -40,16 +51,22 @@ class CalibrationLayoutMismatchRepairFlow(RepairsFlow):
             await coordinator.async_handle_calibration_samples_changed()
             return self.async_create_entry(data={})
 
-        description_placeholders = None
-        issue_registry = ir.async_get(self.hass)
-        if issue := issue_registry.async_get_issue(DOMAIN, self.issue_id):
-            description_placeholders = issue.translation_placeholders
-
         return self.async_show_form(
             step_id="confirm",
-            data_schema=vol.Schema({}),
-            description_placeholders=description_placeholders,
+            data_schema=vol.Schema(
+                {
+                    vol.Required("update_stored_sample_geometry", default=False): bool,
+                }
+            ),
+            description_placeholders=self._description_placeholders(),
         )
+
+    def _description_placeholders(self) -> dict[str, str] | None:
+        """Return issue translation placeholders for the repair dialog."""
+        issue_registry = ir.async_get(self.hass)
+        if issue := issue_registry.async_get_issue(DOMAIN, self.issue_id):
+            return issue.translation_placeholders
+        return None
 
     def _get_coordinator(self):
         """Return Bermuda's single coordinator instance."""

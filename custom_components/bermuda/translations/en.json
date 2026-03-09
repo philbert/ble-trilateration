@@ -241,8 +241,15 @@
       "fix_flow": {
         "step": {
           "confirm": {
-            "description": "Bermuda can update the stored calibration samples so their saved anchor geometry matches the current configured anchors.\n\nUse this repair only if the physical anchor layout did not change and you merely corrected the configured coordinates.\n\nIf anchors were physically moved, cancel this repair and record new calibration samples instead."
+            "title": "Confirm calibration sample repair",
+            "description": "Bermuda found {sample_count} saved calibration samples that do not match the current configured anchor layout `{current_layout_hash}`.\n\nUse this repair only if no physical anchor layout change occurred and you merely corrected configured anchor coordinates. In that case, Bermuda will update the stored anchor geometry inside `bermuda/calibration_samples` to match the current anchors.\n\nIf anchors were physically moved, do not run this repair. Cancel instead and record new calibration samples for the new physical layout.",
+            "data": {
+              "update_stored_sample_geometry": "Update stored sample geometry"
+            }
           }
+        },
+        "error": {
+          "confirm_required": "Tick the confirmation box to run the repair, or cancel if the physical layout changed."
         }
       }
     }
