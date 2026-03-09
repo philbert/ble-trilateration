@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from custom_components.bermuda.const import DISTANCE_TIMEOUT
 from custom_components.bermuda.coordinator import BermudaDataUpdateCoordinator
@@ -479,6 +480,95 @@ def test_trilat_falls_back_to_2d_when_any_anchor_z_missing():
 
     assert device.trilat_status == "ok"
     assert device.trilat_z_m is None
+
+
+def test_trilat_motion_filter_caps_unphysical_xy_jump():
+    """Published XY coordinates should not jump faster than the motion cap."""
+    coordinator = _make_coordinator()
+    device = _DummyDevice("dev-motion-cap")
+    sc_a, sc_b, sc_c = _right_triangle_anchors(coordinator, "dev-motion-cap", "f1")
+
+    with patch("custom_components.bermuda.coordinator.monotonic_time_coarse", return_value=100.0):
+        device.adverts = {
+            ("dev-motion-cap", sc_a.address): _make_advert(sc_a, 100.0, -70.0, 5.0),
+            ("dev-motion-cap", sc_b.address): _make_advert(sc_b, 100.0, -70.0, 5.0),
+            ("dev-motion-cap", sc_c.address): _make_advert(sc_c, 100.0, -70.0, 5.0),
+        }
+        coordinator._refresh_trilateration_for_device(device)
+
+    first_xy = (device.trilat_x_m, device.trilat_y_m)
+    assert first_xy[0] is not None
+    assert first_xy[1] is not None
+
+    far_x = 20.0
+    far_y = 20.0
+    dist_a = ((far_x - sc_a.anchor_x_m) ** 2 + (far_y - sc_a.anchor_y_m) ** 2) ** 0.5
+    dist_b = ((far_x - sc_b.anchor_x_m) ** 2 + (far_y - sc_b.anchor_y_m) ** 2) ** 0.5
+    dist_c = ((far_x - sc_c.anchor_x_m) ** 2 + (far_y - sc_c.anchor_y_m) ** 2) ** 0.5
+
+    adv_a = _make_advert(sc_a, 101.0, -70.0, dist_a)
+    adv_b = _make_advert(sc_b, 101.0, -70.0, dist_b)
+    adv_c = _make_advert(sc_c, 101.0, -70.0, dist_c)
+    adv_a.trilat_range_ewma_m = None
+    adv_b.trilat_range_ewma_m = None
+    adv_c.trilat_range_ewma_m = None
+    device.adverts = {
+        ("dev-motion-cap", sc_a.address): adv_a,
+        ("dev-motion-cap", sc_b.address): adv_b,
+        ("dev-motion-cap", sc_c.address): adv_c,
+    }
+
+    with patch("custom_components.bermuda.coordinator.monotonic_time_coarse", return_value=101.0):
+        coordinator._refresh_trilateration_for_device(device)
+
+    dx = float(device.trilat_x_m) - float(first_xy[0])
+    dy = float(device.trilat_y_m) - float(first_xy[1])
+    published_speed = ((dx * dx) + (dy * dy)) ** 0.5 / 1.0
+
+    assert device.trilat_status == "ok"
+    assert published_speed <= coordinator._TRILAT_MAX_POSITION_SPEED_MPS
+    assert device.trilat_x_m is not None and device.trilat_x_m < far_x
+    assert device.trilat_y_m is not None and device.trilat_y_m < far_y
+
+
+def test_trilat_holds_previous_z_through_same_floor_2d_gap():
+    """A prior z solution should be held, but clamped to the remaining anchor-height envelope."""
+    coordinator = _make_coordinator()
+    device = _DummyDevice("dev-z-hold")
+
+    sc_a = _make_scanner(coordinator, "zh-a", "f1", 0.0, 0.0, z_m=0.0)
+    sc_b = _make_scanner(coordinator, "zh-b", "f1", 2.0, 0.0, z_m=0.0)
+    sc_c = _make_scanner(coordinator, "zh-c", "f1", 0.0, 2.0, z_m=0.0)
+    sc_d = _make_scanner(coordinator, "zh-d", "f1", 0.0, 0.0, z_m=2.0)
+
+    with patch("custom_components.bermuda.coordinator.monotonic_time_coarse", return_value=200.0):
+        dist = 3.0**0.5
+        device.adverts = {
+            ("dev-z-hold", sc_a.address): _make_advert(sc_a, 200.0, -70.0, dist),
+            ("dev-z-hold", sc_b.address): _make_advert(sc_b, 200.0, -70.0, dist),
+            ("dev-z-hold", sc_c.address): _make_advert(sc_c, 200.0, -70.0, dist),
+            ("dev-z-hold", sc_d.address): _make_advert(sc_d, 200.0, -70.0, dist),
+        }
+        coordinator._refresh_trilateration_for_device(device)
+
+    assert device.trilat_z_m is not None
+    first_z = device.trilat_z_m
+
+    sc_d.anchor_z_m = None
+    with patch("custom_components.bermuda.coordinator.monotonic_time_coarse", return_value=201.0):
+        dist_2d = 2.0**0.5
+        device.adverts = {
+            ("dev-z-hold", sc_a.address): _make_advert(sc_a, 201.0, -70.0, dist_2d),
+            ("dev-z-hold", sc_b.address): _make_advert(sc_b, 201.0, -70.0, dist_2d),
+            ("dev-z-hold", sc_c.address): _make_advert(sc_c, 201.0, -70.0, dist_2d),
+            ("dev-z-hold", sc_d.address): _make_advert(sc_d, 201.0, -70.0, dist_2d),
+        }
+        coordinator._refresh_trilateration_for_device(device)
+
+    assert device.trilat_status == "ok"
+    assert device.trilat_z_m is not None
+    assert device.trilat_z_m < first_z
+    assert abs(device.trilat_z_m - 0.5) < 0.001
 
 
 def test_high_residual_yields_low_confidence_solution():

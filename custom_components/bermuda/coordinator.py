@@ -1452,6 +1452,10 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         last_anchor_z: dict[str, float | None] = field(default_factory=dict)
         last_solution_xy: tuple[float, float] | None = None
         last_solution_z: float | None = None
+        velocity_x_mps: float = 0.0
+        velocity_y_mps: float = 0.0
+        velocity_z_mps: float = 0.0
+        last_filter_stamp: float = 0.0
         last_solver_dimension: str = "2d"
         last_residual_m: float | None = None
         last_mean_sigma_m: float | None = None
@@ -1463,6 +1467,9 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
     _TRILAT_MAX_ANCHOR_SIGMA_M: float = 6.0
     _TRILAT_FLOOR_AMBIGUITY_RATIO: float = 0.2
     _TRILAT_RANGE_DELTA_EPSILON_M: float = 0.2
+    _TRILAT_MAX_POSITION_SPEED_MPS: float = 8.0
+    _TRILAT_MAX_VERTICAL_SPEED_MPS: float = 1.5
+    _TRILAT_MAX_FILTER_DT_S: float = 5.0
     _NON_CONNECTOR_EXTRA_FLOOR_SWITCH_MARGIN: float = 0.18
     _NON_CONNECTOR_EXTRA_FLOOR_DWELL_S: float = 12.0
 
@@ -1531,6 +1538,118 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
     def _get_trilat_decision_state(self, device: BermudaDevice) -> TrilatDecisionState:
         """Return mutable state holder for trilat/floor smoothing."""
         return self._trilat_decision_state.setdefault(device.address, self.TrilatDecisionState())
+
+    def _apply_trilat_motion_filter(
+        self,
+        state: TrilatDecisionState,
+        *,
+        nowstamp: float,
+        mobility_type: str,
+        measurement_xy: tuple[float, float],
+        measurement_z: float | None,
+        anchor_z_bounds: tuple[float, float] | None,
+        residual_m: float | None,
+        mean_sigma_m: float | None,
+    ) -> tuple[tuple[float, float], float | None]:
+        """Apply a motion-constrained filter to raw trilat output."""
+        if state.last_solution_xy is None or state.last_filter_stamp <= 0.0:
+            state.velocity_x_mps = 0.0
+            state.velocity_y_mps = 0.0
+            state.velocity_z_mps = 0.0
+            state.last_filter_stamp = nowstamp
+            filtered_z = measurement_z if measurement_z is not None else state.last_solution_z
+            return measurement_xy, filtered_z
+
+        dt = nowstamp - state.last_filter_stamp
+        if dt <= 0.0 or dt > self._TRILAT_MAX_FILTER_DT_S:
+            state.velocity_x_mps = 0.0
+            state.velocity_y_mps = 0.0
+            state.velocity_z_mps = 0.0
+            state.last_filter_stamp = nowstamp
+            filtered_z = measurement_z if measurement_z is not None else state.last_solution_z
+            return measurement_xy, filtered_z
+
+        residual_factor = 1.0
+        if residual_m is not None:
+            residual_factor = max(0.0, 1.0 - (residual_m / self._TRILAT_MAX_RESIDUAL_M))
+        sigma_factor = 1.0
+        if mean_sigma_m is not None:
+            sigma_factor = max(0.0, 1.0 - (mean_sigma_m / self._TRILAT_MAX_ANCHOR_SIGMA_M))
+        gain_scale = (0.2 + (0.8 * residual_factor)) * (0.5 + (0.5 * sigma_factor))
+
+        if mobility_type == MOBILITY_STATIONARY:
+            alpha_xy = 0.18 * gain_scale
+            beta_xy = 0.06 * gain_scale
+            alpha_z = 0.08 * gain_scale
+            beta_z = 0.03 * gain_scale
+        else:
+            alpha_xy = 0.35 * gain_scale
+            beta_xy = 0.12 * gain_scale
+            alpha_z = 0.16 * gain_scale
+            beta_z = 0.05 * gain_scale
+
+        alpha_xy = max(0.05, min(alpha_xy, 0.85))
+        beta_xy = max(0.01, min(beta_xy, 0.30))
+        alpha_z = max(0.03, min(alpha_z, 0.50))
+        beta_z = max(0.01, min(beta_z, 0.20))
+
+        prev_x, prev_y = state.last_solution_xy
+        pred_x = prev_x + (state.velocity_x_mps * dt)
+        pred_y = prev_y + (state.velocity_y_mps * dt)
+        dx = measurement_xy[0] - pred_x
+        dy = measurement_xy[1] - pred_y
+        distance_to_prediction = math.hypot(dx, dy)
+        max_xy_step = self._TRILAT_MAX_POSITION_SPEED_MPS * dt
+        if distance_to_prediction > max_xy_step and distance_to_prediction > 0.0:
+            scale = max_xy_step / distance_to_prediction
+            dx *= scale
+            dy *= scale
+        innovation_x = dx
+        innovation_y = dy
+        filtered_x = pred_x + (alpha_xy * innovation_x)
+        filtered_y = pred_y + (alpha_xy * innovation_y)
+        velocity_x = state.velocity_x_mps + ((beta_xy * innovation_x) / dt)
+        velocity_y = state.velocity_y_mps + ((beta_xy * innovation_y) / dt)
+        xy_speed = math.hypot(velocity_x, velocity_y)
+        if xy_speed > self._TRILAT_MAX_POSITION_SPEED_MPS and xy_speed > 0.0:
+            scale = self._TRILAT_MAX_POSITION_SPEED_MPS / xy_speed
+            velocity_x *= scale
+            velocity_y *= scale
+
+        filtered_z = state.last_solution_z
+        velocity_z = state.velocity_z_mps * 0.5
+        if measurement_z is not None:
+            if anchor_z_bounds is not None:
+                min_anchor_z, max_anchor_z = anchor_z_bounds
+                z_span = max(0.0, max_anchor_z - min_anchor_z)
+                z_margin = max(0.5, z_span * 0.5)
+                measurement_z = max(min_anchor_z - z_margin, min(max_anchor_z + z_margin, measurement_z))
+            if state.last_solution_z is None:
+                filtered_z = measurement_z
+                velocity_z = 0.0
+            else:
+                pred_z = state.last_solution_z + (state.velocity_z_mps * dt)
+                dz = measurement_z - pred_z
+                max_z_step = self._TRILAT_MAX_VERTICAL_SPEED_MPS * dt
+                if abs(dz) > max_z_step:
+                    dz = math.copysign(max_z_step, dz)
+                filtered_z = pred_z + (alpha_z * dz)
+                velocity_z = state.velocity_z_mps + ((beta_z * dz) / dt)
+                velocity_z = max(
+                    -self._TRILAT_MAX_VERTICAL_SPEED_MPS,
+                    min(self._TRILAT_MAX_VERTICAL_SPEED_MPS, velocity_z),
+                )
+        elif filtered_z is not None and anchor_z_bounds is not None:
+            min_anchor_z, max_anchor_z = anchor_z_bounds
+            z_span = max(0.0, max_anchor_z - min_anchor_z)
+            z_margin = max(0.5, z_span * 0.5)
+            filtered_z = max(min_anchor_z - z_margin, min(max_anchor_z + z_margin, filtered_z))
+
+        state.velocity_x_mps = velocity_x
+        state.velocity_y_mps = velocity_y
+        state.velocity_z_mps = velocity_z
+        state.last_filter_stamp = nowstamp
+        return (filtered_x, filtered_y), filtered_z
 
     @staticmethod
     def _latest_adverts_by_scanner(device: BermudaDevice):
@@ -1843,6 +1962,10 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             state.last_anchor_z.clear()
             state.last_solution_xy = None
             state.last_solution_z = None
+            state.velocity_x_mps = 0.0
+            state.velocity_y_mps = 0.0
+            state.velocity_z_mps = 0.0
+            state.last_filter_stamp = 0.0
             state.last_solver_dimension = "2d"
             state.last_residual_m = None
             state.last_mean_sigma_m = None
@@ -1887,6 +2010,12 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
 
         anchor_count = len(anchors)
         mean_sigma_m = (sum(anchor_sigmas_m) / anchor_count) if anchor_count > 0 else None
+        known_anchor_z = [float(anchor.z_m) for anchor in anchors if anchor.z_m is not None]
+        anchor_z_bounds = (
+            (min(known_anchor_z), max(known_anchor_z))
+            if known_anchor_z
+            else None
+        )
         if anchor_count < self._TRILAT_MIN_ANCHORS:
             fallback_xy = state.last_solution_xy
             fallback_z = state.last_solution_z
@@ -2034,10 +2163,21 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             if fallback_residual is None:
                 fallback_residual = state.last_residual_m if state.last_residual_m is not None else (self._TRILAT_MAX_RESIDUAL_M * 1.5)
 
+            filtered_xy, filtered_z = self._apply_trilat_motion_filter(
+                state,
+                nowstamp=nowstamp,
+                mobility_type=device.get_mobility_type(),
+                measurement_xy=fallback_xy,
+                measurement_z=fallback_z if solver_dimension == "3d" else None,
+                anchor_z_bounds=anchor_z_bounds,
+                residual_m=fallback_residual,
+                mean_sigma_m=mean_sigma_m,
+            )
+
             device.set_trilat_solution(
-                x_m=fallback_xy[0],
-                y_m=fallback_xy[1],
-                z_m=fallback_z if solver_dimension == "3d" else None,
+                x_m=filtered_xy[0],
+                y_m=filtered_xy[1],
+                z_m=filtered_z if solver_dimension == "3d" or filtered_z is not None else None,
                 floor_id=selected_floor_id,
                 floor_name=selected_floor_name,
                 anchor_count=anchor_count,
@@ -2055,8 +2195,8 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                     mean_sigma_m=mean_sigma_m,
                 ),
             )
-            state.last_solution_xy = fallback_xy
-            state.last_solution_z = fallback_z if solver_dimension == "3d" else None
+            state.last_solution_xy = filtered_xy
+            state.last_solution_z = filtered_z if solver_dimension == "3d" or filtered_z is not None else None
             state.last_residual_m = fallback_residual
             state.last_status = "low_confidence"
             if _debug_this_device:
@@ -2071,17 +2211,28 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 )
             return
 
+        filtered_xy, filtered_z = self._apply_trilat_motion_filter(
+            state,
+            nowstamp=nowstamp,
+            mobility_type=device.get_mobility_type(),
+            measurement_xy=(solve_result.x_m, solve_result.y_m),
+            measurement_z=solve_result.z_m if solver_dimension == "3d" else None,
+            anchor_z_bounds=anchor_z_bounds,
+            residual_m=solve_result.residual_rms_m,
+            mean_sigma_m=mean_sigma_m,
+        )
+
         device.set_trilat_solution(
-            x_m=solve_result.x_m,
-            y_m=solve_result.y_m,
-            z_m=solve_result.z_m if solver_dimension == "3d" else None,
+            x_m=filtered_xy[0],
+            y_m=filtered_xy[1],
+            z_m=filtered_z if solver_dimension == "3d" or filtered_z is not None else None,
             floor_id=selected_floor_id,
             floor_name=selected_floor_name,
             anchor_count=anchor_count,
             residual_m=solve_result.residual_rms_m,
         )
-        state.last_solution_xy = (solve_result.x_m, solve_result.y_m)
-        state.last_solution_z = solve_result.z_m if solver_dimension == "3d" else None
+        state.last_solution_xy = filtered_xy
+        state.last_solution_z = filtered_z if solver_dimension == "3d" or filtered_z is not None else None
         state.last_residual_m = solve_result.residual_rms_m
         state.last_status = "ok"
         self._set_trilat_confidence(
