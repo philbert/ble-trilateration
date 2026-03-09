@@ -234,6 +234,20 @@
     "trilat_without_anchors": {
       "title": "Trilateration is enabled but no anchors are configured",
       "description": "Bermuda trilateration requires at least three scanner anchors with `Trilat Anchor Enabled` turned on and valid `Anchor X/Y` coordinates on the same floor. Configure anchors on your scanner entities. Current scanners without usable anchor configuration:\n\n{scannerlist}"
+    },
+    "calibration_layout_mismatch": {
+      "title": "Calibration samples don't match the current anchor layout",
+      "description": "Bermuda has {sample_count} saved calibration samples, but none match the current anchor layout `{current_layout_hash}`. The most common saved layout is `{dominant_layout_hash}` with {dominant_layout_count} sample(s).\n\nAnchor differences detected:\n{changed_anchor_lines}\n\nIf you physically moved anchors, keep the samples as historical and record new ones. If you only corrected anchor coordinates, you can update the stored sample geometry to match the current anchors.",
+      "fix_flow": {
+        "step": {
+          "confirm": {
+            "description": "Choose how Bermuda should handle the current anchor-layout mismatch.",
+            "data": {
+              "action": "Action"
+            }
+          }
+        }
+      }
     }
   }
 }

@@ -108,6 +108,7 @@ from .const import (
     PRUNE_TIME_KNOWN_IRK,
     PRUNE_TIME_REDACTIONS,
     PRUNE_TIME_UNKNOWN_IRK,
+    REPAIR_CALIBRATION_LAYOUT_MISMATCH,
     REPAIR_SCANNER_WITHOUT_AREA,
     REPAIR_TRILAT_WITHOUT_ANCHORS,
     SAVEOUT_COOLDOWN,
@@ -251,6 +252,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         self._area_decision_state: dict[str, BermudaDataUpdateCoordinator.AreaDecisionState] = {}
         self._trilat_decision_state: dict[str, BermudaDataUpdateCoordinator.TrilatDecisionState] = {}
         self._trilat_scanners_without_anchors: list[str] | None = None
+        self._calibration_layout_mismatch_signature: str | None = None
         self.calibration_store = BermudaCalibrationStore(hass, entry.entry_id)
         self.scanner_anchor_store = BermudaScannerAnchorStore(hass)
         self.calibration = BermudaCalibrationManager(hass, self, self.calibration_store)
@@ -406,6 +408,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         """Rebuild sample-derived runtime helpers after calibration data changes."""
         await self.ranging_model.async_rebuild()
         await self.room_classifier.async_rebuild()
+        self._async_manage_repair_calibration_layout_mismatch()
 
     @property
     def get_scanners(self) -> set[BermudaDevice]:
@@ -2148,6 +2151,45 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 return True
         return False
 
+    def _async_manage_repair_calibration_layout_mismatch(self) -> None:
+        """Raise or clear repair when stored calibration samples don't match the current anchor layout."""
+        mismatch = self.calibration.get_layout_mismatch_summary()
+        if mismatch is None:
+            if self._calibration_layout_mismatch_signature is not None:
+                ir.async_delete_issue(self.hass, DOMAIN, REPAIR_CALIBRATION_LAYOUT_MISMATCH)
+                self._calibration_layout_mismatch_signature = None
+            return
+
+        signature = "|".join(
+            [
+                mismatch["current_layout_hash"],
+                mismatch["dominant_layout_hash"],
+                str(mismatch["sample_count"]),
+                mismatch["changed_anchor_lines"],
+            ]
+        )
+        if signature == self._calibration_layout_mismatch_signature:
+            return
+
+        ir.async_delete_issue(self.hass, DOMAIN, REPAIR_CALIBRATION_LAYOUT_MISMATCH)
+        ir.async_create_issue(
+            self.hass,
+            DOMAIN,
+            REPAIR_CALIBRATION_LAYOUT_MISMATCH,
+            is_fixable=True,
+            is_persistent=True,
+            severity=ir.IssueSeverity.WARNING,
+            translation_key=REPAIR_CALIBRATION_LAYOUT_MISMATCH,
+            translation_placeholders={
+                "sample_count": str(mismatch["sample_count"]),
+                "current_layout_hash": mismatch["current_layout_hash"][:8],
+                "dominant_layout_hash": mismatch["dominant_layout_hash"][:8],
+                "dominant_layout_count": str(mismatch["dominant_layout_count"]),
+                "changed_anchor_lines": mismatch["changed_anchor_lines"],
+            },
+        )
+        self._calibration_layout_mismatch_signature = signature
+
     def _stable_area_id_for_topology(self, device: BermudaDevice) -> str | None:
         """Return the most recent stable area id for topology checks."""
         if device.area_id is not None and not device.area_is_unknown:
@@ -2184,6 +2226,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
 
     def _refresh_trilateration(self) -> None:
         """Refresh trilateration diagnostics for all tracked devices."""
+        self._async_manage_repair_calibration_layout_mismatch()
         if not self.trilat_enabled():
             self._async_manage_repair_trilat_without_anchors([])
             for device in self.devices.values():

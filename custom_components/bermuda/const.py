@@ -32,6 +32,7 @@ ICON_DEFAULT_FLOOR: Final = "mdi:selection-marker"  # "mdi:floor-plan"
 # Issue/repair translation keys. If you change these you MUST also update the key in the translations/xx.json files.
 REPAIR_SCANNER_WITHOUT_AREA = "scanner_without_area"
 REPAIR_TRILAT_WITHOUT_ANCHORS = "trilat_without_anchors"
+REPAIR_CALIBRATION_LAYOUT_MISMATCH = "calibration_layout_mismatch"
 
 # Device classes
 BINARY_SENSOR_DEVICE_CLASS = "connectivity"

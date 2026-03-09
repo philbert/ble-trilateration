@@ -7,6 +7,7 @@ import contextlib
 import hashlib
 import inspect
 import json
+import math
 import statistics
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -116,6 +117,11 @@ class BermudaCalibrationManager:
         """Return the current anchor layout hash."""
         return self.compute_anchor_layout_hash()
 
+    @property
+    def acknowledged_layout_hashes(self) -> set[str]:
+        """Return acknowledged current-layout hashes."""
+        return set(self._store.acknowledged_layout_hashes)
+
     def samples(self) -> list[dict[str, Any]]:
         """Return stored samples."""
         return self._store.samples
@@ -143,6 +149,82 @@ class BermudaCalibrationManager:
             "current_layout_count": current_layout_count,
             "recent": recent,
             "warn_threshold": CALIBRATION_SAMPLE_WARN_THRESHOLD,
+        }
+
+    def current_anchor_geometry(self) -> dict[str, dict[str, float | None]]:
+        """Return current configured anchor geometry by scanner address."""
+        geometry: dict[str, dict[str, float | None]] = {}
+        for scanner_address in sorted(self._coordinator.scanner_list):
+            scanner = self._coordinator.devices.get(scanner_address)
+            if scanner is None:
+                continue
+            anchor_x = getattr(scanner, "anchor_x_m", None)
+            anchor_y = getattr(scanner, "anchor_y_m", None)
+            if anchor_x is None or anchor_y is None:
+                continue
+            geometry[str(scanner_address).lower()] = {
+                "x_m": float(anchor_x),
+                "y_m": float(anchor_y),
+                "z_m": float(getattr(scanner, "anchor_z_m", 0.0) or 0.0),
+            }
+        return geometry
+
+    def get_layout_mismatch_summary(self) -> dict[str, Any] | None:
+        """Describe a sample/layout mismatch that requires user confirmation."""
+        samples = self.samples()
+        if not samples:
+            return None
+
+        current_layout_hash = self.current_anchor_layout_hash
+        if current_layout_hash in self.acknowledged_layout_hashes:
+            return None
+
+        current_layout_samples = [
+            sample for sample in samples if sample.get("anchor_layout_hash") == current_layout_hash
+        ]
+        if current_layout_samples:
+            return None
+
+        by_layout: dict[str, int] = {}
+        for sample in samples:
+            layout_hash = str(sample.get("anchor_layout_hash") or "unknown")
+            by_layout[layout_hash] = by_layout.get(layout_hash, 0) + 1
+        dominant_layout_hash, dominant_layout_count = max(by_layout.items(), key=lambda row: row[1])
+        representative_sample = next(
+            (sample for sample in samples if str(sample.get("anchor_layout_hash") or "unknown") == dominant_layout_hash),
+            samples[0],
+        )
+
+        changed_anchor_lines: list[str] = []
+        current_geometry = self.current_anchor_geometry()
+        for scanner_address, anchor in sorted((representative_sample.get("anchors") or {}).items()):
+            current_anchor = current_geometry.get(str(scanner_address).lower())
+            sample_position = anchor.get("anchor_position") or {}
+            sample_x = sample_position.get("x_m")
+            sample_y = sample_position.get("y_m")
+            sample_z = sample_position.get("z_m")
+            if current_anchor is None or sample_x is None or sample_y is None or sample_z is None:
+                continue
+            delta_m = math.sqrt(
+                ((float(current_anchor["x_m"]) - float(sample_x)) ** 2)
+                + ((float(current_anchor["y_m"]) - float(sample_y)) ** 2)
+                + ((float(current_anchor["z_m"]) - float(sample_z)) ** 2)
+            )
+            if delta_m < 0.01:
+                continue
+            changed_anchor_lines.append(
+                f"- {anchor.get('scanner_name') or scanner_address}: moved {delta_m:.2f} m"
+            )
+
+        if not changed_anchor_lines:
+            changed_anchor_lines.append("- No direct coordinate delta detected; layout fingerprint changed.")
+
+        return {
+            "sample_count": len(samples),
+            "current_layout_hash": current_layout_hash,
+            "dominant_layout_hash": dominant_layout_hash,
+            "dominant_layout_count": dominant_layout_count,
+            "changed_anchor_lines": "\n".join(changed_anchor_lines[:8]),
         }
 
     def get_device_samples(self) -> dict[str, dict[str, str]]:
@@ -278,22 +360,63 @@ class BermudaCalibrationManager:
 
     def compute_anchor_layout_hash(self) -> str:
         """Return a deterministic hash for the current anchor layout."""
-        anchors: list[tuple[str, bool, float | None, float | None, float | None]] = []
-        for scanner_address in sorted(self._coordinator.scanner_list):
-            scanner = self._coordinator.devices.get(scanner_address)
-            if scanner is None:
-                continue
+        anchors: list[tuple[str, float, float, float | None]] = []
+        for scanner_address, anchor in sorted(self.current_anchor_geometry().items()):
             anchors.append(
                 (
                     scanner_address,
-                    bool(getattr(scanner, "anchor_enabled", False)),
-                    getattr(scanner, "anchor_x_m", None),
-                    getattr(scanner, "anchor_y_m", None),
-                    getattr(scanner, "anchor_z_m", None),
+                    float(anchor["x_m"]),
+                    float(anchor["y_m"]),
+                    None if anchor["z_m"] is None else float(anchor["z_m"]),
                 )
             )
         encoded = json.dumps(anchors, separators=(",", ":"), sort_keys=False)
         return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+    async def async_acknowledge_current_layout_mismatch(self) -> None:
+        """Acknowledge that the current layout mismatch is intentional."""
+        await self._store.async_acknowledge_layout_hash(self.current_anchor_layout_hash)
+
+    async def async_update_samples_to_current_geometry(self) -> int:
+        """Adopt the current anchor geometry for all stored samples."""
+        await self._store.async_ensure_loaded()
+        samples = self.samples()
+        if not samples:
+            return 0
+
+        current_geometry = self.current_anchor_geometry()
+        current_layout_hash = self.current_anchor_layout_hash
+        updated = 0
+
+        for sample in samples:
+            sample_changed = False
+            anchors = sample.get("anchors") or {}
+            for scanner_address, anchor in anchors.items():
+                current_anchor = current_geometry.get(str(scanner_address).lower())
+                if current_anchor is None:
+                    continue
+                anchor_position = anchor.get("anchor_position") or {}
+                replacement = {
+                    "x_m": current_anchor["x_m"],
+                    "y_m": current_anchor["y_m"],
+                    "z_m": current_anchor["z_m"],
+                }
+                if anchor_position != replacement:
+                    anchor["anchor_position"] = replacement
+                    sample_changed = True
+            if sample.get("anchor_layout_hash") != current_layout_hash:
+                sample["anchor_layout_hash"] = current_layout_hash
+                sample_changed = True
+            if sample_changed:
+                updated += 1
+
+        if updated == 0:
+            return 0
+
+        await self._store.async_replace_samples(samples)
+        await self._store.async_forget_layout_hash(current_layout_hash)
+        await self._async_notify_changed()
+        return updated
 
     def _record_observation(
         self,

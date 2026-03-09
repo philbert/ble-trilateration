@@ -12,9 +12,14 @@ from homeassistant import data_entry_flow
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import area_registry as ar
 from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import issue_registry as ir
 
 from custom_components.bermuda.bermuda_device import BermudaDevice
-from custom_components.bermuda.const import CALIBRATION_EVENT_SAMPLE_CAPTURED, DOMAIN
+from custom_components.bermuda.const import (
+    CALIBRATION_EVENT_SAMPLE_CAPTURED,
+    DOMAIN,
+    REPAIR_CALIBRATION_LAYOUT_MISMATCH,
+)
 
 
 async def test_record_calibration_sample_service(hass: HomeAssistant, setup_bermuda_entry):
@@ -223,6 +228,142 @@ async def test_calibration_store_uses_stable_shared_key(hass: HomeAssistant, set
     """Calibration samples should use the stable shared Bermuda storage key."""
     coordinator = setup_bermuda_entry.runtime_data.coordinator
     assert coordinator.calibration_store._store.key == "bermuda/calibration_samples"
+
+
+async def test_calibration_layout_mismatch_can_update_samples(hass: HomeAssistant, setup_bermuda_entry):
+    """Stored samples can be adopted to the current anchor geometry."""
+    coordinator = setup_bermuda_entry.runtime_data.coordinator
+
+    scanner = BermudaDevice("aa:bb:cc:dd:10:21", coordinator)
+    scanner.name = "Kitchen Proxy"
+    scanner.anchor_x_m = 2.0
+    scanner.anchor_y_m = 3.0
+    scanner.anchor_z_m = 1.0
+    coordinator.devices[scanner.address] = scanner
+    coordinator._scanner_list.add(scanner.address)
+
+    current_layout_hash = coordinator.calibration.current_anchor_layout_hash
+    await coordinator.calibration_store.async_add_sample(
+        {
+            "id": "sample_layout_old",
+            "created_at": "2026-03-06T12:00:00+00:00",
+            "device_id": "device_one",
+            "device_name": "Device One",
+            "device_address": "aa:bb:cc:dd:ee:01",
+            "room_area_id": "kitchen",
+            "room_name": "Kitchen",
+            "position": {"x_m": 1.0, "y_m": 2.0, "z_m": 1.0},
+            "sample_radius_m": 1.0,
+            "anchor_layout_hash": "old_layout_hash",
+            "anchors": {
+                scanner.address: {
+                    "scanner_name": scanner.name,
+                    "anchor_position": {"x_m": 1.5, "y_m": 2.5, "z_m": 1.0},
+                    "rssi_median": -70.0,
+                }
+            },
+            "quality": {"status": "accepted", "eligible_anchor_count": 1, "reason": None},
+        }
+    )
+
+    mismatch = coordinator.calibration.get_layout_mismatch_summary()
+    assert mismatch is not None
+    assert mismatch["sample_count"] == 1
+    assert mismatch["current_layout_hash"] == current_layout_hash
+
+    updated = await coordinator.calibration.async_update_samples_to_current_geometry()
+    assert updated == 1
+
+    sample = coordinator.calibration.samples()[0]
+    assert sample["anchor_layout_hash"] == current_layout_hash
+    assert sample["anchors"][scanner.address]["anchor_position"] == {
+        "x_m": 2.0,
+        "y_m": 3.0,
+        "z_m": 1.0,
+    }
+    assert coordinator.calibration.get_layout_mismatch_summary() is None
+
+
+async def test_calibration_layout_mismatch_can_be_acknowledged(hass: HomeAssistant, setup_bermuda_entry):
+    """Acknowledging a layout mismatch suppresses the repair condition for the current hash."""
+    coordinator = setup_bermuda_entry.runtime_data.coordinator
+
+    scanner = BermudaDevice("aa:bb:cc:dd:10:31", coordinator)
+    scanner.name = "Living Room Proxy"
+    scanner.anchor_x_m = 5.0
+    scanner.anchor_y_m = 6.0
+    scanner.anchor_z_m = 1.0
+    coordinator.devices[scanner.address] = scanner
+    coordinator._scanner_list.add(scanner.address)
+
+    await coordinator.calibration_store.async_add_sample(
+        {
+            "id": "sample_layout_ack",
+            "created_at": "2026-03-06T12:00:00+00:00",
+            "device_id": "device_one",
+            "device_name": "Device One",
+            "device_address": "aa:bb:cc:dd:ee:01",
+            "room_area_id": "living_room",
+            "room_name": "Living Room",
+            "position": {"x_m": 1.0, "y_m": 2.0, "z_m": 1.0},
+            "sample_radius_m": 1.0,
+            "anchor_layout_hash": "old_layout_hash",
+            "anchors": {
+                scanner.address: {
+                    "scanner_name": scanner.name,
+                    "anchor_position": {"x_m": 5.0, "y_m": 6.0, "z_m": 1.0},
+                    "rssi_median": -70.0,
+                }
+            },
+            "quality": {"status": "accepted", "eligible_anchor_count": 1, "reason": None},
+        }
+    )
+
+    assert coordinator.calibration.get_layout_mismatch_summary() is not None
+    await coordinator.calibration.async_acknowledge_current_layout_mismatch()
+    assert coordinator.calibration.get_layout_mismatch_summary() is None
+
+
+async def test_calibration_layout_mismatch_raises_repair(hass: HomeAssistant, setup_bermuda_entry):
+    """A layout mismatch should create a fixable repair issue."""
+    coordinator = setup_bermuda_entry.runtime_data.coordinator
+
+    scanner = BermudaDevice("aa:bb:cc:dd:10:41", coordinator)
+    scanner.name = "Garage Proxy"
+    scanner.anchor_x_m = 8.0
+    scanner.anchor_y_m = 2.0
+    scanner.anchor_z_m = 1.0
+    coordinator.devices[scanner.address] = scanner
+    coordinator._scanner_list.add(scanner.address)
+
+    await coordinator.calibration_store.async_add_sample(
+        {
+            "id": "sample_layout_issue",
+            "created_at": "2026-03-06T12:00:00+00:00",
+            "device_id": "device_one",
+            "device_name": "Device One",
+            "device_address": "aa:bb:cc:dd:ee:01",
+            "room_area_id": "garage",
+            "room_name": "Garage",
+            "position": {"x_m": 1.0, "y_m": 2.0, "z_m": 1.0},
+            "sample_radius_m": 1.0,
+            "anchor_layout_hash": "old_layout_hash",
+            "anchors": {
+                scanner.address: {
+                    "scanner_name": scanner.name,
+                    "anchor_position": {"x_m": 8.5, "y_m": 2.0, "z_m": 1.0},
+                    "rssi_median": -70.0,
+                }
+            },
+            "quality": {"status": "accepted", "eligible_anchor_count": 1, "reason": None},
+        }
+    )
+
+    await coordinator.async_handle_calibration_samples_changed()
+
+    issue = ir.async_get(hass).async_get_issue(DOMAIN, REPAIR_CALIBRATION_LAYOUT_MISMATCH)
+    assert issue is not None
+    assert issue.is_fixable is True
 
 
 async def test_calibration_samples_options_flow(hass: HomeAssistant, setup_bermuda_entry):

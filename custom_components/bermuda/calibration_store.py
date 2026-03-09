@@ -19,7 +19,10 @@ class BermudaCalibrationStore:
         """Initialise store wrapper."""
         del entry_id
         self._store = Store[dict[str, Any]](hass, STORAGE_VERSION, STORAGE_KEY)
-        self._data: dict[str, Any] = {"samples": []}
+        self._data: dict[str, Any] = {
+            "samples": [],
+            "acknowledged_layout_hashes": [],
+        }
         self._loaded = False
 
     async def async_load(self) -> None:
@@ -28,7 +31,10 @@ class BermudaCalibrationStore:
             return
         loaded = await self._store.async_load()
         if isinstance(loaded, dict) and isinstance(loaded.get("samples"), list):
-            self._data = loaded
+            self._data = {
+                "samples": loaded.get("samples", []),
+                "acknowledged_layout_hashes": loaded.get("acknowledged_layout_hashes", []),
+            }
         self._loaded = True
 
     async def async_ensure_loaded(self) -> None:
@@ -45,10 +51,24 @@ class BermudaCalibrationStore:
         """Return total stored sample count."""
         return len(self._data["samples"])
 
+    @property
+    def acknowledged_layout_hashes(self) -> list[str]:
+        """Return acknowledged layout hashes."""
+        raw_hashes = self._data.get("acknowledged_layout_hashes", [])
+        if not isinstance(raw_hashes, list):
+            return []
+        return [str(layout_hash) for layout_hash in raw_hashes if str(layout_hash)]
+
     async def async_add_sample(self, sample: dict[str, Any]) -> None:
         """Persist a single calibration sample."""
         await self.async_ensure_loaded()
         self._data["samples"].append(deepcopy(sample))
+        await self._store.async_save(self._data)
+
+    async def async_replace_samples(self, samples: list[dict[str, Any]]) -> None:
+        """Replace all stored samples."""
+        await self.async_ensure_loaded()
+        self._data["samples"] = deepcopy(samples)
         await self._store.async_save(self._data)
 
     async def async_delete_sample(self, sample_id: str) -> bool:
@@ -88,3 +108,27 @@ class BermudaCalibrationStore:
             self._data["samples"] = kept
             await self._store.async_save(self._data)
         return removed
+
+    async def async_acknowledge_layout_hash(self, anchor_layout_hash: str) -> None:
+        """Remember that a layout mismatch for this hash was intentionally acknowledged."""
+        await self.async_ensure_loaded()
+        if anchor_layout_hash in self.acknowledged_layout_hashes:
+            return
+        self._data["acknowledged_layout_hashes"] = [
+            *self.acknowledged_layout_hashes,
+            anchor_layout_hash,
+        ]
+        await self._store.async_save(self._data)
+
+    async def async_forget_layout_hash(self, anchor_layout_hash: str) -> None:
+        """Remove one acknowledged layout hash."""
+        await self.async_ensure_loaded()
+        kept = [
+            layout_hash
+            for layout_hash in self.acknowledged_layout_hashes
+            if layout_hash != anchor_layout_hash
+        ]
+        if len(kept) == len(self.acknowledged_layout_hashes):
+            return
+        self._data["acknowledged_layout_hashes"] = kept
+        await self._store.async_save(self._data)
