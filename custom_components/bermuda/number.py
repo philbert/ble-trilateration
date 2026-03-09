@@ -61,17 +61,29 @@ async def async_setup_entry(
             pass
         # tell the co-ord we've done it.
         coordinator.number_created(address)
+        # Also check for pending scanner anchors, since scanner resolution
+        # may now be complete (mirrors sensor.py's create_scanner_entities() call).
+        scanners_changed()
 
     @callback
     def scanners_changed() -> None:
         """Create per-scanner configuration Number entities."""
         entities = []
         for address, device in coordinator.devices.items():
-            if device.is_scanner and address not in created_scanner_entities:
-                entities.append(BermudaScannerAnchorX(coordinator, entry, address))
-                entities.append(BermudaScannerAnchorY(coordinator, entry, address))
-                entities.append(BermudaScannerAnchorZ(coordinator, entry, address))
-                created_scanner_entities.append(address)
+            if not device.is_scanner:
+                continue
+            if address in created_scanner_entities:
+                continue
+            # Skip this specific scanner until it has resolved its wifi MAC,
+            # so the entity unique_id (based on device.unique_id) is stable.
+            if device.is_remote_scanner is None:
+                continue
+            if device.is_remote_scanner and device.address_wifi_mac is None:
+                continue
+            entities.append(BermudaScannerAnchorX(coordinator, entry, address))
+            entities.append(BermudaScannerAnchorY(coordinator, entry, address))
+            entities.append(BermudaScannerAnchorZ(coordinator, entry, address))
+            created_scanner_entities.append(address)
 
         if entities:
             async_add_devices(entities, False)
