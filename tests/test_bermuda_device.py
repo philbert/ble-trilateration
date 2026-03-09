@@ -89,6 +89,23 @@ def test_timestamp_sync_diagnostics_record_regressions(bermuda_scanner):
     assert diagnostics["max_stale_advert_drop_s"] == 1.1
 
 
+def test_timestamp_sync_recovered_returns_to_synchronized_after_cooldown(bermuda_scanner):
+    """Recovered scanners should return to synchronized after 15 quiet minutes."""
+    bermuda_scanner._is_scanner = True  # noqa: SLF001 - test helper
+    bermuda_scanner._is_remote_scanner = True  # noqa: SLF001 - test helper
+
+    with patch("custom_components.bermuda.bermuda_device.monotonic_time_coarse", return_value=1000.0):
+        bermuda_scanner.record_scanner_timestamp_regression(1.2)
+
+    with patch("custom_components.bermuda.bermuda_device.monotonic_time_coarse", return_value=1600.0):
+        diagnostics = bermuda_scanner.timestamp_sync_diagnostics()
+        assert diagnostics["state"] == "recovered"
+
+    with patch("custom_components.bermuda.bermuda_device.monotonic_time_coarse", return_value=1901.0):
+        diagnostics = bermuda_scanner.timestamp_sync_diagnostics()
+        assert diagnostics["state"] == "synchronized"
+
+
 def test_async_as_scanner_get_stamp(bermuda_scanner, mock_scanner, mock_remote_scanner):
     """Test async_as_scanner_get_stamp method."""
     bermuda_scanner.async_as_scanner_init(mock_scanner)
