@@ -241,10 +241,7 @@
       "fix_flow": {
         "step": {
           "confirm": {
-            "description": "Choose how Bermuda should handle the current anchor-layout mismatch.",
-            "data": {
-              "action": "Action"
-            }
+            "description": "Bermuda can update the stored calibration samples so their saved anchor geometry matches the current configured anchors.\n\nUse this repair only if the physical anchor layout did not change and you merely corrected the configured coordinates.\n\nIf anchors were physically moved, cancel this repair and record new calibration samples instead."
           }
         }
       }

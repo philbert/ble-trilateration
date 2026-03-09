@@ -1623,6 +1623,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             self.hass,
             DOMAIN,
             REPAIR_CALIBRATION_LAYOUT_MISMATCH,
+            data={"entry_id": self.config_entry.entry_id},
             is_fixable=True,
             is_persistent=True,
             severity=ir.IssueSeverity.WARNING,

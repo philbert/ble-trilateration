@@ -2,61 +2,61 @@
 
 from __future__ import annotations
 
+from typing import cast
+
+from homeassistant import data_entry_flow
 from homeassistant.components.repairs import RepairsFlow
 from homeassistant.core import HomeAssistant
-from homeassistant.data_entry_flow import FlowResult
-from homeassistant.helpers.selector import SelectSelector, SelectSelectorConfig, SelectSelectorMode
+from homeassistant.helpers import issue_registry as ir
 import voluptuous as vol
 
 from .const import DOMAIN, REPAIR_CALIBRATION_LAYOUT_MISMATCH
 
 
 class CalibrationLayoutMismatchRepairFlow(RepairsFlow):
-    """Offer resolution choices for calibration/layout mismatch issues."""
+    """Repair stored sample geometry after anchor-coordinate corrections."""
 
-    async def async_step_init(self, user_input: dict[str, str] | None = None) -> FlowResult:
+    def __init__(self, entry_id: str, issue_id: str) -> None:
+        """Create the repair flow."""
+        self.entry_id = entry_id
+        self.issue_id = issue_id
+        super().__init__()
+
+    async def async_step_init(
+        self, user_input: dict[str, str] | None = None
+    ) -> data_entry_flow.FlowResult:
         """Handle the first step of the fix flow."""
         return await self.async_step_confirm(user_input)
 
-    async def async_step_confirm(self, user_input: dict[str, str] | None = None) -> FlowResult:
+    async def async_step_confirm(
+        self, user_input: dict[str, str] | None = None
+    ) -> data_entry_flow.FlowResult:
         """Handle the confirmation step."""
         coordinator = self._get_coordinator()
+        if coordinator is None:
+            return self.async_abort(reason="entry_not_found")
 
         if user_input is not None:
-            action = user_input["action"]
-            if action == "physical_layout_changed":
-                await coordinator.calibration.async_acknowledge_current_layout_mismatch()
-            elif action == "update_sample_geometry":
-                await coordinator.calibration.async_update_samples_to_current_geometry()
+            await coordinator.calibration.async_update_samples_to_current_geometry()
             await coordinator.async_handle_calibration_samples_changed()
-            return self.async_create_entry(data={"action": action})
+            return self.async_create_entry(data={})
+
+        description_placeholders = None
+        issue_registry = ir.async_get(self.hass)
+        if issue := issue_registry.async_get_issue(DOMAIN, self.issue_id):
+            description_placeholders = issue.translation_placeholders
 
         return self.async_show_form(
             step_id="confirm",
-            data_schema=vol.Schema(
-                {
-                    vol.Required("action"): SelectSelector(
-                        SelectSelectorConfig(
-                            options=[
-                                {
-                                    "value": "physical_layout_changed",
-                                    "label": "Physical layout changed",
-                                },
-                                {
-                                    "value": "update_sample_geometry",
-                                    "label": "Update stored sample geometry",
-                                },
-                            ],
-                            mode=SelectSelectorMode.LIST,
-                        )
-                    )
-                }
-            ),
+            data_schema=vol.Schema({}),
+            description_placeholders=description_placeholders,
         )
 
     def _get_coordinator(self):
         """Return Bermuda's single coordinator instance."""
-        entry = self.hass.config_entries.async_entries(DOMAIN)[0]
+        entry = self.hass.config_entries.async_get_entry(self.entry_id)
+        if entry is None:
+            return None
         return entry.runtime_data.coordinator
 
 
@@ -66,7 +66,11 @@ async def async_create_fix_flow(
     data: dict[str, str | int | float | None] | None,
 ) -> RepairsFlow:
     """Create fix flow for Bermuda repair issues."""
-    del hass, data
     if issue_id == REPAIR_CALIBRATION_LAYOUT_MISMATCH:
-        return CalibrationLayoutMismatchRepairFlow()
+        if data is None or (entry_id := data.get("entry_id")) is None:
+            entry = next(iter(hass.config_entries.async_entries(DOMAIN)), None)
+            if entry is None:
+                raise ValueError("No Bermuda config entry available for repair flow")
+            entry_id = entry.entry_id
+        return CalibrationLayoutMismatchRepairFlow(cast(str, entry_id), issue_id)
     raise ValueError(f"Unknown repair issue_id: {issue_id}")
