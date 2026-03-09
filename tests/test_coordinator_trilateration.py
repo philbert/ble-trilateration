@@ -532,7 +532,7 @@ def test_trilat_motion_filter_caps_unphysical_xy_jump():
 
 
 def test_trilat_holds_previous_z_through_same_floor_2d_gap():
-    """A prior z solution should be held, but clamped to the remaining anchor-height envelope."""
+    """A prior z solution should be held, but softly pulled toward the remaining anchor-height envelope."""
     coordinator = _make_coordinator()
     device = _DummyDevice("dev-z-hold")
 
@@ -568,7 +568,8 @@ def test_trilat_holds_previous_z_through_same_floor_2d_gap():
     assert device.trilat_status == "ok"
     assert device.trilat_z_m is not None
     assert device.trilat_z_m < first_z
-    assert abs(device.trilat_z_m - 0.5) < 0.001
+    assert device.trilat_z_m > 0.5
+    assert abs(device.trilat_z_m - 0.9) < 0.05
 
 
 def test_high_residual_yields_low_confidence_solution():

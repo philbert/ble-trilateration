@@ -1619,11 +1619,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         filtered_z = state.last_solution_z
         velocity_z = state.velocity_z_mps * 0.5
         if measurement_z is not None:
-            if anchor_z_bounds is not None:
-                min_anchor_z, max_anchor_z = anchor_z_bounds
-                z_span = max(0.0, max_anchor_z - min_anchor_z)
-                z_margin = max(0.5, z_span * 0.5)
-                measurement_z = max(min_anchor_z - z_margin, min(max_anchor_z + z_margin, measurement_z))
+            measurement_z = self._apply_soft_vertical_prior(measurement_z, anchor_z_bounds)
             if state.last_solution_z is None:
                 filtered_z = measurement_z
                 velocity_z = 0.0
@@ -1640,16 +1636,37 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                     min(self._TRILAT_MAX_VERTICAL_SPEED_MPS, velocity_z),
                 )
         elif filtered_z is not None and anchor_z_bounds is not None:
-            min_anchor_z, max_anchor_z = anchor_z_bounds
-            z_span = max(0.0, max_anchor_z - min_anchor_z)
-            z_margin = max(0.5, z_span * 0.5)
-            filtered_z = max(min_anchor_z - z_margin, min(max_anchor_z + z_margin, filtered_z))
+            filtered_z = self._apply_soft_vertical_prior(filtered_z, anchor_z_bounds)
 
         state.velocity_x_mps = velocity_x
         state.velocity_y_mps = velocity_y
         state.velocity_z_mps = velocity_z
         state.last_filter_stamp = nowstamp
         return (filtered_x, filtered_y), filtered_z
+
+    @staticmethod
+    def _apply_soft_vertical_prior(
+        z_value: float,
+        anchor_z_bounds: tuple[float, float] | None,
+    ) -> float:
+        """Softly pull z toward the anchor-height band instead of hard-clamping it."""
+        if anchor_z_bounds is None:
+            return z_value
+
+        min_anchor_z, max_anchor_z = anchor_z_bounds
+        z_span = max(0.0, max_anchor_z - min_anchor_z)
+        z_margin = max(0.5, z_span * 0.5)
+        comfort_low = min_anchor_z - z_margin
+        comfort_high = max_anchor_z + z_margin
+
+        if comfort_low <= z_value <= comfort_high:
+            return z_value
+
+        nearest_edge = comfort_low if z_value < comfort_low else comfort_high
+        excess = abs(z_value - nearest_edge)
+        sigma = max(0.75, z_margin * 1.5)
+        pull_weight = 1.0 - math.exp(-0.5 * ((excess / sigma) ** 2))
+        return z_value + (pull_weight * (nearest_edge - z_value))
 
     @staticmethod
     def _latest_adverts_by_scanner(device: BermudaDevice):
