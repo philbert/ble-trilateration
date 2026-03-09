@@ -5,7 +5,6 @@ from __future__ import annotations
 import logging
 import math
 import re
-from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -68,36 +67,24 @@ from .const import (
     _LOGGER_SPAM_LESS,
     _LOGGER_TARGET_SPAM_LESS,
     ADDR_TYPE_PRIVATE_BLE_DEVICE,
-    AREA_NAME_UNKNOWN,
-    AREA_MAX_AD_AGE,
     BDADDR_TYPE_NOT_MAC48,
     BDADDR_TYPE_RANDOM_RESOLVABLE,
-    CONF_ATTENUATION,
     CONF_CONNECTOR_GROUPS,
     CONF_DEVICES,
     CONF_DEVTRACK_TIMEOUT,
-    CONF_MAX_RADIUS,
     CONF_MAX_VELOCITY,
-    CONF_REF_POWER,
-    CONF_RSSI_OFFSETS,
     CONF_TRILAT_CROSS_FLOOR_PENALTY_DB,
-    CONF_TRILAT_ENABLED,
     CONF_SMOOTHING_SAMPLES,
     CONF_UPDATE_INTERVAL,
-    DEFAULT_ATTENUATION,
     DEFAULT_DEVTRACK_TIMEOUT,
-    DEFAULT_MAX_RADIUS,
     DEFAULT_MAX_VELOCITY,
     DEFAULT_SAMPLE_RADIUS_M,
-    DEFAULT_REF_POWER,
     DEFAULT_SMOOTHING_SAMPLES,
     DEFAULT_TRILAT_CROSS_FLOOR_PENALTY_DB,
-    DEFAULT_TRILAT_ENABLED,
     DEFAULT_UPDATE_INTERVAL,
     DISTANCE_TIMEOUT,
     DOMAIN,
     DOMAIN_PRIVATE_BLE_DEVICE,
-    MOBILITY_MOVING,
     MOBILITY_STATIONARY,
     METADEVICE_IBEACON_DEVICE,
     METADEVICE_TYPE_IBEACON_SOURCE,
@@ -249,7 +236,6 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         self.have_floors: bool = self.init_floors()
 
         self._scanners_without_areas: list[str] | None = None  # Tracks any proxies that don't have an area assigned.
-        self._area_decision_state: dict[str, BermudaDataUpdateCoordinator.AreaDecisionState] = {}
         self._trilat_decision_state: dict[str, BermudaDataUpdateCoordinator.TrilatDecisionState] = {}
         self._trilat_scanners_without_anchors: list[str] | None = None
         self._calibration_layout_mismatch_signature: str | None = None
@@ -303,16 +289,11 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
 
         # TODO: This is only here because we haven't set up migration of config
         # entries yet, so some users might not have this defined after an update.
-        self.options[CONF_ATTENUATION] = DEFAULT_ATTENUATION
         self.options[CONF_DEVTRACK_TIMEOUT] = DEFAULT_DEVTRACK_TIMEOUT
-        self.options[CONF_MAX_RADIUS] = DEFAULT_MAX_RADIUS
         self.options[CONF_MAX_VELOCITY] = DEFAULT_MAX_VELOCITY
-        self.options[CONF_REF_POWER] = DEFAULT_REF_POWER
         self.options[CONF_SMOOTHING_SAMPLES] = DEFAULT_SMOOTHING_SAMPLES
         self.options[CONF_UPDATE_INTERVAL] = DEFAULT_UPDATE_INTERVAL
-        self.options[CONF_RSSI_OFFSETS] = {}
         self.options[CONF_CONNECTOR_GROUPS] = []
-        self.options[CONF_TRILAT_ENABLED] = DEFAULT_TRILAT_ENABLED
         self.options[CONF_TRILAT_CROSS_FLOOR_PENALTY_DB] = DEFAULT_TRILAT_CROSS_FLOOR_PENALTY_DB
 
         if hasattr(entry, "options"):
@@ -322,16 +303,11 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             # serialise it properly when it goes into the device and scanner classes.
             for key, val in entry.options.items():
                 if key in (
-                    CONF_ATTENUATION,
                     CONF_DEVICES,
                     CONF_DEVTRACK_TIMEOUT,
-                    CONF_MAX_RADIUS,
                     CONF_MAX_VELOCITY,
-                    CONF_REF_POWER,
                     CONF_SMOOTHING_SAMPLES,
-                    CONF_RSSI_OFFSETS,
                     CONF_CONNECTOR_GROUPS,
-                    CONF_TRILAT_ENABLED,
                     CONF_TRILAT_CROSS_FLOOR_PENALTY_DB,
                 ):
                     self.options[key] = val
@@ -434,56 +410,6 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         self._scanners.remove(scanner_device)
         async_dispatcher_send(self.hass, SIGNAL_SCANNERS_CHANGED)
 
-    def get_scanner_rssi_offset(self, scanner_address: str) -> float:
-        """
-        Get RSSI offset for a scanner.
-
-        Priority: scanner device attribute > legacy config > default (0)
-        """
-        # Check if scanner device has the attribute
-        if scanner_address in self.devices:
-            device = self.devices[scanner_address]
-            if hasattr(device, 'rssi_offset'):
-                return device.rssi_offset
-
-        # Fall back to legacy config
-        legacy_offsets = self.options.get(CONF_RSSI_OFFSETS, {})
-        if scanner_address in legacy_offsets:
-            return legacy_offsets[scanner_address]
-
-        # Default
-        return 0
-
-    def get_scanner_attenuation(self, scanner_address: str) -> float:
-        """
-        Get attenuation for a scanner.
-
-        Priority: scanner device attribute > global default
-        """
-        # Check if scanner device has the attribute
-        if scanner_address in self.devices:
-            device = self.devices[scanner_address]
-            if hasattr(device, 'attenuation'):
-                return device.attenuation
-
-        # Fall back to global default
-        return self.options.get(CONF_ATTENUATION, DEFAULT_ATTENUATION)
-
-    def get_scanner_max_radius(self, scanner_address: str) -> float:
-        """
-        Get max radius for a scanner.
-
-        Priority: scanner device attribute > global default
-        """
-        # Check if scanner device has the attribute
-        if scanner_address in self.devices:
-            device = self.devices[scanner_address]
-            if hasattr(device, 'max_radius'):
-                return device.max_radius
-
-        # Fall back to global default
-        return self.options.get(CONF_MAX_RADIUS, DEFAULT_MAX_RADIUS)
-
     def current_anchor_layout_hash(self) -> str:
         """Return the active anchor layout hash."""
         return self.calibration.current_anchor_layout_hash
@@ -516,12 +442,6 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             live_rssi_dispersion=live_rssi_dispersion,
         )
 
-    def get_scanner_anchor_enabled(self, scanner_address: str) -> bool:
-        """Return whether scanner should be used as a trilat anchor."""
-        if scanner_address in self.devices:
-            return bool(getattr(self.devices[scanner_address], "anchor_enabled", True))
-        return False
-
     def get_scanner_anchor_x(self, scanner_address: str) -> float | None:
         """Return scanner trilat X coordinate in meters."""
         if scanner_address in self.devices:
@@ -540,10 +460,6 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             return getattr(self.devices[scanner_address], "anchor_z_m", None)
         return None
 
-    def trilat_enabled(self) -> bool:
-        """Return true if trilateration is enabled."""
-        return bool(self.options.get(CONF_TRILAT_ENABLED, DEFAULT_TRILAT_ENABLED))
-
     def trilat_cross_floor_penalty_db(self) -> float:
         """Return configured cross-floor RSSI penalty for floor evidence."""
         return float(
@@ -552,19 +468,6 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 DEFAULT_TRILAT_CROSS_FLOOR_PENALTY_DB,
             )
         )
-
-    def reload_all_advert_configs(self) -> None:
-        """
-        Reload configuration for all BermudaAdvert instances.
-
-        Called when a scanner Number entity value changes to ensure
-        all advert instances pick up the new configuration values.
-        """
-        for device in self.devices.values():
-            if hasattr(device, 'scanners'):
-                for scanner_address, advert in device.scanners.items():
-                    if hasattr(advert, 'reload_config'):
-                        advert.reload_config()
 
     def get_manufacturer_from_id(self, uuid: int | str) -> tuple[str, bool] | tuple[None, None]:
         """
@@ -911,10 +814,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 device.calculate_data()
 
             self._refresh_trilateration()
-            if self.trilat_enabled():
-                self._refresh_areas_from_trilat()
-            else:
-                self._refresh_areas_by_min_distance()
+            self._refresh_areas_from_trilat()
             self.calibration.capture_update()
 
             # We might need to freshen deliberately on first start if no new scanners
@@ -1155,7 +1055,6 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         for device_address in prune_list:
             _LOGGER.debug("Acting on prune list for %s", device_address)
             del self.devices[device_address]
-            self._area_decision_state.pop(device_address, None)
             self._trilat_decision_state.pop(device_address, None)
 
         # Clean out the scanners dicts in metadevices and scanners
@@ -1411,25 +1310,6 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 if metadevice.last_seen < source_device.last_seen:
                     metadevice.last_seen = source_device.last_seen
 
-                # If not done already, set the source device's ref_power from our own. This will cause
-                # the source device and all its scanner entries to update their
-                # distance measurements. This won't affect Area wins though, because
-                # they are "relative", not absolute.
-
-                # FIXME: This has two potential bugs:
-                # - if multiple metadevices share a source, they will
-                #   "fight" over their preferred ref_power, if different.
-                # - The non-meta device (if tracked) will receive distances
-                #   based on the meta device's ref_power.
-                # - The non-meta device if tracked will have its own ref_power ignored.
-                #
-                # None of these are terribly awful, but worth fixing.
-
-                # Note we are setting the ref_power on the source_device, not the
-                # individual scanner entries (it will propagate to them though)
-                if source_device.ref_power != metadevice.ref_power:
-                    source_device.set_ref_power(metadevice.ref_power)
-
                 # anything that isn't already set to something interesting, overwrite
                 # it with the new device's data.
                 for key, val in source_device.items():
@@ -1486,16 +1366,6 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         if hasattr(areas, "name"):
             return getattr(areas, "name", "invalid_area")
         return None
-
-    def _refresh_areas_by_min_distance(self):
-        """Set area for ALL devices based on closest beacon."""
-        for device in self.devices.values():
-            if (
-                # device.is_scanner is not True  # exclude scanners.
-                device.create_sensor  # include any devices we are tracking
-                # or device.metadevice_type in METADEVICE_SOURCETYPES  # and any source devices for PBLE, ibeacon etc
-            ):
-                self._refresh_area_by_min_distance(device)
 
     def _refresh_areas_from_trilat(self) -> None:
         """Set room/area for tracked devices from trilat output."""
@@ -1560,105 +1430,6 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             floor_name=device.trilat_floor_name,
             force_unknown=True,
         )
-
-    @dataclass
-    class AreaTests:
-        """
-        Holds the results of Area-based tests.
-
-        Likely to become a stand-alone class for performing the whole area-selection
-        process.
-        """
-
-        device: str = ""
-        scannername: tuple[str, str] = ("", "")
-        areas: tuple[str, str] = ("", "")
-        pcnt_diff: float = 0  # distance percentage difference.
-        same_area: bool = False  # The old scanner is in the same area as us.
-        # last_detection: tuple[float, float] = (0, 0)  # bt manager's last_detection field. Compare with ours.
-        last_ad_age: tuple[float, float] = (0, 0)  # seconds since we last got *any* ad from scanner
-        this_ad_age: tuple[float, float] = (0, 0)  # how old the *current* advert is on this scanner
-        distance: tuple[float, float] = (0, 0)
-        hist_min_max: tuple[float, float] = (0, 0)  # min/max distance from history
-        # velocity: tuple[float, float] = (0, 0)
-        # last_closer: tuple[float, float] = (0, 0)  # since old was closer and how long new has been closer
-        reason: str | None = None  # reason/result
-
-        def sensortext(self) -> str:
-            """Return a text summary suitable for use in a sensor entity."""
-            out = ""
-            for var, val in vars(self).items():
-                out += f"{var}|"
-                if isinstance(val, tuple):
-                    for v in val:
-                        if isinstance(v, float):
-                            out += f"{v:.2f}|"
-                        else:
-                            out += f"{v}"
-                    # out += "\n"
-                elif var == "pcnt_diff":
-                    out += f"{val:.3f}"
-                else:
-                    out += f"{val}"
-                out += "\n"
-            return out[:255]
-
-        def __str__(self) -> str:
-            """
-            Create string representation for easy debug logging/dumping
-            and potentially a sensor for logging Area decisions.
-            """
-            out = ""
-            for var, val in vars(self).items():
-                out += f"** {var:20} "
-                if isinstance(val, tuple):
-                    for v in val:
-                        if isinstance(v, float):
-                            out += f"{v:.2f} "
-                        else:
-                            out += f"{v} "
-                    out += "\n"
-                elif var == "pcnt_diff":
-                    out += f"{val:.3f}\n"
-                else:
-                    out += f"{val}\n"
-            return out
-
-    @dataclass
-    class AreaCandidate:
-        """A valid area contender after stale/radius/area checks."""
-
-        advert: BermudaAdvert
-        score: float
-        rssi_filtered: float
-        dispersion: float
-        max_radius: float
-
-    @dataclass
-    class MobilityPolicy:
-        """Mobility-aware switching policy defaults."""
-
-        mode: str = MOBILITY_MOVING
-        fast_ratio: float = 1.6
-        dwell_seconds: float = 8.0
-        majority_window: int = 9
-        majority_need: int = 6
-        min_rssi_confidence: float = -94.0
-        ambiguity_ratio: float = 1.2
-        ambiguity_hold_seconds: float = 8.0
-        unknown_exit_ratio: float = 1.35
-        unknown_enter_seconds: float = 12.0
-        reacquire_seconds: float = 8.0
-
-    @dataclass
-    class AreaDecisionState:
-        """Per-device rolling state to smooth area decisions."""
-
-        dominant_history: deque[str] = field(default_factory=lambda: deque(maxlen=21))
-        challenger_scanner: str | None = None
-        challenger_since: float = 0.0
-        ambiguous_since: float = 0.0
-        unknown_since: float = 0.0
 
     @dataclass
     class TrilatMobilityPolicy:
@@ -1743,36 +1514,6 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         return score
 
     @staticmethod
-    def _mobility_policy(mobility_type: str) -> MobilityPolicy:
-        """Return area switching policy for the device mobility mode."""
-        if mobility_type == MOBILITY_STATIONARY:
-            return BermudaDataUpdateCoordinator.MobilityPolicy(
-                mode=MOBILITY_STATIONARY,
-                fast_ratio=2.0,
-                dwell_seconds=28.0,
-                majority_window=17,
-                majority_need=12,
-                min_rssi_confidence=-95.0,
-                ambiguity_ratio=1.2,
-                ambiguity_hold_seconds=16.0,
-                unknown_exit_ratio=1.45,
-                unknown_enter_seconds=30.0,
-                reacquire_seconds=20.0,
-            )
-        return BermudaDataUpdateCoordinator.MobilityPolicy(
-            fast_ratio=1.8,
-            dwell_seconds=12.0,
-            majority_window=11,
-            majority_need=8,
-            min_rssi_confidence=-96.0,
-            ambiguity_ratio=1.15,
-            ambiguity_hold_seconds=10.0,
-            unknown_exit_ratio=1.35,
-            unknown_enter_seconds=12.0,
-            reacquire_seconds=8.0,
-        )
-
-    @staticmethod
     def _trilat_mobility_policy(mobility_type: str) -> TrilatMobilityPolicy:
         """Return floor/trilat policy for the device mobility mode."""
         if mobility_type == MOBILITY_STATIONARY:
@@ -1787,303 +1528,9 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             trilat_alpha=0.40,
         )
 
-    @staticmethod
-    def _majority_wins(history: deque[str], candidate: str, window: int, need: int) -> bool:
-        """Return true if candidate owns enough of the recent winner history."""
-        if window <= 0 or need <= 0:
-            return False
-        recent = list(history)[-window:]
-        return recent.count(candidate) >= need
-
-    def _get_area_decision_state(self, device: BermudaDevice) -> AreaDecisionState:
-        """Return mutable state holder for area-decision smoothing."""
-        return self._area_decision_state.setdefault(device.address, self.AreaDecisionState())
-
     def _get_trilat_decision_state(self, device: BermudaDevice) -> TrilatDecisionState:
         """Return mutable state holder for trilat/floor smoothing."""
         return self._trilat_decision_state.setdefault(device.address, self.TrilatDecisionState())
-
-    def _refresh_area_by_min_distance(self, device: BermudaDevice):
-        """Resolve a device area using score-based contenders and mobility-aware smoothing."""
-        nowstamp = monotonic_time_coarse()
-        tests = self.AreaTests()
-        tests.device = device.name
-        _debug_this_device = debug_device_match(
-            device.name,
-            device.prefname,
-            device.address,
-            device.name_by_user,
-            device.name_devreg,
-            device.name_bt_local_name,
-            device.name_bt_serviceinfo,
-        )
-        policy = self._mobility_policy(device.get_mobility_type())
-        state = self._get_area_decision_state(device)
-
-        contenders: list[BermudaDataUpdateCoordinator.AreaCandidate] = []
-        for challenger in device.adverts.values():
-            if challenger.stamp < nowstamp - AREA_MAX_AD_AGE:
-                continue
-
-            challenger_max_radius = self.get_scanner_max_radius(challenger.scanner_address)
-            if challenger.rssi_distance is None or challenger.rssi_distance > challenger_max_radius or challenger.area_id is None:
-                if _debug_this_device:
-                    _LOGGER_TARGET_SPAM_LESS.debug(
-                        f"area_rejected:{device.address}:{challenger.scanner_address}",
-                        "Area: %s challenger %s REJECTED: distance=%.2f, max_radius=%.2f, area=%s",
-                        device.name,
-                        challenger.name,
-                        challenger.rssi_distance if challenger.rssi_distance is not None else -1,
-                        challenger_max_radius,
-                        challenger.area_name or "None",
-                    )
-                continue
-
-            rssi_for_score = challenger.rssi_filtered
-            if rssi_for_score is None and challenger.rssi is not None:
-                rssi_for_score = challenger.rssi + challenger.conf_rssi_offset
-
-            score = self._score_rssi(rssi_for_score)
-            contenders.append(
-                self.AreaCandidate(
-                    advert=challenger,
-                    score=score,
-                    rssi_filtered=rssi_for_score if rssi_for_score is not None else -127.0,
-                    dispersion=getattr(challenger, "rssi_dispersion", 0.0),
-                    max_radius=challenger_max_radius,
-                )
-            )
-
-        contenders.sort(key=lambda c: (-c.score, c.advert.rssi_distance or 999.0))
-        best = contenders[0] if contenders else None
-        second = contenders[1] if len(contenders) > 1 else None
-        best_area_id = best.advert.area_id if best is not None else None
-        second_area_id = second.advert.area_id if second is not None else None
-        contenders_same_area = best is not None and second is not None and best_area_id == second_area_id
-        # dominant_history is appended at each exit point below with the resolved
-        # outcome (chosen scanner address or AREA_NAME_UNKNOWN) rather than here
-        # with the pre-gating best, so Unknown cycles never inflate any scanner's
-        # majority vote count.
-
-        incumbent_advert = device.area_advert
-        incumbent = next((c for c in contenders if incumbent_advert is not None and c.advert is incumbent_advert), None)
-        if incumbent is None and incumbent_advert is not None:
-            incumbent = next((c for c in contenders if c.advert.scanner_address == incumbent_advert.scanner_address), None)
-
-        # Unknown/Uncovered gating: weak, ambiguous, or edge-of-radius with tiny separation.
-        unknown_reason: str | None = None
-        if best is None:
-            # Clear the ambiguity timer so it doesn't carry over into the next appearance.
-            # If left set, a device that disappears while ambiguous and returns after
-            # ambiguity_hold_seconds would fire the ambiguous_ratio unknown immediately
-            # without waiting for the grace period.
-            state.ambiguous_since = 0.0
-            unknown_reason = "no_valid_contender"
-        elif best.rssi_filtered < policy.min_rssi_confidence:
-            # Same timer-hygiene: a weak-signal exit doesn't clear ambiguous_since, so
-            # reset it here to prevent a stale timestamp triggering instant-unknown on return.
-            state.ambiguous_since = 0.0
-            unknown_reason = f"weak_rssi({best.rssi_filtered:.1f}dBm)"
-        elif second is not None:
-            ambiguous_ratio = best.score / max(second.score, 1e-9)
-            if contenders_same_area:
-                # Two top scanners in the same area are not area-ambiguous.
-                state.ambiguous_since = 0.0
-            else:
-                if ambiguous_ratio < policy.ambiguity_ratio:
-                    if state.ambiguous_since <= 0:
-                        state.ambiguous_since = nowstamp
-                    elif nowstamp - state.ambiguous_since >= policy.ambiguity_hold_seconds:
-                        unknown_reason = f"ambiguous_ratio({ambiguous_ratio:.2f})"
-                else:
-                    state.ambiguous_since = 0.0
-
-            if (
-                unknown_reason is None
-                and not contenders_same_area
-                and best.advert.rssi_distance is not None
-                and best.advert.rssi_distance > best.max_radius * 0.92
-                and ambiguous_ratio < (policy.ambiguity_ratio + 0.1)
-            ):
-                unknown_reason = "edge_of_radius_ambiguous"
-        else:
-            state.ambiguous_since = 0.0
-
-        # Hold unknown until evidence becomes clearly dominant.
-        if unknown_reason is None and device.area_is_unknown and best is not None:
-            # Only require a dominant ratio when there IS a second contender to compare against.
-            # When second is None the best scanner is unambiguously the closest visible scanner,
-            # which is actually strong evidence — requiring a non-existent competitor's score
-            # would permanently trap single-scanner environments in Unknown state.
-            if best_area_id is not None and best_area_id == device.area_last_seen_id:
-                # Reacquiring the last known area should clear Unknown quickly.
-                pass
-            elif (
-                second is not None
-                and best_area_id != second_area_id
-                and (best.score / max(second.score, 1e-9)) < policy.unknown_exit_ratio
-            ):
-                unknown_reason = "hold_unknown_until_clear"
-
-        if unknown_reason is not None:
-            if state.unknown_since <= 0:
-                state.unknown_since = nowstamp
-            unknown_age = nowstamp - state.unknown_since
-            incumbent_for_hold = incumbent.advert if incumbent is not None else incumbent_advert
-
-            # Delay Unknown transitions to avoid very short blips.
-            if incumbent_for_hold is not None and unknown_age < policy.unknown_enter_seconds:
-                tests.reason = f"HOLD incumbent pending_unknown({unknown_reason}) age={unknown_age:.1f}s"
-                state.challenger_scanner = None
-                state.challenger_since = 0.0
-                if _debug_this_device:
-                    _LOGGER_TARGET_SPAM_LESS.debug(
-                        f"area_pending_unknown:{device.address}:{unknown_reason}",
-                        "Area: %s hold incumbent %s while unknown pending (%s, age=%.1fs)",
-                        device.name,
-                        incumbent_for_hold.name,
-                        unknown_reason,
-                        unknown_age,
-                    )
-                state.dominant_history.append(incumbent_for_hold.scanner_address)
-                device.apply_scanner_selection(incumbent_for_hold)
-                return
-
-            state.challenger_scanner = None
-            state.challenger_since = 0.0
-            tests.reason = f"UNKNOWN - {unknown_reason}"
-            device.diag_area_switch = tests.sensortext()
-            if _debug_this_device:
-                _LOGGER_TARGET_SPAM_LESS.debug(
-                    f"area_unknown:{device.address}:{unknown_reason}",
-                    "Area: %s -> Unknown (%s), best=%s second=%s",
-                    device.name,
-                    unknown_reason,
-                    f"{best.advert.name}:{best.score:.3f}" if best is not None else "None",
-                    f"{second.advert.name}:{second.score:.3f}" if second is not None else "None",
-                )
-            state.dominant_history.append(AREA_NAME_UNKNOWN)
-            device.apply_scanner_selection(None, force_unknown=True)
-            return
-
-        # Evidence is good enough, clear unknown timer.
-        state.unknown_since = 0.0
-        chosen = best
-        if chosen is None:
-            state.dominant_history.append(AREA_NAME_UNKNOWN)
-            device.apply_scanner_selection(None)
-            return
-
-        if incumbent is None:
-            if device.area_name is not None and not device.area_is_unknown:
-                if state.challenger_scanner != chosen.advert.scanner_address:
-                    state.challenger_scanner = chosen.advert.scanner_address
-                    state.challenger_since = nowstamp
-                if nowstamp - state.challenger_since < policy.reacquire_seconds:
-                    tests.reason = (
-                        f"HOLD pending_reacquire area={chosen.advert.area_name} "
-                        f"age={nowstamp - state.challenger_since:.1f}s"
-                    )
-                    if device.area_is_unknown:
-                        state.dominant_history.append(AREA_NAME_UNKNOWN)
-                        device.apply_scanner_selection(None, force_unknown=True)
-                    # else: device stays in prior valid area; skip history entry
-                    # since no state changed and the new scanner is not yet confirmed.
-                    return
-            tests.reason = "WIN initial_valid_contender"
-            state.challenger_scanner = None
-            state.challenger_since = 0.0
-        elif chosen.advert.scanner_address == incumbent.advert.scanner_address:
-            tests.reason = "HOLD incumbent_best_score"
-            state.challenger_scanner = None
-            state.challenger_since = 0.0
-            chosen = incumbent
-        else:
-            score_ratio = chosen.score / max(incumbent.score, 1e-9)
-            # Adaptive hysteresis from measured jitter.
-            max_dispersion = max(chosen.dispersion, incumbent.dispersion)
-            noise_scale = min(max((max_dispersion - 3.0) / 5.0, 0.0), 1.0)
-            fast_ratio = policy.fast_ratio + (0.25 if policy.mode == MOBILITY_MOVING else 0.45) * noise_scale
-            dwell_seconds = policy.dwell_seconds + (6.0 if policy.mode == MOBILITY_MOVING else 12.0) * noise_scale
-            majority_window = policy.majority_window + (2 if noise_scale > 0.6 else 0)
-            majority_need = min(majority_window, policy.majority_need + (1 if noise_scale > 0.4 else 0))
-
-            if score_ratio >= fast_ratio:
-                tests.reason = f"WIN fast_lane ratio={score_ratio:.2f}"
-                state.challenger_scanner = None
-                state.challenger_since = 0.0
-            else:
-                # Legacy distance tie-break for tiny score differences.
-                if (
-                    score_ratio < 1.05
-                    and incumbent.advert.rssi_distance is not None
-                    and chosen.advert.rssi_distance is not None
-                ):
-                    _pda = chosen.advert.rssi_distance
-                    _pdb = incumbent.advert.rssi_distance
-                    tests.pcnt_diff = abs(_pda - _pdb) / ((_pda + _pdb) / 2)
-                    if tests.pcnt_diff < 0.15:
-                        tests.reason = "HOLD distance_tie_break"
-                        chosen = incumbent
-                        state.challenger_scanner = None
-                        state.challenger_since = 0.0
-
-                if tests.reason is None:
-                    if state.challenger_scanner != chosen.advert.scanner_address:
-                        state.challenger_scanner = chosen.advert.scanner_address
-                        state.challenger_since = nowstamp
-                    dwell_ok = nowstamp - state.challenger_since >= dwell_seconds
-                    majority_ok = self._majority_wins(
-                        state.dominant_history,
-                        chosen.advert.scanner_address,
-                        majority_window,
-                        majority_need,
-                    )
-                    if dwell_ok or majority_ok:
-                        tests.reason = (
-                            f"WIN slow_lane {'dwell' if dwell_ok else 'majority'}"
-                            f" ratio={score_ratio:.2f} disp={max_dispersion:.2f}"
-                        )
-                        state.challenger_scanner = None
-                        state.challenger_since = 0.0
-                    else:
-                        tests.reason = (
-                            f"HOLD incumbent slow_lane ratio={score_ratio:.2f}"
-                            f" disp={max_dispersion:.2f}"
-                        )
-                        chosen = incumbent
-
-        tests.scannername = (
-            incumbent.advert.name if incumbent is not None else "",
-            chosen.advert.name,
-        )
-        tests.areas = (
-            incumbent.advert.area_name if incumbent is not None and incumbent.advert.area_name is not None else "",
-            chosen.advert.area_name if chosen.advert.area_name is not None else "",
-        )
-        tests.distance = (
-            incumbent.advert.rssi_distance if incumbent is not None and incumbent.advert.rssi_distance is not None else 0,
-            chosen.advert.rssi_distance if chosen.advert.rssi_distance is not None else 0,
-        )
-
-        if _debug_this_device:
-            _LOGGER_TARGET_SPAM_LESS.debug(
-                f"area_chosen:{device.address}:{chosen.advert.scanner_address}:{tests.reason}",
-                "Area: %s chose %s (%s) score=%.3f rssi_f=%.1f disp=%.2f reason=%s",
-                device.name,
-                chosen.advert.name,
-                chosen.advert.area_name,
-                chosen.score,
-                chosen.rssi_filtered,
-                chosen.dispersion,
-                tests.reason,
-            )
-
-        if device.area_advert != chosen.advert and tests.reason is not None:
-            device.diag_area_switch = tests.sensortext()
-
-        state.dominant_history.append(chosen.advert.scanner_address)
-        device.apply_scanner_selection(chosen.advert)
 
     @staticmethod
     def _latest_adverts_by_scanner(device: BermudaDevice):
@@ -2227,19 +1674,10 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
     def _refresh_trilateration(self) -> None:
         """Refresh trilateration diagnostics for all tracked devices."""
         self._async_manage_repair_calibration_layout_mismatch()
-        if not self.trilat_enabled():
-            self._async_manage_repair_trilat_without_anchors([])
-            for device in self.devices.values():
-                if device.create_sensor:
-                    device.set_trilat_unknown("disabled")
-                    self._set_trilat_confidence(device, 0.0)
-            return
-
         configured_anchor_scanners: list[str] = []
         for scanner in self._scanners:
             if (
-                getattr(scanner, "anchor_enabled", False)
-                and self.get_scanner_anchor_x(scanner.address) is not None
+                self.get_scanner_anchor_x(scanner.address) is not None
                 and self.get_scanner_anchor_y(scanner.address) is not None
                 and scanner.floor_id is not None
             ):
@@ -2416,9 +1854,6 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             scanner = advert.scanner_device
             if scanner.floor_id != selected_floor_id:
                 continue
-            if not self.get_scanner_anchor_enabled(scanner.address):
-                continue
-
             anchor_x = self.get_scanner_anchor_x(scanner.address)
             anchor_y = self.get_scanner_anchor_y(scanner.address)
             if anchor_x is None or anchor_y is None:

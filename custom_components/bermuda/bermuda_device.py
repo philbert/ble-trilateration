@@ -97,8 +97,6 @@ class BermudaDevice(dict):
         self.address_wifi_mac: str | None = None
         # We use a weakref to avoid any possible GC issues (only likely if we add a __del__ method, but *shrug*)
         self._coordinator: BermudaDataUpdateCoordinator = coordinator
-        self.ref_power: float = 0  # If non-zero, use in place of global ref_power.
-        self.ref_power_changed: float = 0  # Stamp for last change to ref_power, for cache zapping.
         self.options = self._coordinator.options
         self.unique_id: str | None = _address  # mac address formatted.
         self.address_type = BDADDR_TYPE_UNKNOWN
@@ -147,11 +145,10 @@ class BermudaDevice(dict):
         self.create_button_done: bool = False
         self.create_all_done: bool = False  # All platform entities are done and ready.
         self.last_seen: float = 0  # stamp from most recent scanner spotting. monotonic_time_coarse
-        self.diag_area_switch: str | None = None  # saves output of AreaTests
+        self.diag_area_switch: str | None = None  # saves room-classification diagnostics
         self.mobility_type: str = DEFAULT_MOBILITY_TYPE
         self.area_is_unknown: bool = False
         # Per-scanner trilateration anchor settings (only meaningful for scanners).
-        self.anchor_enabled: bool = True
         self.anchor_x_m: float | None = None
         self.anchor_y_m: float | None = None
         self.anchor_z_m: float | None = None
@@ -756,34 +753,6 @@ class BermudaDevice(dict):
 
         # Default to this device's name
         return self.name
-
-    def set_ref_power(self, new_ref_power: float):
-        """
-        Set a new reference power for this device and immediately apply
-        an interim distance calculation.
-
-        This gets called by the calibration routines, but also by metadevice
-        updates, as they need to apply their own ref_power if necessary.
-        """
-        if new_ref_power != self.ref_power:
-            # it's actually changed, proceed...
-            self.ref_power = new_ref_power
-            nearest_distance = 9999  # running tally to find closest scanner
-            nearest_scanner = None
-            for advert in self.adverts.values():
-                rawdist = advert.set_ref_power(new_ref_power)
-                if rawdist is not None and rawdist < nearest_distance:
-                    nearest_distance = rawdist
-                    nearest_scanner = advert
-            # Even though the actual scanner should not have changed (it should
-            # remain none or a given scanner, since the relative distances won't have
-            # changed due to ref_power), we still call apply so that the new area_distance
-            # gets applied.
-            # if nearest_scanner is not None:
-            self.apply_scanner_selection(nearest_scanner)
-            # Update the stamp so that the BermudaEntity can clear the cache and show the
-            # new measurement(s) immediately.
-            self.ref_power_changed = monotonic_time_coarse()
 
     def get_mobility_type(self) -> str:
         """Return validated mobility mode."""

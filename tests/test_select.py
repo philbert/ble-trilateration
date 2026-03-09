@@ -37,8 +37,8 @@ def _create_scanner(coordinator, address: str) -> BermudaDevice:
     return scanner
 
 
-async def test_scanners_default_to_anchor_enabled_without_select_entity(hass) -> None:
-    """Ensure scanners are anchors by default and no anchor select is created."""
+async def test_scanners_skip_legacy_anchor_select_entity(hass) -> None:
+    """Ensure scanners do not recreate the removed anchor select entity."""
     entry = await setup_integration(hass)
     coordinator = entry.runtime_data.coordinator
 
@@ -47,7 +47,6 @@ async def test_scanners_default_to_anchor_enabled_without_select_entity(hass) ->
 
     ent_reg = er.async_get(hass)
 
-    assert scanner.anchor_enabled is True
     assert ent_reg.async_get_entity_id("select", DOMAIN, f"{scanner.unique_id}_trilat_anchor_enabled") is None
 
 

@@ -7,10 +7,7 @@ from unittest.mock import MagicMock, patch
 from custom_components.bermuda.bermuda_advert import BermudaAdvert
 from custom_components.bermuda.bermuda_device import BermudaDevice
 from custom_components.bermuda.const import (
-    CONF_ATTENUATION,
     CONF_MAX_VELOCITY,
-    CONF_REF_POWER,
-    CONF_RSSI_OFFSETS,
     CONF_SMOOTHING_SAMPLES,
 )
 from bleak.backends.scanner import AdvertisementData
@@ -20,11 +17,7 @@ from bleak.backends.scanner import AdvertisementData
 def mock_coordinator():
     """Provide a coordinator with per-scanner helpers."""
     coordinator = MagicMock()
-    coordinator.get_scanner_rssi_offset.return_value = 5
-    coordinator.get_scanner_attenuation.return_value = 2.0
-    coordinator.get_scanner_max_radius.return_value = 20.0
     coordinator.estimate_sampled_range.return_value = None
-    coordinator.reload_all_advert_configs = MagicMock()
     return coordinator
 
 
@@ -33,7 +26,6 @@ def mock_parent_device(mock_coordinator):
     """Fixture for mocking the parent BermudaDevice."""
     device = MagicMock(spec=BermudaDevice)
     device.address = "aa:bb:cc:dd:ee:ff"
-    device.ref_power = -59
     device.name = "mock parent name"
     device.prefname = "mock parent name"
     device.name_bt_local_name = None
@@ -78,9 +70,6 @@ def mock_advertisement_data():
 def bermuda_advert(mock_parent_device, mock_advertisement_data, mock_scanner_device):
     """Fixture for creating a BermudaAdvert instance."""
     options = {
-        CONF_RSSI_OFFSETS: {"11:22:33:44:55:66": 5},
-        CONF_REF_POWER: -59,
-        CONF_ATTENUATION: 2.0,
         CONF_MAX_VELOCITY: 3.0,
         CONF_SMOOTHING_SAMPLES: 5,
     }
@@ -98,7 +87,6 @@ def test_bermuda_advert_initialization(bermuda_advert):
     """Test BermudaAdvert initialization."""
     assert bermuda_advert.device_address == "aa:bb:cc:dd:ee:ff"
     assert bermuda_advert.scanner_address == "11:22:33:44:55:66"
-    assert bermuda_advert.ref_power == -59
     assert bermuda_advert.stamp == 123.45
     assert bermuda_advert.rssi == -70
 
@@ -118,13 +106,6 @@ def test_update_advertisement(bermuda_advert, mock_advertisement_data, mock_scan
     assert bermuda_advert.local_name[0][0] == "Mock advert Local Name"
     assert bermuda_advert.manufacturer_data[0][76] == b"\x02\x15"
     assert bermuda_advert.service_data[0]["0000abcd-0000-1000-8000-00805f9b34fb"] == b"\x01\x02"
-
-
-def test_set_ref_power(bermuda_advert):
-    """Test set_ref_power method."""
-    new_distance = bermuda_advert.set_ref_power(-65)
-    assert bermuda_advert.ref_power == -65
-    assert new_distance is not None
 
 
 def test_calculate_data_device_arrived(bermuda_advert):
@@ -203,8 +184,21 @@ def test_mobility_changes_ema_responsiveness(bermuda_advert, mock_parent_device)
     assert moving > stationary
 
 
+def test_missing_learned_range_stays_unavailable(bermuda_advert, mock_coordinator):
+    """Without a learned sample-derived range, Bermuda should not fall back to RSSI math."""
+    mock_coordinator.estimate_sampled_range.return_value = None
+    bermuda_advert.rssi = -68
+
+    distance = bermuda_advert._update_raw_distance(reading_is_new=False)
+
+    assert distance is None
+    assert bermuda_advert.rssi_distance_raw is None
+    assert bermuda_advert.rssi_distance_sigma_m is None
+    assert bermuda_advert.ranging_source == "unavailable"
+
+
 def test_sampled_range_estimate_takes_priority(bermuda_advert, mock_coordinator):
-    """A learned sample-derived range should override the legacy fallback."""
+    """A learned sample-derived range should populate the advert distance."""
     mock_coordinator.estimate_sampled_range.return_value = MagicMock(
         range_m=2.75,
         sigma_m=0.6,

@@ -91,10 +91,6 @@ def _make_coordinator():
     coordinator._connector_group_floor_ids = {}
     coordinator.fr = SimpleNamespace(async_get_floor=lambda floor_id: SimpleNamespace(name=f"Floor {floor_id}"))
     coordinator.ar = SimpleNamespace(async_get_area=lambda _area_id: None)
-    coordinator.get_scanner_max_radius = lambda _scanner: 20.0
-    coordinator.get_scanner_anchor_enabled = lambda scanner_addr: bool(
-        getattr(coordinator.devices.get(scanner_addr), "anchor_enabled", False)
-    )
     coordinator.get_scanner_anchor_x = lambda scanner_addr: getattr(coordinator.devices.get(scanner_addr), "anchor_x_m", None)
     coordinator.get_scanner_anchor_y = lambda scanner_addr: getattr(coordinator.devices.get(scanner_addr), "anchor_y_m", None)
     coordinator.get_scanner_anchor_z = lambda scanner_addr: getattr(coordinator.devices.get(scanner_addr), "anchor_z_m", None)
@@ -106,7 +102,7 @@ def test_trilat_unknown_when_inputs_stale():
     """No fresh adverts should yield explicit stale_inputs."""
     coordinator = _make_coordinator()
     device = _DummyDevice("dev-a")
-    scanner = SimpleNamespace(address="scanner-a", floor_id="f1", anchor_enabled=True, anchor_x_m=0.0, anchor_y_m=0.0)
+    scanner = SimpleNamespace(address="scanner-a", floor_id="f1", anchor_x_m=0.0, anchor_y_m=0.0)
     coordinator.devices[scanner.address] = scanner
     old_stamp = time.monotonic() - DISTANCE_TIMEOUT - 5
     advert = _make_advert(scanner, old_stamp, -70.0, 4.0)
@@ -118,12 +114,11 @@ def test_trilat_unknown_when_inputs_stale():
     assert device.trilat_reason == "stale_inputs"
 
 
-def _make_scanner(coordinator, address, floor_id, x_m, y_m, anchor_enabled=True, z_m=None):
+def _make_scanner(coordinator, address, floor_id, x_m, y_m, z_m=None):
     """Helper: register a scanner device in the coordinator."""
     sc = SimpleNamespace(
         address=address,
         floor_id=floor_id,
-        anchor_enabled=anchor_enabled,
         anchor_x_m=x_m,
         anchor_y_m=y_m,
         anchor_z_m=z_m,
@@ -148,7 +143,6 @@ def test_trilat_low_confidence_with_insufficient_anchors():
     scanner = SimpleNamespace(
         address="scanner-a",
         floor_id="f1",
-        anchor_enabled=True,
         anchor_x_m=0.0,
         anchor_y_m=0.0,
         name="Scanner A",
@@ -195,29 +189,6 @@ def test_floor_evidence_cross_floor_penalty_selects_correct_floor():
     assert state.floor_id == "f1"
     # With valid triangle geometry the solver should succeed.
     assert device.trilat_status == "ok"
-
-
-def test_anchor_qualification_respects_anchor_enabled_flag():
-    """Anchors with anchor_enabled=False must be excluded from the solve."""
-    coordinator = _make_coordinator()
-    device = _DummyDevice("dev-qual")
-
-    sc_a = _make_scanner(coordinator, "qa", "f1", 0.0, 0.0, anchor_enabled=True)
-    sc_b = _make_scanner(coordinator, "qb", "f1", 6.0, 0.0, anchor_enabled=False)
-    sc_c = _make_scanner(coordinator, "qc", "f1", 0.0, 8.0, anchor_enabled=False)
-
-    fresh = time.monotonic()
-    device.adverts = {
-        ("dev-qual", sc_a.address): _make_advert(sc_a, fresh, -70.0, 5.0),
-        ("dev-qual", sc_b.address): _make_advert(sc_b, fresh, -70.0, 5.0),
-        ("dev-qual", sc_c.address): _make_advert(sc_c, fresh, -70.0, 5.0),
-    }
-
-    coordinator._refresh_trilateration_for_device(device)
-
-    assert device.trilat_status == "low_confidence"
-    assert device.trilat_reason == "insufficient_anchors_low_confidence"
-    assert device.trilat_anchor_count == 1
 
 
 def test_anchor_qualification_requires_valid_coordinates():

@@ -250,9 +250,6 @@ DOCS[CONF_DEVICES] = "Identifies which bluetooth devices we wish to expose"
 CONF_SCANNERS = "configured_scanners"
 
 
-CONF_MAX_RADIUS, DEFAULT_MAX_RADIUS = "max_area_radius", 20
-DOCS[CONF_MAX_RADIUS] = "For simple area-detection, max radius from receiver"
-
 CONF_MAX_VELOCITY, DEFAULT_MAX_VELOCITY = "max_velocity", 3
 DOCS[CONF_MAX_VELOCITY] = (
     "In metres per second - ignore readings that imply movement away faster than",
@@ -262,16 +259,9 @@ DOCS[CONF_MAX_VELOCITY] = (
 CONF_DEVTRACK_TIMEOUT, DEFAULT_DEVTRACK_TIMEOUT = "devtracker_nothome_timeout", 30
 DOCS[CONF_DEVTRACK_TIMEOUT] = "Timeout in seconds for setting devices as `Not Home` / `Away`."  # fmt: skip
 
-CONF_ATTENUATION, DEFAULT_ATTENUATION = "attenuation", 3
-DOCS[CONF_ATTENUATION] = "Factor for environmental signal attenuation."
-CONF_REF_POWER, DEFAULT_REF_POWER = "ref_power", -55.0
-DOCS[CONF_REF_POWER] = "Default RSSI for signal at 1 metre."
-
 CONF_SAVE_AND_CLOSE = "save_and_close"
 CONF_SCANNER_INFO = "scanner_info"
-CONF_RSSI_OFFSETS = "rssi_offsets"
 CONF_CONNECTOR_GROUPS = "connector_groups"
-CONF_TRILAT_ENABLED, DEFAULT_TRILAT_ENABLED = "trilat_enabled", True
 CONF_TRILAT_CROSS_FLOOR_PENALTY_DB, DEFAULT_TRILAT_CROSS_FLOOR_PENALTY_DB = "trilat_cross_floor_penalty_db", 8.0
 
 CONF_UPDATE_INTERVAL, DEFAULT_UPDATE_INTERVAL = "update_interval", 10

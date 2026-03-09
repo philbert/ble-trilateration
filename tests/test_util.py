@@ -2,10 +2,6 @@
 
 from __future__ import annotations
 
-# from homeassistant.core import HomeAssistant
-
-from math import floor
-
 from custom_components.bermuda import util
 
 
@@ -35,11 +31,6 @@ def test_mac_explode_formats():
 def test_mac_redact():
     assert util.mac_redact("aa:bb:cc:77:ee:ff", "tEstMe") == "aa::tEstMe::ff"
     assert util.mac_redact("howdy::doody::friend", "PLEASENOE") == "ho::PLEASENOE::nd"
-
-
-def test_rssi_to_metres():
-    assert floor(util.rssi_to_metres(-50, -20, 2)) == 31
-    assert floor(util.rssi_to_metres(-80, -20, 2)) == 1000
 
 
 def test_clean_charbuf():

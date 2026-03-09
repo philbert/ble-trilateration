@@ -23,10 +23,7 @@ from .const import (
     _LOGGER,
     _LOGGER_TARGET,
     _LOGGER_TARGET_SPAM_LESS,
-    CONF_ATTENUATION,
     CONF_MAX_VELOCITY,
-    CONF_REF_POWER,
-    CONF_RSSI_OFFSETS,
     CONF_SMOOTHING_SAMPLES,
     debug_device_match,
     DISTANCE_INFINITE,
@@ -35,7 +32,7 @@ from .const import (
 )
 
 # from .const import _LOGGER_SPAM_LESS
-from .util import clean_charbuf, rssi_to_metres
+from .util import clean_charbuf
 
 if TYPE_CHECKING:
     from bleak.backends.scanner import AdvertisementData
@@ -81,7 +78,6 @@ class BermudaAdvert(dict):
         self.device_address: Final[str] = parent_device.address
         self._device = parent_device
         self._coordinator = parent_device._coordinator  # Access to coordinator for per-scanner config
-        self.ref_power: float = self._device.ref_power  # Take from parent at first, might be changed by metadevice l8r
         self.apply_new_scanner(scanner_device)
 
         self.options = options
@@ -94,24 +90,19 @@ class BermudaAdvert(dict):
         self.rssi_adjusted_raw: float | None = None
         self.tx_power: float | None = None
         self.rssi_distance: float | None = None
-        self.rssi_distance_raw: float
+        self.rssi_distance_raw: float | None = None
         self.rssi_distance_sigma_m: float | None = None
-        self.ranging_source: str = "legacy_fallback"
+        self.ranging_source: str = "unavailable"
         self.trilat_range_ewma_m: float | None = None
         self.stale_update_count = 0  # How many times we did an update but no new stamps were found.
         self.hist_stamp: list[float] = []
         self.hist_rssi: list[int] = []
         self.hist_rssi_adjusted: list[float] = []
         self.hist_rssi_filtered: list[float] = []
-        self.hist_distance: list[float] = []
-        self.hist_distance_by_interval: list[float] = []  # updated per-interval
+        self.hist_distance: list[float | None] = []
+        self.hist_distance_by_interval: list[float | None] = []  # updated per-interval
         self.hist_interval = []  # WARNING: This is actually "age of ad when we polled"
         self.hist_velocity: list[float] = []  # Effective velocity versus previous stamped reading
-        # Load per-scanner configuration using coordinator helpers
-        self.conf_rssi_offset = self._coordinator.get_scanner_rssi_offset(self.scanner_address)
-        self.conf_attenuation = self._coordinator.get_scanner_attenuation(self.scanner_address)
-        # Global configs (not per-scanner)
-        self.conf_ref_power = self.options.get(CONF_REF_POWER)
         self.conf_max_velocity = self.options.get(CONF_MAX_VELOCITY)
         self.conf_smoothing_samples = self.options.get(CONF_SMOOTHING_SAMPLES)
         self.local_name: list[tuple[str, bytes]] = []
@@ -131,15 +122,6 @@ class BermudaAdvert(dict):
         self.area_name: str | None = scanner_device.area_name
         # Only remote scanners log timestamps, local usb adaptors do not.
         self.scanner_sends_stamps = scanner_device.is_remote_scanner
-
-    def reload_config(self) -> None:
-        """
-        Reload per-scanner configuration from coordinator.
-
-        Called when scanner Number entity values change to pick up new settings.
-        """
-        self.conf_rssi_offset = self._coordinator.get_scanner_rssi_offset(self.scanner_address)
-        self.conf_attenuation = self._coordinator.get_scanner_attenuation(self.scanner_address)
 
     def update_advertisement(self, advertisementdata: AdvertisementData, scanner_device: BermudaDevice):
         """
@@ -374,16 +356,13 @@ class BermudaAdvert(dict):
 
         return self.rssi_filtered
 
-    def _update_raw_distance(self, reading_is_new=True) -> float:
+    def _update_raw_distance(self, reading_is_new=True) -> float | None:
         """
         Converts rssi to raw distance and updates history stack and
         returns the new raw distance.
 
         reading_is_new should only be called by the regular update
-        cycle, as it creates a new entry in the histories. Call with
-        false if you just need to set / override distance measurements
-        immediately, perhaps between cycles, in order to reflect a
-        setting change (such as altering a device's ref_power setting).
+        cycle, as it creates a new entry in the histories.
         """
         raw_rssi = float(self.rssi or -127.0)
         self.rssi_adjusted_raw = raw_rssi
@@ -399,39 +378,25 @@ class BermudaAdvert(dict):
             distance = estimate.range_m
             self.rssi_distance_sigma_m = estimate.sigma_m
             self.ranging_source = estimate.source
-            ref_power = None
-            attenuation = None
-            adjusted_for_fallback = None
         else:
-            # Check if we should use a device-based ref_power
-            if self.ref_power == 0:  # No user-supplied per-device value
-                ref_power = self.conf_ref_power
-            else:
-                ref_power = self.ref_power
-
-            adjusted_for_fallback = filtered_rssi + self.conf_rssi_offset
-            distance = rssi_to_metres(adjusted_for_fallback, ref_power, self.conf_attenuation)
+            distance = None
             self.rssi_distance_sigma_m = None
-            self.ranging_source = "legacy_fallback"
-            attenuation = self.conf_attenuation
+            self.ranging_source = "unavailable"
         if self._debug_this_device():
             _LOGGER_TARGET_SPAM_LESS.debug(
                 f"distance_calc:{self.device_address}:{self.scanner_address}",
                 (
-                    "Distance calc for %s->%s: raw_rssi=%s, offset=%s, filtered=%.2f,"
-                    " dispersion=%.2f, ref_power=%s, attenuation=%s, sigma=%s, source=%s, distance=%.2fm"
+                    "Distance calc for %s->%s: raw_rssi=%s, filtered=%.2f,"
+                    " dispersion=%.2f, sigma=%s, source=%s, distance=%s"
                 ),
                 self._device.prefname,
                 self.scanner_device.name,
                 self.rssi,
-                self.conf_rssi_offset,
                 filtered_rssi,
                 self.rssi_dispersion,
-                ref_power,
-                attenuation,
                 f"{self.rssi_distance_sigma_m:.2f}" if self.rssi_distance_sigma_m is not None else "None",
                 self.ranging_source,
-                distance,
+                f"{distance:.2f}m" if distance is not None else "None",
             )
         self.rssi_distance_raw = distance
         if reading_is_new:
@@ -454,26 +419,6 @@ class BermudaAdvert(dict):
             # We don't else because we don't want to *add* a hist-by-interval reading, only
             # modify in-place.
         return distance
-
-    def set_ref_power(self, value: float) -> float | None:
-        """
-        Set a new reference power and return the resulting distance.
-
-        Typically called from the parent device when either the user changes the calibration
-        of ref_power for a device, or when a metadevice takes on a new source device, and
-        propagates its own ref_power to our parent.
-
-        Note that it is unlikely to return None as its only returning the raw, not filtered
-        distance = the exception being uninitialised entries.
-        """
-        # When the user updates the ref_power we want to reflect that change immediately,
-        # and not subject it to the normal smoothing algo.
-        # But make sure it's actually different, in case it's just a metadevice propagating
-        # its own ref_power without need.
-        if value != self.ref_power:
-            self.ref_power = value
-            return self._update_raw_distance(False)
-        return self.rssi_distance_raw
 
     def calculate_data(self):
         """
@@ -520,7 +465,13 @@ class BermudaAdvert(dict):
         new_stamp = self.new_stamp  # should have been set by update()
         self.new_stamp = None  # Clear so we know if an update is missed next cycle
 
-        if self.rssi_distance is None and new_stamp is not None:
+        if new_stamp is not None and self.rssi_distance_raw is None:
+            self.rssi_distance = None
+            if len(self.hist_distance_by_interval) > 0:
+                self.hist_distance_by_interval.clear()
+            self.trilat_range_ewma_m = None
+
+        elif self.rssi_distance is None and new_stamp is not None:
             # DEVICE HAS ARRIVED!
             # We have just newly come into range (or we're starting up)
             # accept the new reading as-is.
@@ -553,44 +504,52 @@ class BermudaAdvert(dict):
                 self.hist_rssi_adjusted.clear()
             self.trilat_range_ewma_m = None
 
+        elif self.rssi_distance_raw is None:
+            self.rssi_distance = None
+            if len(self.hist_distance_by_interval) > 0:
+                self.hist_distance_by_interval.clear()
+            self.trilat_range_ewma_m = None
+
         else:
             # Add the current reading (whether new or old) to
             # a historical log that is evenly spaced by update_interval.
 
             # Verify the new reading is vaguely sensible. If it isn't, we
             # ignore it by duplicating the last cycle's reading.
-            if len(self.hist_stamp) > 1:
+            if len(self.hist_stamp) > 1 and len(self.hist_distance) > 1:
                 # How far (away) did it travel in how long?
                 # we check this reading against the recent readings to find
                 # the peak average velocity we are alleged to have reached.
                 velo_newdistance = self.hist_distance[0]
                 velo_newstamp = self.hist_stamp[0]
                 peak_velocity = 0
-                # walk through the history of distances/stamps, and find
-                # the peak
-                delta_t = velo_newstamp - self.hist_stamp[1]
-                delta_d = velo_newdistance - self.hist_distance[1]
-                if delta_t > 0:
-                    peak_velocity = delta_d / delta_t
-                # if our initial reading is an approach, we are done here
-                if peak_velocity >= 0:
-                    for old_distance, old_stamp in zip(self.hist_distance[2:], self.hist_stamp[2:], strict=False):
-                        if old_stamp is None:
-                            continue  # Skip this iteration if hist_stamp[i] is None
+                if velo_newdistance is not None:
+                    # walk through the history of distances/stamps, and find
+                    # the peak
+                    delta_t = velo_newstamp - self.hist_stamp[1]
+                    old_distance = self.hist_distance[1]
+                    delta_d = None if old_distance is None else velo_newdistance - old_distance
+                    if delta_t > 0 and delta_d is not None:
+                        peak_velocity = delta_d / delta_t
+                    # if our initial reading is an approach, we are done here
+                    if peak_velocity >= 0:
+                        for old_distance, old_stamp in zip(self.hist_distance[2:], self.hist_stamp[2:], strict=False):
+                            if old_stamp is None or old_distance is None:
+                                continue  # Skip this iteration if hist_stamp[i] is None
 
-                        delta_t = velo_newstamp - old_stamp
-                        if delta_t <= 0:
-                            # Additionally, skip if delta_t is zero or negative
-                            # to avoid division by zero
-                            continue
-                        delta_d = velo_newdistance - old_distance
+                            delta_t = velo_newstamp - old_stamp
+                            if delta_t <= 0:
+                                # Additionally, skip if delta_t is zero or negative
+                                # to avoid division by zero
+                                continue
+                            delta_d = velo_newdistance - old_distance
 
-                        velocity = delta_d / delta_t
+                            velocity = delta_d / delta_t
 
-                        # Don't use max() as it's slower.
-                        if velocity > peak_velocity:  # noqa: RUF100, PLR1730
-                            # but on subsequent comparisons we only care if they're faster retreats
-                            peak_velocity = velocity
+                            # Don't use max() as it's slower.
+                            if velocity > peak_velocity:  # noqa: RUF100, PLR1730
+                                # but on subsequent comparisons we only care if they're faster retreats
+                                peak_velocity = velocity
                 # we've been through the history and have peak velo retreat, or the most recent
                 # approach velo.
                 velocity = peak_velocity

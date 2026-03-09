@@ -7,7 +7,6 @@ import math
 import pytest
 
 from custom_components.bermuda.ranging_model import BermudaRangingModel
-from custom_components.bermuda.util import rssi_to_metres
 
 
 class _FakeCalibration:
@@ -36,7 +35,7 @@ def _make_sample(sample_id: str, distance_m: float, rssi_dbm: float, scanner: st
 
 @pytest.mark.asyncio
 async def test_ranging_model_fits_simple_layout():
-    """A fitted model should beat the legacy defaults on matching sample geometry."""
+    """A fitted model should reproduce matching sample geometry."""
     # Consistent log-distance samples with intercept ~= -50 dBm and path-loss exponent ~= 2.
     samples = [
         _make_sample("s1", 1.0, -50.0),
@@ -59,9 +58,6 @@ async def test_ranging_model_fits_simple_layout():
     assert estimate is not None
     assert estimate.range_m == pytest.approx(4.0, rel=0.15)
     assert estimate.sigma_m > 0.0
-
-    legacy = rssi_to_metres(-62.0, -55.0, 3.0)
-    assert abs(estimate.range_m - 4.0) < abs(legacy - 4.0)
 
 
 @pytest.mark.asyncio
