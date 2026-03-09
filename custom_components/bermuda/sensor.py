@@ -106,17 +106,17 @@ async def async_setup_entry(
         # go over time. So we need to maintain our matrix of which ones we have already
         # spun-up so we don't duplicate any.
 
-        for scanner in coordinator.get_scanners:
-            if (
-                scanner.is_remote_scanner is None  # usb/HCI scanner's are fine.
-                or (scanner.is_remote_scanner and scanner.address_wifi_mac is None)
-            ):
-                # This scanner doesn't have a wifi mac yet, bail out
-                # until they are all filled out.
-                return
-
         entities = []
         for scanner in coordinator.scanner_list:
+            # Skip this specific scanner until its unique_id is stable (wifi MAC resolved),
+            # to avoid orphaned entity registry entries if unique_id changes.
+            scanner_device = coordinator.devices.get(scanner)
+            if scanner_device is None:
+                continue
+            if scanner_device.is_remote_scanner is None:
+                continue
+            if scanner_device.is_remote_scanner and scanner_device.address_wifi_mac is None:
+                continue
             if scanner not in created_scanner_devices:
                 entities.append(BermudaSensorScannerTimestampSync(coordinator, entry, scanner))
                 created_scanner_devices.append(scanner)

@@ -358,6 +358,7 @@ class BermudaDevice(dict):
         devreg_devices = self._coordinator.dr.devices.get_entries(None, connections=connlist)
         devreg_count = 0  # can't len() an iterable.
         devreg_stringlist = ""  # for debug logging
+        scanner_devreg_mac_offset = None  # track best mac match by offset
         for devreg_device in devreg_devices:
             devreg_count += 1
             # _LOGGER.debug("DevregScanner: %s", devreg_device)
@@ -368,9 +369,19 @@ class BermudaDevice(dict):
                     scanner_devreg_bt = devreg_device
                     scanner_devreg_bt_address = conn[1].lower()
                 if conn[0] == "mac":
-                    # ESPHome, Shelly
-                    scanner_devreg_mac = devreg_device
-                    scanner_devreg_mac_address = conn[1]
+                    # ESPHome, Shelly (or other integrations like UniFi that track MACs).
+                    # Prefer the most negative offset from our source address, since for
+                    # Espressif devices WiFi = BLE-2 (offset -2), while Ethernet = BLE+1
+                    # (+1). This avoids false matches from UniFi/other integrations that
+                    # track non-WiFi MACs of the same hardware.
+                    try:
+                        candidate_offset = int(conn[1][-2:], 16) - int(self.address[-2:], 16)
+                    except ValueError:
+                        candidate_offset = 999
+                    if scanner_devreg_mac_offset is None or candidate_offset < scanner_devreg_mac_offset:
+                        scanner_devreg_mac = devreg_device
+                        scanner_devreg_mac_address = conn[1]
+                        scanner_devreg_mac_offset = candidate_offset
 
         if devreg_count not in (1, 2, 3):
             # We expect just the bt, or bt and another like esphome/shelly, or

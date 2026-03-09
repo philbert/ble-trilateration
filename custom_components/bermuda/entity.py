@@ -122,14 +122,12 @@ class BermudaEntity(CoordinatorEntity):
         model = None
 
         if self._device.is_scanner:
-            # ESPHome proxies prior to 2025.3 report their WIFI MAC for any address,
-            # except for received iBeacons.
-            connections = {
-                # Keeps the distance_to entities the same across pre/post 2025.3
-                (dr.CONNECTION_NETWORK_MAC, (self._device.address_wifi_mac or self._device.address).lower()),
-                # Ensures we can also match the Bluetooth integration entities.
-                (dr.CONNECTION_BLUETOOTH, (self._device.address_ble_mac or self._device.address).upper()),
-            }
+            # Use only the Bluetooth connection so Bermuda entities appear on the same
+            # device as HA's Bluetooth integration scanner device.
+            # Do NOT use CONNECTION_NETWORK_MAC — that merges with ESPHome/Shelly devices.
+            # CONNECTION_BLUETOOTH only matches Bluetooth devices, not ESPHome/Shelly.
+            ble_mac = self._device.address_ble_mac or self._device.address
+            connections = {(dr.CONNECTION_BLUETOOTH, ble_mac.upper())}
         elif self._device.address_type == ADDR_TYPE_IBEACON:
             # ibeacon doesn't (yet) actually set a "connection", but
             # this "matches" what it stores for identifier.
