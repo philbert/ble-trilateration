@@ -62,6 +62,7 @@ from .calibration_store import BermudaCalibrationStore
 from .bermuda_irk import BermudaIrkManager
 from .ranging_model import BermudaRangingModel
 from .room_classifier import BermudaRoomClassifier
+from .scanner_anchor_store import BermudaScannerAnchorStore
 from .const import (
     _LOGGER,
     _LOGGER_SPAM_LESS,
@@ -251,6 +252,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         self._trilat_decision_state: dict[str, BermudaDataUpdateCoordinator.TrilatDecisionState] = {}
         self._trilat_scanners_without_anchors: list[str] | None = None
         self.calibration_store = BermudaCalibrationStore(hass, entry.entry_id)
+        self.scanner_anchor_store = BermudaScannerAnchorStore(hass)
         self.calibration = BermudaCalibrationManager(hass, self, self.calibration_store)
         self.ranging_model = BermudaRangingModel(self.calibration)
         self.room_classifier = BermudaRoomClassifier(self.calibration, self.ar)
@@ -391,6 +393,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
 
     async def async_initialize(self) -> None:
         """Initialize coordinator-owned subsystems after setup."""
+        await self.scanner_anchor_store.async_ensure_loaded()
         await self.calibration.async_initialize()
         self.calibration.register_change_callback(self.async_handle_calibration_samples_changed)
         await self.async_handle_calibration_samples_changed()
