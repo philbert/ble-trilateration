@@ -414,14 +414,14 @@ async def test_calibration_layout_mismatch_repair_flow_updates_samples(
     flow.hass = hass
     result = await flow.async_step_init()
     assert result["type"] == data_entry_flow.FlowResultType.FORM
-    assert result["step_id"] == "confirm"
+    assert result["step_id"] == "init"
     assert "update_stored_sample_geometry" in result["data_schema"].schema
 
-    result = await flow.async_step_confirm({"update_stored_sample_geometry": False})
+    result = await flow.async_step_init({"update_stored_sample_geometry": False})
     assert result["type"] == data_entry_flow.FlowResultType.FORM
     assert result["errors"] == {"base": "confirm_required"}
 
-    result = await flow.async_step_confirm({"update_stored_sample_geometry": True})
+    result = await flow.async_step_init({"update_stored_sample_geometry": True})
     assert result["type"] == data_entry_flow.FlowResultType.CREATE_ENTRY
     assert coordinator.calibration.samples()[0]["anchor_layout_hash"] == coordinator.calibration.current_anchor_layout_hash
     assert coordinator.calibration.get_layout_mismatch_summary() is None
@@ -480,7 +480,7 @@ async def test_calibration_layout_mismatch_repair_flow_renders_without_runtime_d
         setup_bermuda_entry.runtime_data = runtime_data
 
     assert result["type"] == data_entry_flow.FlowResultType.FORM
-    assert result["step_id"] == "confirm"
+    assert result["step_id"] == "init"
     assert "update_stored_sample_geometry" in result["data_schema"].schema
 
 

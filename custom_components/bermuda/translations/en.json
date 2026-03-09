@@ -240,7 +240,7 @@
       "description": "Bermuda has {sample_count} saved calibration samples, but none match the current anchor layout `{current_layout_hash}`. The most common saved layout is `{dominant_layout_hash}` with {dominant_layout_count} sample(s).\n\nAnchor differences detected:\n{changed_anchor_lines}\n\nIf you physically moved anchors, keep the samples as historical and record new ones. If you only corrected anchor coordinates, you can update the stored sample geometry to match the current anchors.",
       "fix_flow": {
         "step": {
-          "confirm": {
+          "init": {
             "title": "Confirm calibration sample repair",
             "description": "Bermuda found {sample_count} saved calibration samples that do not match the current configured anchor layout `{current_layout_hash}`.\n\nUse this repair only if no physical anchor layout change occurred and you merely corrected configured anchor coordinates. In that case, Bermuda will update the stored anchor geometry inside `bermuda/calibration_samples` to match the current anchors.\n\nIf anchors were physically moved, do not run this repair. Cancel instead and record new calibration samples for the new physical layout.",
             "data": {

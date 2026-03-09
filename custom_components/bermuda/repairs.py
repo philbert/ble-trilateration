@@ -25,20 +25,14 @@ class CalibrationLayoutMismatchRepairFlow(RepairsFlow):
     async def async_step_init(
         self, user_input: dict[str, str] | None = None
     ) -> data_entry_flow.FlowResult:
-        """Handle the first step of the fix flow."""
-        return await self.async_step_confirm(user_input)
-
-    async def async_step_confirm(
-        self, user_input: dict[str, str] | None = None
-    ) -> data_entry_flow.FlowResult:
-        """Handle the confirmation step."""
+        """Handle the fix flow."""
         if user_input is not None:
             if not user_input.get("update_stored_sample_geometry", False):
                 return self.async_show_form(
-                    step_id="confirm",
+                    step_id="init",
                     data_schema=vol.Schema(
                         {
-                            vol.Required("update_stored_sample_geometry", default=False): bool,
+                            vol.Required("update_stored_sample_geometry"): bool,
                         }
                     ),
                     errors={"base": "confirm_required"},
@@ -52,10 +46,10 @@ class CalibrationLayoutMismatchRepairFlow(RepairsFlow):
             return self.async_create_entry(data={})
 
         return self.async_show_form(
-            step_id="confirm",
+            step_id="init",
             data_schema=vol.Schema(
                 {
-                    vol.Required("update_stored_sample_geometry", default=False): bool,
+                    vol.Required("update_stored_sample_geometry"): bool,
                 }
             ),
             description_placeholders=self._description_placeholders(),
