@@ -32,11 +32,10 @@ class CalibrationLayoutMismatchRepairFlow(RepairsFlow):
         self, user_input: dict[str, str] | None = None
     ) -> data_entry_flow.FlowResult:
         """Handle the confirmation step."""
-        coordinator = self._get_coordinator()
-        if coordinator is None:
-            return self.async_abort(reason="entry_not_found")
-
         if user_input is not None:
+            coordinator = self._get_coordinator()
+            if coordinator is None:
+                return self.async_abort(reason="entry_not_found")
             await coordinator.calibration.async_update_samples_to_current_geometry()
             await coordinator.async_handle_calibration_samples_changed()
             return self.async_create_entry(data={})
@@ -57,7 +56,10 @@ class CalibrationLayoutMismatchRepairFlow(RepairsFlow):
         entry = self.hass.config_entries.async_get_entry(self.entry_id)
         if entry is None:
             return None
-        return entry.runtime_data.coordinator
+        runtime_data = getattr(entry, "runtime_data", None)
+        if runtime_data is None:
+            return None
+        return getattr(runtime_data, "coordinator", None)
 
 
 async def async_create_fix_flow(

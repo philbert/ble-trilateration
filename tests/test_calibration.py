@@ -422,6 +422,62 @@ async def test_calibration_layout_mismatch_repair_flow_updates_samples(
     assert coordinator.calibration.get_layout_mismatch_summary() is None
 
 
+async def test_calibration_layout_mismatch_repair_flow_renders_without_runtime_data(
+    hass: HomeAssistant, setup_bermuda_entry
+):
+    """The repair flow should still render its confirm dialog without runtime data."""
+    coordinator = setup_bermuda_entry.runtime_data.coordinator
+
+    scanner = BermudaDevice("aa:bb:cc:dd:10:52", coordinator)
+    scanner.name = "Office Proxy"
+    scanner.anchor_x_m = 7.0
+    scanner.anchor_y_m = 8.0
+    scanner.anchor_z_m = 1.0
+    coordinator.devices[scanner.address] = scanner
+    coordinator._scanner_list.add(scanner.address)
+
+    await coordinator.calibration_store.async_add_sample(
+        {
+            "id": "sample_layout_runtime_missing",
+            "created_at": "2026-03-06T12:00:00+00:00",
+            "device_id": "device_one",
+            "device_name": "Device One",
+            "device_address": "aa:bb:cc:dd:ee:01",
+            "room_area_id": "office",
+            "room_name": "Office",
+            "position": {"x_m": 1.0, "y_m": 2.0, "z_m": 1.0},
+            "sample_radius_m": 1.0,
+            "anchor_layout_hash": "old_layout_hash",
+            "anchors": {
+                scanner.address: {
+                    "scanner_name": scanner.name,
+                    "anchor_position": {"x_m": 6.0, "y_m": 8.0, "z_m": 1.0},
+                    "rssi_median": -70.0,
+                }
+            },
+            "quality": {"status": "accepted", "eligible_anchor_count": 1, "reason": None},
+        }
+    )
+
+    await coordinator.async_handle_calibration_samples_changed()
+
+    runtime_data = setup_bermuda_entry.runtime_data
+    del setup_bermuda_entry.runtime_data
+    try:
+        flow = await async_create_fix_flow(
+            hass,
+            REPAIR_CALIBRATION_LAYOUT_MISMATCH,
+            {"entry_id": setup_bermuda_entry.entry_id},
+        )
+        flow.hass = hass
+        result = await flow.async_step_init()
+    finally:
+        setup_bermuda_entry.runtime_data = runtime_data
+
+    assert result["type"] == data_entry_flow.FlowResultType.FORM
+    assert result["step_id"] == "confirm"
+
+
 async def test_calibration_samples_options_flow(hass: HomeAssistant, setup_bermuda_entry):
     """Options flow should expose and manage calibration samples."""
     coordinator = setup_bermuda_entry.runtime_data.coordinator
