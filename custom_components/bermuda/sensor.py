@@ -590,6 +590,10 @@ class BermudaSensorTrilatAnchorCount(BermudaSensor):
     def state_class(self):
         return SensorStateClass.MEASUREMENT
 
+    @property
+    def extra_state_attributes(self) -> Mapping[str, Any] | None:
+        return {"anchors": list(getattr(self._device, "trilat_anchor_diagnostics", []))}
+
 
 class BermudaSensorPositionConfidence(BermudaSensor):
     """Diagnostic sensor for trilat confidence score."""

@@ -220,6 +220,34 @@ def test_anchor_qualification_requires_valid_coordinates():
     assert device.trilat_anchor_count == 1
 
 
+def test_trilat_anchor_diagnostics_describe_scanner_statuses():
+    """Current-cycle trilat diagnostics should expose one status per scanner."""
+    coordinator = _make_coordinator()
+    device = _DummyDevice("dev-anchor-diag")
+
+    sc_valid = _make_scanner(coordinator, "diag-a", "f1", 0.0, 0.0)
+    sc_wrong_floor = _make_scanner(coordinator, "diag-b", "f2", 6.0, 0.0)
+    sc_no_range = _make_scanner(coordinator, "diag-c", "f1", 0.0, 8.0)
+
+    fresh = time.monotonic()
+    adv_valid = _make_advert(sc_valid, fresh, -70.0, 5.0)
+    adv_wrong_floor = _make_advert(sc_wrong_floor, fresh, -70.0, 5.0)
+    adv_no_range = _make_advert(sc_no_range, fresh, -70.0, 5.0)
+    adv_no_range.rssi_distance_raw = None
+    adv_no_range.rssi_distance = None
+    device.adverts = {
+        ("dev-anchor-diag", sc_valid.address): adv_valid,
+        ("dev-anchor-diag", sc_wrong_floor.address): adv_wrong_floor,
+        ("dev-anchor-diag", sc_no_range.address): adv_no_range,
+    }
+
+    coordinator._refresh_trilateration_for_device(device)
+
+    assert any(line.endswith(": valid") for line in device.trilat_anchor_diagnostics)
+    assert any(": rejected_wrong_floor" in line for line in device.trilat_anchor_diagnostics)
+    assert any(": rejected_no_range" in line for line in device.trilat_anchor_diagnostics)
+
+
 def test_high_sigma_anchor_is_downweighted_not_dropped():
     """Large sigma should reduce influence, not censor the anchor outright."""
     coordinator = _make_coordinator()

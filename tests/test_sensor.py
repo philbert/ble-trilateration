@@ -11,7 +11,11 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.bermuda.bermuda_device import BermudaDevice
 from custom_components.bermuda.const import DOMAIN, NAME
-from custom_components.bermuda.sensor import BermudaSensorHorizontalSpeed, BermudaSensorVerticalSpeed
+from custom_components.bermuda.sensor import (
+    BermudaSensorHorizontalSpeed,
+    BermudaSensorTrilatAnchorCount,
+    BermudaSensorVerticalSpeed,
+)
 
 from .const import MOCK_CONFIG
 
@@ -79,3 +83,23 @@ async def test_trilat_speed_sensors_expose_filtered_motion(hass) -> None:
 
     assert horizontal.native_value == 1.235
     assert vertical.native_value == 0.457
+
+
+async def test_trilat_anchor_count_sensor_exposes_anchor_status_lines(hass) -> None:
+    """Anchor count diagnostics should expose one status line per scanner."""
+    entry = await setup_integration(hass)
+    coordinator = entry.runtime_data.coordinator
+
+    device = BermudaDevice("AA:BB:CC:DD:EE:77", coordinator)
+    device.create_sensor = True
+    device.trilat_anchor_count = 2
+    device.trilat_anchor_diagnostics = [
+        "Living room light switch 1: valid",
+        "Oven: rejected_no_range (sync=drifting)",
+    ]
+    coordinator.devices[device.address] = device
+
+    sensor = BermudaSensorTrilatAnchorCount(coordinator, entry, device.address)
+
+    assert sensor.native_value == 2
+    assert sensor.extra_state_attributes == {"anchors": device.trilat_anchor_diagnostics}

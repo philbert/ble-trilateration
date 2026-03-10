@@ -1887,8 +1887,42 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             device.name_bt_serviceinfo,
         )
 
+        def _anchor_status_lines(selected_floor_id: str | None = None) -> list[str]:
+            lines: list[str] = []
+            for advert in sorted(
+                latest.values(),
+                key=lambda ad: (getattr(ad.scanner_device, "name", ad.scanner_address), ad.scanner_address),
+            ):
+                scanner = advert.scanner_device
+                scanner_name = getattr(scanner, "name", scanner.address)
+                if advert.stamp < nowstamp - DISTANCE_TIMEOUT:
+                    status = "rejected_stale"
+                elif selected_floor_id is not None and scanner.floor_id != selected_floor_id:
+                    status = "rejected_wrong_floor"
+                elif (
+                    self.get_scanner_anchor_x(scanner.address) is None
+                    or self.get_scanner_anchor_y(scanner.address) is None
+                ):
+                    status = "rejected_missing_anchor"
+                elif advert.rssi_distance_raw is None or advert.rssi_distance is None:
+                    status = "rejected_no_range"
+                else:
+                    status = "valid"
+
+                sync_state = (
+                    scanner.timestamp_sync_diagnostics().get("state")
+                    if getattr(scanner, "is_scanner", False)
+                    else None
+                )
+                line = f"{scanner_name}: {status}"
+                if sync_state not in (None, "synchronized", "local", "not_scanner"):
+                    line += f" (sync={sync_state})"
+                lines.append(line)
+            return lines
+
         fresh_any = any(advert.stamp >= nowstamp - DISTANCE_TIMEOUT for advert in latest.values())
         if not fresh_any:
+            device.trilat_anchor_diagnostics = _anchor_status_lines()
             device.set_trilat_unknown(
                 "stale_inputs",
                 floor_id=state.floor_id,
@@ -1921,6 +1955,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             evidence_inputs.append((scanner_floor_id, rssi_for_score))
 
         if not evidence_inputs:
+            device.trilat_anchor_diagnostics = _anchor_status_lines()
             device.set_trilat_unknown("ambiguous_floor", floor_id=state.floor_id, floor_name=self._resolve_floor_name(state.floor_id))
             state.last_status = "unknown"
             self._set_trilat_confidence(device, 0.0)
@@ -2010,6 +2045,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
 
         selected_floor_id = state.floor_id or best_floor_id
         selected_floor_name = self._resolve_floor_name(selected_floor_id)
+        device.trilat_anchor_diagnostics = _anchor_status_lines(selected_floor_id)
 
         if prev_floor_id is not None and selected_floor_id != prev_floor_id:
             for advert in latest.values():

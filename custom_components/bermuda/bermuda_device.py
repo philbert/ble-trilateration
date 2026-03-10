@@ -166,6 +166,7 @@ class BermudaDevice(dict):
         self.trilat_confidence_level: str = "low"
         self.trilat_horizontal_speed_mps: float | None = None
         self.trilat_vertical_speed_mps: float | None = None
+        self.trilat_anchor_diagnostics: list[str] = []
         self.scanner_timestamp_regression_count: int = 0
         self.scanner_timestamp_regression_max_s: float = 0.0
         self.scanner_timestamp_regression_last_s: float | None = None
