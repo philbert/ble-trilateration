@@ -1467,7 +1467,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
     _TRILAT_MAX_ANCHOR_SIGMA_M: float = 6.0
     _TRILAT_FLOOR_AMBIGUITY_RATIO: float = 0.2
     _TRILAT_RANGE_DELTA_EPSILON_M: float = 0.2
-    _TRILAT_MAX_POSITION_SPEED_MPS: float = 8.0
+    _TRILAT_MAX_POSITION_SPEED_MPS: float = 5.0
     _TRILAT_MAX_VERTICAL_SPEED_MPS: float = 1.5
     _TRILAT_MAX_FILTER_DT_S: float = 5.0
     _NON_CONNECTOR_EXTRA_FLOOR_SWITCH_MARGIN: float = 0.18
@@ -1561,13 +1561,18 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             return measurement_xy, filtered_z
 
         dt = nowstamp - state.last_filter_stamp
-        if dt <= 0.0 or dt > self._TRILAT_MAX_FILTER_DT_S:
+        if dt <= 0.0:
             state.velocity_x_mps = 0.0
             state.velocity_y_mps = 0.0
             state.velocity_z_mps = 0.0
             state.last_filter_stamp = nowstamp
             filtered_z = measurement_z if measurement_z is not None else state.last_solution_z
             return measurement_xy, filtered_z
+        if dt > self._TRILAT_MAX_FILTER_DT_S:
+            dt = self._TRILAT_MAX_FILTER_DT_S
+            state.velocity_x_mps = 0.0
+            state.velocity_y_mps = 0.0
+            state.velocity_z_mps = 0.0
 
         residual_factor = 1.0
         if residual_m is not None:
@@ -1667,6 +1672,12 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         sigma = max(0.75, z_margin * 1.5)
         pull_weight = 1.0 - math.exp(-0.5 * ((excess / sigma) ** 2))
         return z_value + (pull_weight * (nearest_edge - z_value))
+
+    @staticmethod
+    def _set_trilat_speed_diagnostics(device: BermudaDevice, state: TrilatDecisionState) -> None:
+        """Expose current filtered motion estimates on the device."""
+        device.trilat_horizontal_speed_mps = math.hypot(state.velocity_x_mps, state.velocity_y_mps)
+        device.trilat_vertical_speed_mps = abs(state.velocity_z_mps)
 
     @staticmethod
     def _latest_adverts_by_scanner(device: BermudaDevice):
@@ -2109,6 +2120,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                     mean_sigma_m=state.last_mean_sigma_m,
                 ),
             )
+            self._set_trilat_speed_diagnostics(device, state)
             if _debug_this_device:
                 _LOGGER_TARGET_SPAM_LESS.debug(
                     f"trilat_skip:{device.address}",
@@ -2212,6 +2224,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                     mean_sigma_m=mean_sigma_m,
                 ),
             )
+            self._set_trilat_speed_diagnostics(device, state)
             state.last_solution_xy = filtered_xy
             state.last_solution_z = filtered_z if solver_dimension == "3d" or filtered_z is not None else None
             state.last_residual_m = fallback_residual
@@ -2262,6 +2275,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 mean_sigma_m=mean_sigma_m,
             ),
         )
+        self._set_trilat_speed_diagnostics(device, state)
         if _debug_this_device:
             if solver_dimension == "3d" and solve_result.z_m is not None:
                 _LOGGER_TARGET_SPAM_LESS.debug(

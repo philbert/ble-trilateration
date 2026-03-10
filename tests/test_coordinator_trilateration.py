@@ -33,6 +33,8 @@ class _DummyDevice:
         self.trilat_residual_m = None
         self.trilat_confidence = 0.0
         self.trilat_confidence_level = "low"
+        self.trilat_horizontal_speed_mps = None
+        self.trilat_vertical_speed_mps = None
         self.area_id = None
         self.area_last_seen_id = None
         self.area_is_unknown = False
@@ -53,6 +55,8 @@ class _DummyDevice:
         self.trilat_residual_m = None
         self.trilat_confidence = 0.0
         self.trilat_confidence_level = "low"
+        self.trilat_horizontal_speed_mps = None
+        self.trilat_vertical_speed_mps = None
 
     def set_trilat_solution(self, x_m, y_m, z_m, floor_id, floor_name, anchor_count, residual_m):
         self.trilat_status = "ok"
@@ -529,6 +533,56 @@ def test_trilat_motion_filter_caps_unphysical_xy_jump():
     assert published_speed <= coordinator._TRILAT_MAX_POSITION_SPEED_MPS
     assert device.trilat_x_m is not None and device.trilat_x_m < far_x
     assert device.trilat_y_m is not None and device.trilat_y_m < far_y
+    assert device.trilat_horizontal_speed_mps is not None
+    assert device.trilat_horizontal_speed_mps <= coordinator._TRILAT_MAX_POSITION_SPEED_MPS
+
+
+def test_trilat_motion_filter_caps_unphysical_xy_jump_after_long_gap():
+    """Long update gaps must still respect the motion cap instead of publishing the raw solve."""
+    coordinator = _make_coordinator()
+    device = _DummyDevice("dev-motion-gap")
+    sc_a, sc_b, sc_c = _right_triangle_anchors(coordinator, "dev-motion-gap", "f1")
+
+    with patch("custom_components.bermuda.coordinator.monotonic_time_coarse", return_value=100.0):
+        device.adverts = {
+            ("dev-motion-gap", sc_a.address): _make_advert(sc_a, 100.0, -70.0, 5.0),
+            ("dev-motion-gap", sc_b.address): _make_advert(sc_b, 100.0, -70.0, 5.0),
+            ("dev-motion-gap", sc_c.address): _make_advert(sc_c, 100.0, -70.0, 5.0),
+        }
+        coordinator._refresh_trilateration_for_device(device)
+
+    first_xy = (float(device.trilat_x_m), float(device.trilat_y_m))
+
+    far_x = -100.0
+    far_y = 10.0
+    dist_a = ((far_x - sc_a.anchor_x_m) ** 2 + (far_y - sc_a.anchor_y_m) ** 2) ** 0.5
+    dist_b = ((far_x - sc_b.anchor_x_m) ** 2 + (far_y - sc_b.anchor_y_m) ** 2) ** 0.5
+    dist_c = ((far_x - sc_c.anchor_x_m) ** 2 + (far_y - sc_c.anchor_y_m) ** 2) ** 0.5
+
+    adv_a = _make_advert(sc_a, 106.0, -70.0, dist_a)
+    adv_b = _make_advert(sc_b, 106.0, -70.0, dist_b)
+    adv_c = _make_advert(sc_c, 106.0, -70.0, dist_c)
+    adv_a.trilat_range_ewma_m = None
+    adv_b.trilat_range_ewma_m = None
+    adv_c.trilat_range_ewma_m = None
+    device.adverts = {
+        ("dev-motion-gap", sc_a.address): adv_a,
+        ("dev-motion-gap", sc_b.address): adv_b,
+        ("dev-motion-gap", sc_c.address): adv_c,
+    }
+
+    with patch("custom_components.bermuda.coordinator.monotonic_time_coarse", return_value=106.0):
+        coordinator._refresh_trilateration_for_device(device)
+
+    dx = float(device.trilat_x_m) - first_xy[0]
+    dy = float(device.trilat_y_m) - first_xy[1]
+    published_speed = ((dx * dx) + (dy * dy)) ** 0.5 / coordinator._TRILAT_MAX_FILTER_DT_S
+
+    assert device.trilat_status == "ok"
+    assert published_speed <= coordinator._TRILAT_MAX_POSITION_SPEED_MPS
+    assert device.trilat_horizontal_speed_mps is not None
+    assert device.trilat_horizontal_speed_mps <= coordinator._TRILAT_MAX_POSITION_SPEED_MPS
+    assert device.trilat_x_m is not None and device.trilat_x_m > far_x
 
 
 def test_trilat_holds_previous_z_through_same_floor_2d_gap():

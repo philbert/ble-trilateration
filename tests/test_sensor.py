@@ -11,6 +11,7 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.bermuda.bermuda_device import BermudaDevice
 from custom_components.bermuda.const import DOMAIN, NAME
+from custom_components.bermuda.sensor import BermudaSensorHorizontalSpeed, BermudaSensorVerticalSpeed
 
 from .const import MOCK_CONFIG
 
@@ -60,3 +61,21 @@ async def test_scanner_timestamp_sync_sensor_exposes_runtime_health(hass) -> Non
     assert state.attributes["recent_scanner_regressions"] == 1
     assert state.attributes["recent_stale_advert_drops"] == 1
     assert state.attributes["recent_max_backward_s"] == 3.2
+
+
+async def test_trilat_speed_sensors_expose_filtered_motion(hass) -> None:
+    """Tracked devices should expose horizontal and vertical speed diagnostics."""
+    entry = await setup_integration(hass)
+    coordinator = entry.runtime_data.coordinator
+
+    device = BermudaDevice("AA:BB:CC:DD:EE:66", coordinator)
+    device.create_sensor = True
+    device.trilat_horizontal_speed_mps = 1.23456
+    device.trilat_vertical_speed_mps = 0.45678
+    coordinator.devices[device.address] = device
+
+    horizontal = BermudaSensorHorizontalSpeed(coordinator, entry, device.address)
+    vertical = BermudaSensorVerticalSpeed(coordinator, entry, device.address)
+
+    assert horizontal.native_value == 1.235
+    assert vertical.native_value == 0.457

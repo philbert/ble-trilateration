@@ -164,6 +164,8 @@ class BermudaDevice(dict):
         self.trilat_residual_m: float | None = None
         self.trilat_confidence: float = 0.0
         self.trilat_confidence_level: str = "low"
+        self.trilat_horizontal_speed_mps: float | None = None
+        self.trilat_vertical_speed_mps: float | None = None
         self.scanner_timestamp_regression_count: int = 0
         self.scanner_timestamp_regression_max_s: float = 0.0
         self.scanner_timestamp_regression_last_s: float | None = None
@@ -786,6 +788,8 @@ class BermudaDevice(dict):
         self.trilat_residual_m = None
         self.trilat_confidence = 0.0
         self.trilat_confidence_level = "low"
+        self.trilat_horizontal_speed_mps = None
+        self.trilat_vertical_speed_mps = None
 
     def set_trilat_solution(
         self,

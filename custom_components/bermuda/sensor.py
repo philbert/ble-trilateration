@@ -11,6 +11,7 @@ from homeassistant.const import (
     STATE_UNAVAILABLE,
     EntityCategory,
     UnitOfLength,
+    UnitOfSpeed,
 )
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
@@ -86,6 +87,8 @@ async def async_setup_entry(
             entities.append(BermudaSensorTrilatFloor(coordinator, entry, address))
             entities.append(BermudaSensorTrilatAnchorCount(coordinator, entry, address))
             entities.append(BermudaSensorPositionConfidence(coordinator, entry, address))
+            entities.append(BermudaSensorHorizontalSpeed(coordinator, entry, address))
+            entities.append(BermudaSensorVerticalSpeed(coordinator, entry, address))
 
             # _LOGGER.debug("Sensor received new_device signal for %s", address)
             # We set update before add to False because we are being
@@ -609,6 +612,58 @@ class BermudaSensorPositionConfidence(BermudaSensor):
     @property
     def extra_state_attributes(self) -> Mapping[str, Any] | None:
         return {"level": getattr(self._device, "trilat_confidence_level", "low")}
+
+
+class BermudaSensorHorizontalSpeed(BermudaSensor):
+    """Diagnostic sensor for filtered horizontal speed."""
+
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    @property
+    def unique_id(self):
+        return f"{self._device.unique_id}_horizontal_speed"
+
+    @property
+    def name(self):
+        return "Horizontal Speed"
+
+    @property
+    def native_value(self):
+        speed = getattr(self._device, "trilat_horizontal_speed_mps", None)
+        if speed is None:
+            return None
+        return round(speed, 3)
+
+    @property
+    def device_class(self):
+        return SensorDeviceClass.SPEED
+
+    @property
+    def native_unit_of_measurement(self):
+        return UnitOfSpeed.METERS_PER_SECOND
+
+    @property
+    def state_class(self):
+        return SensorStateClass.MEASUREMENT
+
+
+class BermudaSensorVerticalSpeed(BermudaSensorHorizontalSpeed):
+    """Diagnostic sensor for filtered vertical speed."""
+
+    @property
+    def unique_id(self):
+        return f"{self._device.unique_id}_vertical_speed"
+
+    @property
+    def name(self):
+        return "Vertical Speed"
+
+    @property
+    def native_value(self):
+        speed = getattr(self._device, "trilat_vertical_speed_mps", None)
+        if speed is None:
+            return None
+        return round(speed, 3)
 
 
 class BermudaSensorScannerTimestampSync(BermudaSensor):
