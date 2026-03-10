@@ -27,7 +27,7 @@ Before describing changes, it is important to note what is already in place:
 - Motion prior + speed cap
 - Fingerprint-based room attribution in parallel with geometry
 - Room hysteresis
-- Doorway/topology as transition priors
+- Soft transition priors derived from room behavior, not hand-labeled doorways
 
 ---
 
@@ -121,6 +121,7 @@ Run two attribution methods in parallel and fuse their scores.
 **Geometry score:**
 - Derived from the solved `(x, y, z)` position and Bermuda's existing calibration-sample KDE geometry score
 - This reuses the current room-classifier machinery rather than introducing room polygons/volumes as a new dependency
+- Geometry should be treated as a secondary consistency check for room attribution, not the only gatekeeper
 
 **Fingerprint score:**
 - Build a live RSSI vector from the windowed medians of all currently-visible scanners
@@ -134,26 +135,46 @@ Run two attribution methods in parallel and fuse their scores.
 room_score(r) = α * fingerprint_score(r) + (1 - α) * geometry_score(r)
 ```
 
-Start with α ≈ 0.65 (fingerprint-dominant). The fingerprint implicitly encodes wall attenuation and geometry that the coordinate-based approach cannot see.
+Start with α ≈ 0.65 (fingerprint-dominant). The fingerprint implicitly encodes wall attenuation and geometry that the coordinate-based approach cannot see, so it should be the primary room signal with geometry acting as a secondary consistency check.
 
 **Why fingerprinting works:** Two rooms that are geometrically close but separated by a wall have very different RSSI fingerprints. The fingerprint comparison bypasses the RSSI → distance → position → room chain entirely and therefore does not accumulate its noise.
 
 ---
 
-### Stage 5 — Room Hysteresis and Topology Constraints
+### Stage 5 — Room Hysteresis and Soft Transition Priors
 
 **Room hysteresis:**
 - Hold the current room attribution through weak evidence
 - Require cumulative evidence over time rather than a fixed number of update cycles
 - Use short dwell/evidence windows (for example 2–5 seconds), because update cadence can vary
 - Adjacent-room transitions can use a shorter dwell/easier threshold; non-adjacent transitions should require stronger sustained evidence
+- If room evidence is weak or contradictory, prefer holding the previous stable room over dropping immediately to `Unknown`
 
-**Doorway / connector topology:**
-- Define doorways and floor connectors (staircases, lifts) as transition priors, not as room samples
-- Model: `room_A --connector_D--> room_B` with an associated transition cost
-- If the proposed new room is not reachable from the current room via a known connector, apply a heavy transition penalty
-- Do not hard-block — a device can legitimately sit in a doorway and appear ambiguous between two rooms
-- Floor transitions should only pass through labelled connectors; cross-floor jumps without a connector are heavily penalised
+**Soft transition priors:**
+- Prefer learned transition zones and adjacency inferred from calibration support over hand-labeled doorways
+- Use room overlap / ambiguity regions from the sample clouds to identify where transitions are plausible
+- Outside those regions, apply a heavier penalty to room changes unless the new room has strong sustained evidence
+- Do not hard-block — a device near a boundary should be allowed to remain ambiguous
+- Floor transitions can still use soft connector priors where they are already configured, but room-to-room transitions should not depend on manual doorway labeling
+
+---
+
+### Stage 6 — Geometry and Residual Quality Signals
+
+Add explicit solve-quality heuristics so Bermuda distinguishes “many anchors” from “good solve”.
+
+**Geometry quality:**
+- Compute a DOP-like or conditioning score from the active anchor layout
+- Poorly distributed anchors should reduce trust in the solve even when anchor count is high
+
+**Residual consistency:**
+- Use solver residuals and per-anchor disagreement as first-class confidence inputs
+- If several anchors are mutually inconsistent, reduce room/position confidence rather than trusting the point estimate blindly
+
+These signals should influence:
+- overall position confidence
+- the geometry portion of room scoring
+- how strongly hysteresis favors holding the previous room
 
 ---
 
@@ -174,7 +195,8 @@ Start with α ≈ 0.65 (fingerprint-dominant). The fingerprint implicitly encode
 | 2 | Compose `σ_effective` from calibration RMSE + live dispersion + count + health; conditional per-scanner slope | `ranging_model.py` |
 | 3 | Add stationary-mode prior + speed cap policy around the existing IRLS solve | `coordinator.py` + `trilateration.py` |
 | 4 | Fingerprint k-NN room score + existing KDE geometry score fusion, floor-gated first | `room_classifier.py` |
-| 5 | Room hysteresis (time/evidence based) + doorway transition priors | `room_classifier.py` / `coordinator.py` |
+| 5 | Room hysteresis (time/evidence based) + soft transition priors / learned transition zones | `room_classifier.py` / `coordinator.py` |
+| 6 | Geometry-quality and residual-consistency confidence signals | `coordinator.py` / `trilateration.py` |
 | Later | Particle filter for full posterior | New module |
 
 ---
@@ -189,8 +211,10 @@ Start with α ≈ 0.65 (fingerprint-dominant). The fingerprint implicitly encode
 
 4. **Room attribution is partially independent of position estimation.** Fingerprint matching can produce good room attribution even when the geometric solve is uncertain. Run it in parallel with Bermuda's existing KDE geometry score and fuse the results.
 
-5. **Doorways are transition priors, not sample points.** A device in a doorway should be ambiguous between two rooms — that is the correct output, not a bug.
+5. **Use soft transition priors, not brittle doorway labels.** A device at a boundary should be allowed to remain ambiguous between rooms; learned transition zones are preferable to hand-maintained door definitions.
 
 6. **Hysteresis is not a hack.** It reflects the physics: humans do not teleport, and room attribution should reflect that.
 
 7. **Use soft penalties wherever possible.** Aside from timestamp-invalid / stale inputs, weak measurements should widen uncertainty or reduce weight rather than being hard-rejected.
+
+8. **Anchor count is not a quality metric.** Geometry quality and residual consistency must be tracked explicitly; many anchors can still produce a poor solve.
