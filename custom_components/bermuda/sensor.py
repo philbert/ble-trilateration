@@ -593,10 +593,12 @@ class BermudaSensorTrilatAnchorCount(BermudaSensor):
     @property
     def extra_state_attributes(self) -> Mapping[str, Any] | None:
         anchor_lines = list(getattr(self._device, "trilat_anchor_diagnostics", []))
-        return {
+        attrs: dict[str, Any] = {
             "used_anchors": getattr(self._device, "trilat_anchor_count", 0),
-            "anchors": "\n".join(anchor_lines),
         }
+        for index, line in enumerate(anchor_lines, start=1):
+            attrs[str(index)] = line
+        return attrs
 
 
 class BermudaSensorPositionConfidence(BermudaSensor):
