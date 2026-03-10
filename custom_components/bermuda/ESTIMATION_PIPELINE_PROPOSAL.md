@@ -36,7 +36,7 @@ Before describing changes, it is important to note what is already in place:
 | Earlier claim | Correction |
 |---|---|
 | "Replace one-shot WLS with IRLS" | IRLS is already there. Feed it better inputs instead. |
-| "Fit per-scanner (RSSI₀_s, n_s) for each scanner" | With typical sample counts this will overfit. Keep global slope; only allow per-scanner slope when a scanner has enough calibration rows. |
+| "Fit per-scanner (RSSI₀_s, n_s) for each scanner" | With typical sample counts this will overfit. Keep global slope by default; only allow per-scanner slope when a scanner has enough rows and enough distance spread. |
 | Particle filter as next step | Good long-term architecture, not the next thing to build. |
 
 ---
@@ -82,15 +82,19 @@ Compose the uncertainty term from:
 
 The exact functional form can start simple (e.g., RSS combination) and be tuned empirically.
 
-**Per-scanner slope:** Only fit a scanner-specific path-loss exponent `n_s` when that scanner has enough calibration rows (suggest: minimum 15–20 samples spanning at least 2 m of distance range). Otherwise fall back to the global slope. This prevents overfitting on sparse data.
+**Per-scanner slope:** Only fit a scanner-specific path-loss exponent `n_s` when that scanner has enough calibration support, for example:
+- at least 15–20 usable calibration rows, and
+- at least 3 distinct distance buckets / enough spread to constrain a slope.
+
+Otherwise fall back to the global slope and continue learning only per-scanner bias and noise. This prevents overfitting on sparse data.
 
 This stage converts each scanner from a brittle metre value into a `(distance, σ_effective)` pair — a real likelihood band the solver can use properly.
 
 ---
 
-### Stage 3 — Prior-Aware IRLS Solve (`trilateration.py`)
+### Stage 3 — Prior-Aware Solve Policy (`coordinator.py` + `trilateration.py`)
 
-The IRLS solver is kept. Add a prior term.
+The IRLS solver is kept in `trilateration.py`. The motion prior, stationary logic, and speed policy live in `coordinator.py`, which prepares solver inputs and applies the estimation policy around the generic math solver.
 
 **Prior from previous state:**
 - Previous `(x, y, z, vx, vy, vz)` is propagated forward by elapsed time
@@ -106,7 +110,7 @@ The IRLS solver is kept. Add a prior term.
 - If the posterior update would imply speed > max_speed, clip the displacement
 - Suggested limits: 1.5 m/s nominal, 2.5 m/s absolute maximum
 
-**Effect:** The existing IRLS solver now receives better-weighted inputs (real likelihood bands from Stage 2) and a prior that prevents wandering when evidence is weak.
+**Effect:** The existing IRLS solver receives better-weighted inputs (real likelihood bands from Stage 2) and a prior-aware policy that prevents wandering when evidence is weak, while keeping the solver module itself generic.
 
 ---
 
@@ -115,11 +119,12 @@ The IRLS solver is kept. Add a prior term.
 Run two attribution methods in parallel and fuse their scores.
 
 **Geometry score:**
-- Derived from the solved `(x, y, z)` position and room polygons/volumes
-- Existing approach
+- Derived from the solved `(x, y, z)` position and Bermuda's existing calibration-sample KDE geometry score
+- This reuses the current room-classifier machinery rather than introducing room polygons/volumes as a new dependency
 
 **Fingerprint score:**
 - Build a live RSSI vector from the windowed medians of all currently-visible scanners
+- Gate by floor first, then compare only against calibration samples from the selected floor
 - Compare this vector to the stored RSSI vectors from calibration samples using weighted Euclidean distance in RSSI space
 - Each calibration sample votes for its labelled room, weighted by similarity
 - Missing scanners in the live vector are handled by a distance penalty
@@ -139,8 +144,9 @@ Start with α ≈ 0.65 (fingerprint-dominant). The fingerprint implicitly encode
 
 **Room hysteresis:**
 - Hold the current room attribution through weak evidence
-- Require N consecutive update cycles attributing to a new room before committing to the switch
-- N can be small for adjacent rooms (e.g., 3 cycles), larger for non-adjacent rooms (e.g., 6 cycles)
+- Require cumulative evidence over time rather than a fixed number of update cycles
+- Use short dwell/evidence windows (for example 2–5 seconds), because update cadence can vary
+- Adjacent-room transitions can use a shorter dwell/easier threshold; non-adjacent transitions should require stronger sustained evidence
 
 **Doorway / connector topology:**
 - Define doorways and floor connectors (staircases, lifts) as transition priors, not as room samples
@@ -166,9 +172,9 @@ Start with α ≈ 0.65 (fingerprint-dominant). The fingerprint implicitly encode
 |---|---|---|
 | 1 | Adaptive windowed aggregate: median RSSI, MAD, packet count, age, timestamp health | `coordinator.py` |
 | 2 | Compose `σ_effective` from calibration RMSE + live dispersion + count + health; conditional per-scanner slope | `ranging_model.py` |
-| 3 | Add stationary-mode prior + speed cap to existing IRLS solve | `trilateration.py` |
-| 4 | Fingerprint k-NN room score + geometry score fusion | `room_classifier.py` |
-| 5 | Room hysteresis (N-cycle confirmation) + doorway transition priors | `room_classifier.py` / `coordinator.py` |
+| 3 | Add stationary-mode prior + speed cap policy around the existing IRLS solve | `coordinator.py` + `trilateration.py` |
+| 4 | Fingerprint k-NN room score + existing KDE geometry score fusion, floor-gated first | `room_classifier.py` |
+| 5 | Room hysteresis (time/evidence based) + doorway transition priors | `room_classifier.py` / `coordinator.py` |
 | Later | Particle filter for full posterior | New module |
 
 ---
@@ -181,8 +187,10 @@ Start with α ≈ 0.65 (fingerprint-dominant). The fingerprint implicitly encode
 
 3. **Calm by default.** The stationary-mode prior is the primary mechanism for stability. The speed cap is a backstop, not the front line.
 
-4. **Room attribution is partially independent of position estimation.** Fingerprint matching can produce good room attribution even when the geometric solve is uncertain. Run them in parallel and fuse.
+4. **Room attribution is partially independent of position estimation.** Fingerprint matching can produce good room attribution even when the geometric solve is uncertain. Run it in parallel with Bermuda's existing KDE geometry score and fuse the results.
 
 5. **Doorways are transition priors, not sample points.** A device in a doorway should be ambiguous between two rooms — that is the correct output, not a bug.
 
 6. **Hysteresis is not a hack.** It reflects the physics: humans do not teleport, and room attribution should reflect that.
+
+7. **Use soft penalties wherever possible.** Aside from timestamp-invalid / stale inputs, weak measurements should widen uncertainty or reduce weight rather than being hard-rejected.
