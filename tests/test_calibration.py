@@ -367,6 +367,35 @@ async def test_calibration_layout_mismatch_raises_repair(hass: HomeAssistant, se
     assert issue.is_fixable is True
 
 
+async def test_calibration_layout_mismatch_not_raised_without_current_anchor_geometry(
+    hass: HomeAssistant, setup_bermuda_entry
+):
+    """Do not raise a mismatch repair while current anchor geometry is still unavailable."""
+    coordinator = setup_bermuda_entry.runtime_data.coordinator
+
+    await coordinator.calibration_store.async_add_sample(
+        {
+            "id": "sample_layout_startup_gap",
+            "created_at": "2026-03-06T12:00:00+00:00",
+            "device_id": "device_one",
+            "device_name": "Device One",
+            "device_address": "aa:bb:cc:dd:ee:01",
+            "room_area_id": "garage",
+            "room_name": "Garage",
+            "position": {"x_m": 1.0, "y_m": 2.0, "z_m": 1.0},
+            "sample_radius_m": 1.0,
+            "anchor_layout_hash": "old_layout_hash",
+            "anchors": {},
+            "quality": {"status": "accepted", "eligible_anchor_count": 1, "reason": None},
+        }
+    )
+
+    await coordinator.async_handle_calibration_samples_changed()
+
+    issue = ir.async_get(hass).async_get_issue(DOMAIN, REPAIR_CALIBRATION_LAYOUT_MISMATCH)
+    assert issue is None
+
+
 async def test_calibration_layout_mismatch_repair_flow_updates_samples(
     hass: HomeAssistant, setup_bermuda_entry
 ):

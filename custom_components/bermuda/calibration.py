@@ -175,6 +175,10 @@ class BermudaCalibrationManager:
         if not samples:
             return None
 
+        current_geometry = self.current_anchor_geometry()
+        if not current_geometry:
+            return None
+
         current_layout_hash = self.current_anchor_layout_hash
         if current_layout_hash in self.acknowledged_layout_hashes:
             return None
@@ -196,7 +200,6 @@ class BermudaCalibrationManager:
         )
 
         changed_anchor_lines: list[str] = []
-        current_geometry = self.current_anchor_geometry()
         for scanner_address, anchor in sorted((representative_sample.get("anchors") or {}).items()):
             current_anchor = current_geometry.get(str(scanner_address).lower())
             sample_position = anchor.get("anchor_position") or {}

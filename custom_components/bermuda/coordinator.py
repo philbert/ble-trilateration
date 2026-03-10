@@ -386,6 +386,11 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         await self.room_classifier.async_rebuild()
         self._async_manage_repair_calibration_layout_mismatch()
 
+    async def async_handle_anchor_geometry_changed(self) -> None:
+        """Re-evaluate repairs that depend on configured anchor geometry."""
+        self._async_manage_repair_calibration_layout_mismatch()
+        self._async_manage_repair_trilat_without_anchors(list(self.scanner_list))
+
     @property
     def get_scanners(self) -> set[BermudaDevice]:
         return self._scanners
