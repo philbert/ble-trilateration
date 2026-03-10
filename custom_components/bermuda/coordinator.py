@@ -374,7 +374,10 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         await self.scanner_anchor_store.async_ensure_loaded()
         await self.calibration.async_initialize()
         self.calibration.register_change_callback(self.async_handle_calibration_samples_changed)
+        self._restore_scanner_anchors_from_store()
         await self.async_handle_calibration_samples_changed()
+        self._refresh_trilateration()
+        self._refresh_areas_from_trilat()
 
     async def async_shutdown(self) -> None:
         """Tear down coordinator-owned subsystems."""
@@ -390,6 +393,19 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         """Re-evaluate repairs that depend on configured anchor geometry."""
         self._async_manage_repair_calibration_layout_mismatch()
         self._async_manage_repair_trilat_without_anchors(list(self.scanner_list))
+
+    def _restore_scanner_anchors_from_store(self) -> None:
+        """Hydrate scanner anchor coordinates from Bermuda storage into live scanner devices."""
+        for scanner_address in list(self.scanner_list):
+            scanner = self.devices.get(scanner_address)
+            if scanner is None or not scanner.is_scanner:
+                continue
+            stored_coords = self.scanner_anchor_store.get_coordinates_if_loaded(scanner)
+            if stored_coords is None:
+                continue
+            scanner.anchor_x_m = stored_coords.get("anchor_x_m")
+            scanner.anchor_y_m = stored_coords.get("anchor_y_m")
+            scanner.anchor_z_m = stored_coords.get("anchor_z_m")
 
     @property
     def get_scanners(self) -> set[BermudaDevice]:

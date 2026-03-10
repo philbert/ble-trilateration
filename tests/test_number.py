@@ -121,3 +121,29 @@ async def test_scanner_anchor_numbers_restore_from_storage(hass) -> None:
     assert scanner.anchor_x_m == 7.8
     assert scanner.anchor_y_m == 9.1
     assert scanner.anchor_z_m == 2.3
+
+
+async def test_scanner_anchor_store_can_hydrate_live_scanners_before_number_restore(hass) -> None:
+    """Coordinator should be able to restore scanner anchors before number entities initialise."""
+    entry = await setup_integration(hass)
+    coordinator = entry.runtime_data.coordinator
+
+    stored_scanner = BermudaDevice("AA:BB:CC:DD:EE:14", coordinator)
+    stored_scanner._is_scanner = True  # noqa: SLF001 - test helper
+    stored_scanner._is_remote_scanner = False  # noqa: SLF001 - test helper
+    stored_scanner.anchor_x_m = 4.4
+    stored_scanner.anchor_y_m = 5.5
+    stored_scanner.anchor_z_m = 6.6
+    await coordinator.scanner_anchor_store.async_save_scanner(stored_scanner)
+
+    scanner = _create_scanner(coordinator, "AA:BB:CC:DD:EE:14")
+    scanner.anchor_x_m = None
+    scanner.anchor_y_m = None
+    scanner.anchor_z_m = None
+
+    await coordinator.scanner_anchor_store.async_ensure_loaded()
+    coordinator._restore_scanner_anchors_from_store()
+
+    assert scanner.anchor_x_m == 4.4
+    assert scanner.anchor_y_m == 5.5
+    assert scanner.anchor_z_m == 6.6

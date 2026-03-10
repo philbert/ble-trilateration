@@ -68,6 +68,12 @@ class BermudaScannerAnchorStore:
     async def async_get_coordinates(self, scanner: BermudaDevice) -> dict[str, float] | None:
         """Return stored coordinates for a scanner, if present."""
         await self.async_ensure_loaded()
+        return self.get_coordinates_if_loaded(scanner)
+
+    def get_coordinates_if_loaded(self, scanner: BermudaDevice) -> dict[str, float] | None:
+        """Return stored coordinates for a scanner when the store is already loaded."""
+        if not self._loaded:
+            return None
         if (storage_key := self._find_storage_key(scanner)) is None:
             return None
         payload = self._data["scanners"].get(storage_key, {})
