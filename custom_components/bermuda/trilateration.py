@@ -15,6 +15,7 @@ class AnchorMeasurement:
     y_m: float
     range_m: float
     z_m: float | None = None
+    sigma_m: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -129,7 +130,10 @@ def solve_2d_soft_l1(
             distance = math.hypot(dx, dy)
             distance = max(distance, 1e-6)
             residual = distance - anchor.range_m
-            weight = 1.0 / math.sqrt(1.0 + (residual / soft_l1_scale_m) ** 2)
+            robust_weight = 1.0 / math.sqrt(1.0 + (residual / soft_l1_scale_m) ** 2)
+            sigma = max(anchor.sigma_m, 1e-3)
+            measurement_weight = 1.0 / (sigma * sigma)
+            weight = robust_weight * measurement_weight
 
             grad_x = dx / distance
             grad_y = dy / distance
@@ -237,7 +241,10 @@ def solve_3d_soft_l1(
             distance = math.sqrt((dx * dx) + (dy * dy) + (dz * dz))
             distance = max(distance, 1e-6)
             residual = distance - anchor.range_m
-            weight = 1.0 / math.sqrt(1.0 + (residual / soft_l1_scale_m) ** 2)
+            robust_weight = 1.0 / math.sqrt(1.0 + (residual / soft_l1_scale_m) ** 2)
+            sigma = max(anchor.sigma_m, 1e-3)
+            measurement_weight = 1.0 / (sigma * sigma)
+            weight = robust_weight * measurement_weight
 
             grad_x = dx / distance
             grad_y = dy / distance

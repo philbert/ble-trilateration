@@ -220,6 +220,52 @@ def test_anchor_qualification_requires_valid_coordinates():
     assert device.trilat_anchor_count == 1
 
 
+def test_high_sigma_anchor_is_downweighted_not_dropped():
+    """Large sigma should reduce influence, not censor the anchor outright."""
+    coordinator = _make_coordinator()
+    device = _DummyDevice("dev-high-sigma")
+    sc_a, sc_b, sc_c = _right_triangle_anchors(coordinator, "dev-high-sigma", "f1")
+
+    fresh = time.monotonic()
+    adv_a = _make_advert(sc_a, fresh, -70.0, 5.0)
+    adv_b = _make_advert(sc_b, fresh, -70.0, 5.0)
+    adv_c = _make_advert(sc_c, fresh, -70.0, 5.0)
+    adv_c.rssi_distance_sigma_m = 12.0
+    device.adverts = {
+        ("dev-high-sigma", sc_a.address): adv_a,
+        ("dev-high-sigma", sc_b.address): adv_b,
+        ("dev-high-sigma", sc_c.address): adv_c,
+    }
+
+    coordinator._refresh_trilateration_for_device(device)
+
+    assert device.trilat_status == "ok"
+    assert device.trilat_anchor_count == 3
+
+
+def test_missing_sigma_anchor_uses_default_uncertainty():
+    """Anchors with missing sigma should still contribute with a weak default weight."""
+    coordinator = _make_coordinator()
+    device = _DummyDevice("dev-missing-sigma")
+    sc_a, sc_b, sc_c = _right_triangle_anchors(coordinator, "dev-missing-sigma", "f1")
+
+    fresh = time.monotonic()
+    adv_a = _make_advert(sc_a, fresh, -70.0, 5.0)
+    adv_b = _make_advert(sc_b, fresh, -70.0, 5.0)
+    adv_c = _make_advert(sc_c, fresh, -70.0, 5.0)
+    adv_c.rssi_distance_sigma_m = None
+    device.adverts = {
+        ("dev-missing-sigma", sc_a.address): adv_a,
+        ("dev-missing-sigma", sc_b.address): adv_b,
+        ("dev-missing-sigma", sc_c.address): adv_c,
+    }
+
+    coordinator._refresh_trilateration_for_device(device)
+
+    assert device.trilat_status == "ok"
+    assert device.trilat_anchor_count == 3
+
+
 def test_trilat_ewma_resets_on_floor_change():
     """Switching floors must reset per-advert EWMA so stale cross-floor ranges are discarded."""
     coordinator = _make_coordinator()

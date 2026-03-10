@@ -1493,6 +1493,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
     _TRILAT_MIN_ANCHORS_3D: int = 4
     _TRILAT_MAX_RESIDUAL_M: float = 5.0
     _TRILAT_MAX_ANCHOR_SIGMA_M: float = 6.0
+    _TRILAT_DEFAULT_ANCHOR_SIGMA_M: float = 8.0
     _TRILAT_FLOOR_AMBIGUITY_RATIO: float = 0.2
     _TRILAT_RANGE_DELTA_EPSILON_M: float = 0.2
     _TRILAT_MAX_POSITION_SPEED_MPS: float = 5.0
@@ -2044,8 +2045,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             if advert.rssi_distance is None:
                 continue
             sigma_m = getattr(advert, "rssi_distance_sigma_m", None)
-            if sigma_m is None or sigma_m > self._TRILAT_MAX_ANCHOR_SIGMA_M:
-                continue
+            effective_sigma_m = float(sigma_m) if sigma_m is not None else self._TRILAT_DEFAULT_ANCHOR_SIGMA_M
 
             if advert.trilat_range_ewma_m is None:
                 advert.trilat_range_ewma_m = advert.rssi_distance_raw
@@ -2053,7 +2053,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 advert.trilat_range_ewma_m = (policy.trilat_alpha * advert.rssi_distance_raw) + (
                     (1 - policy.trilat_alpha) * advert.trilat_range_ewma_m
                 )
-            anchor_sigmas_m.append(float(sigma_m))
+            anchor_sigmas_m.append(effective_sigma_m)
             anchors.append(
                 AnchorMeasurement(
                     scanner_address=scanner.address,
@@ -2061,6 +2061,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                     y_m=float(anchor_y),
                     range_m=float(advert.trilat_range_ewma_m),
                     z_m=self.get_scanner_anchor_z(scanner.address),
+                    sigma_m=effective_sigma_m,
                 )
             )
 
