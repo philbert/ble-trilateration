@@ -102,4 +102,7 @@ async def test_trilat_anchor_count_sensor_exposes_anchor_status_lines(hass) -> N
     sensor = BermudaSensorTrilatAnchorCount(coordinator, entry, device.address)
 
     assert sensor.native_value == 2
-    assert sensor.extra_state_attributes == {"anchors": device.trilat_anchor_diagnostics}
+    assert sensor.extra_state_attributes == {
+        "used_anchors": 2,
+        "anchors": "Living room light switch 1: valid\nOven: rejected_no_range (sync=drifting)",
+    }
