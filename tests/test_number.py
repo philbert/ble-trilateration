@@ -147,3 +147,30 @@ async def test_scanner_anchor_store_can_hydrate_live_scanners_before_number_rest
     assert scanner.anchor_x_m == 4.4
     assert scanner.anchor_y_m == 5.5
     assert scanner.anchor_z_m == 6.6
+
+
+async def test_scanner_anchor_store_can_hydrate_single_scanner_after_late_init(hass) -> None:
+    """Late scanner resolution should still pick up stored anchors immediately."""
+    entry = await setup_integration(hass)
+    coordinator = entry.runtime_data.coordinator
+
+    stored_scanner = BermudaDevice("AA:BB:CC:DD:EE:15", coordinator)
+    stored_scanner._is_scanner = True  # noqa: SLF001 - test helper
+    stored_scanner._is_remote_scanner = False  # noqa: SLF001 - test helper
+    stored_scanner.anchor_x_m = 1.1
+    stored_scanner.anchor_y_m = 2.2
+    stored_scanner.anchor_z_m = 3.3
+    await coordinator.scanner_anchor_store.async_save_scanner(stored_scanner)
+
+    scanner = _create_scanner(coordinator, "AA:BB:CC:DD:EE:15")
+    scanner.anchor_x_m = None
+    scanner.anchor_y_m = None
+    scanner.anchor_z_m = None
+
+    await coordinator.scanner_anchor_store.async_ensure_loaded()
+    restored = coordinator._restore_scanner_anchor_from_store(scanner)
+
+    assert restored is True
+    assert scanner.anchor_x_m == 1.1
+    assert scanner.anchor_y_m == 2.2
+    assert scanner.anchor_z_m == 3.3

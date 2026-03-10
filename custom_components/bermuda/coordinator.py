@@ -394,18 +394,25 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         self._async_manage_repair_calibration_layout_mismatch()
         self._async_manage_repair_trilat_without_anchors(list(self.scanner_list))
 
+    def _restore_scanner_anchor_from_store(self, scanner: BermudaDevice) -> bool:
+        """Hydrate one scanner's anchor coordinates from Bermuda storage when available."""
+        if not scanner.is_scanner:
+            return False
+        stored_coords = self.scanner_anchor_store.get_coordinates_if_loaded(scanner)
+        if stored_coords is None:
+            return False
+        scanner.anchor_x_m = stored_coords.get("anchor_x_m")
+        scanner.anchor_y_m = stored_coords.get("anchor_y_m")
+        scanner.anchor_z_m = stored_coords.get("anchor_z_m")
+        return True
+
     def _restore_scanner_anchors_from_store(self) -> None:
         """Hydrate scanner anchor coordinates from Bermuda storage into live scanner devices."""
         for scanner_address in list(self.scanner_list):
             scanner = self.devices.get(scanner_address)
-            if scanner is None or not scanner.is_scanner:
+            if scanner is None:
                 continue
-            stored_coords = self.scanner_anchor_store.get_coordinates_if_loaded(scanner)
-            if stored_coords is None:
-                continue
-            scanner.anchor_x_m = stored_coords.get("anchor_x_m")
-            scanner.anchor_y_m = stored_coords.get("anchor_y_m")
-            scanner.anchor_z_m = stored_coords.get("anchor_z_m")
+            self._restore_scanner_anchor_from_store(scanner)
 
     @property
     def get_scanners(self) -> set[BermudaDevice]:
@@ -2366,10 +2373,12 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             scanner_address = mac_norm(hascanner.source)
             bermuda_scanner = self._get_or_create_device(scanner_address)
             bermuda_scanner.async_as_scanner_init(hascanner)
+            self._restore_scanner_anchor_from_store(bermuda_scanner)
 
             if bermuda_scanner.area_id is None:
                 _scanners_without_areas.append(f"{bermuda_scanner.name} [{bermuda_scanner.address}]")
         self._async_manage_repair_scanners_without_areas(_scanners_without_areas)
+        self._async_manage_repair_calibration_layout_mismatch()
 
     def _async_purge_removed_scanners(self):
         """Demotes any devices that are no longer scanners based on new self.hascanners."""
