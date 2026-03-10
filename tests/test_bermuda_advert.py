@@ -184,6 +184,44 @@ def test_mobility_changes_ema_responsiveness(bermuda_advert, mock_parent_device)
     assert moving > stationary
 
 
+def test_time_window_ignores_old_history(bermuda_advert, mock_parent_device):
+    """Very old RSSI history should not contaminate the current window median."""
+    mock_parent_device.get_mobility_type.return_value = "stationary"
+    bermuda_advert.rssi_filtered = -70.0
+    bermuda_advert.hist_rssi_adjusted = [-70.0, -70.0, -70.0, -40.0]
+    bermuda_advert.hist_rssi_filtered = [-70.0, -70.0, -70.0, -40.0]
+    bermuda_advert.hist_stamp = [99.5, 99.0, 98.5, 90.0]
+
+    bermuda_advert._update_filtered_rssi(-70.0, sample_stamp=100.0)
+
+    assert bermuda_advert.rssi_window_packet_count == 4
+    assert bermuda_advert.rssi_window_median == pytest.approx(-70.0)
+    assert bermuda_advert.rssi_dispersion == pytest.approx(0.0)
+
+
+def test_stationary_window_keeps_more_history_than_moving(bermuda_advert, mock_parent_device):
+    """Stationary mode should aggregate over a longer time horizon than moving mode."""
+    bermuda_advert.rssi_filtered = -70.0
+    bermuda_advert.hist_rssi_adjusted = [-68.0, -69.0, -70.0]
+    bermuda_advert.hist_rssi_filtered = [-68.0, -69.0, -70.0]
+    bermuda_advert.hist_stamp = [96.0, 95.0, 94.0]
+
+    mock_parent_device.get_mobility_type.return_value = "moving"
+    bermuda_advert._update_filtered_rssi(-70.0, sample_stamp=100.0)
+    moving_count = bermuda_advert.rssi_window_packet_count
+
+    bermuda_advert.rssi_filtered = -70.0
+    bermuda_advert.hist_rssi_adjusted = [-68.0, -69.0, -70.0]
+    bermuda_advert.hist_rssi_filtered = [-68.0, -69.0, -70.0]
+    bermuda_advert.hist_stamp = [96.0, 95.0, 94.0]
+
+    mock_parent_device.get_mobility_type.return_value = "stationary"
+    bermuda_advert._update_filtered_rssi(-70.0, sample_stamp=100.0)
+    stationary_count = bermuda_advert.rssi_window_packet_count
+
+    assert stationary_count > moving_count
+
+
 def test_missing_learned_range_stays_unavailable(bermuda_advert, mock_coordinator):
     """Without a learned sample-derived range, Bermuda should not fall back to RSSI math."""
     mock_coordinator.estimate_sampled_range.return_value = None

@@ -1607,6 +1607,13 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         return math.exp(exponent)
 
     @staticmethod
+    def _trilat_age_sigma_multiplier(advert_age_s: float) -> float:
+        """Softly inflate anchor uncertainty as the underlying advert gets older."""
+        if advert_age_s <= 0.5:
+            return 1.0
+        return 1.0 + min(2.0, math.sqrt(max(0.0, advert_age_s - 0.5) / 4.0))
+
+    @staticmethod
     def _trilat_confidence_band(score: float) -> str:
         """Map a 0..10 confidence score into a coarse label."""
         if score >= 7.0:
@@ -2041,7 +2048,9 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             scanner_floor_id = advert.scanner_device.floor_id
             if scanner_floor_id is None:
                 continue
-            rssi_for_score = advert.rssi_filtered
+            rssi_for_score = getattr(advert, "rssi_window_median", None)
+            if rssi_for_score is None:
+                rssi_for_score = advert.rssi_filtered
             if rssi_for_score is None and advert.rssi is not None:
                 rssi_for_score = advert.rssi + advert.conf_rssi_offset
             if rssi_for_score is None:
@@ -2176,6 +2185,8 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 continue
             sigma_m = getattr(advert, "rssi_distance_sigma_m", None)
             effective_sigma_m = float(sigma_m) if sigma_m is not None else self._TRILAT_DEFAULT_ANCHOR_SIGMA_M
+            advert_age_s = max(0.0, nowstamp - advert.stamp)
+            effective_sigma_m *= self._trilat_age_sigma_multiplier(advert_age_s)
 
             if advert.trilat_range_ewma_m is None:
                 advert.trilat_range_ewma_m = advert.rssi_distance_raw

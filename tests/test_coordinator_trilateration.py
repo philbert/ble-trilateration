@@ -309,6 +309,13 @@ def test_missing_sigma_anchor_uses_default_uncertainty():
     assert device.trilat_anchor_count == 3
 
 
+def test_trilat_age_sigma_multiplier_grows_for_older_adverts():
+    """Older-but-not-stale adverts should be downweighted by inflating sigma."""
+    assert BermudaDataUpdateCoordinator._trilat_age_sigma_multiplier(0.1) == 1.0
+    assert BermudaDataUpdateCoordinator._trilat_age_sigma_multiplier(3.0) > 1.0
+    assert BermudaDataUpdateCoordinator._trilat_age_sigma_multiplier(8.0) > BermudaDataUpdateCoordinator._trilat_age_sigma_multiplier(3.0)
+
+
 def test_area_from_trilat_holds_previous_room_on_weak_evidence():
     """Weak room evidence should hold the last stable room instead of switching to Unknown."""
     coordinator = _make_coordinator()

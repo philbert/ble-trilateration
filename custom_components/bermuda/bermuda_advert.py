@@ -15,6 +15,7 @@ to the combination of the scanner and the device it is reporting.
 from __future__ import annotations
 
 import statistics
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final
 
 from bluetooth_data_tools import monotonic_time_coarse
@@ -199,7 +200,7 @@ class BermudaAdvert(dict):
                     self._device.name_bt_local_name = nametuplet[0]
                     self._device.make_name()
 
-            self._update_raw_distance(reading_is_new=True)
+            self._update_raw_distance(reading_is_new=True, sample_stamp=new_stamp)
 
             # Note: this is not actually the interval between adverts,
             # but rather a function of our UPDATE_INTERVAL plus the packet
@@ -278,15 +279,33 @@ class BermudaAdvert(dict):
         # Finally, save the new advert timestamp.
         self.new_stamp = new_stamp
 
-    def _rssi_filter_policy(self) -> tuple[int, float, float]:
-        """
-        Return mobility-aware RSSI filter parameters.
+    @dataclass(frozen=True)
+    class _RssiFilterPolicy:
+        """Parameters for mobility-aware, time-windowed RSSI aggregation."""
 
-        tuple: (window_samples, ema_alpha, base_outlier_threshold_db)
-        """
+        target_window_s: float
+        max_window_s: float
+        min_packets: int
+        ema_alpha: float
+        outlier_db: float
+
+    def _rssi_filter_policy(self) -> _RssiFilterPolicy:
+        """Return mobility-aware RSSI filter parameters."""
         if self._device.get_mobility_type() == "stationary":
-            return (13, 0.22, 12.0)
-        return (9, 0.45, 15.0)
+            return self._RssiFilterPolicy(
+                target_window_s=6.0,
+                max_window_s=8.0,
+                min_packets=5,
+                ema_alpha=0.18,
+                outlier_db=10.0,
+            )
+        return self._RssiFilterPolicy(
+            target_window_s=3.0,
+            max_window_s=4.5,
+            min_packets=4,
+            ema_alpha=0.35,
+            outlier_db=12.0,
+        )
 
     def _debug_this_device(self) -> bool:
         """Return true when this advert belongs to a configured debug target."""
@@ -310,21 +329,70 @@ class BermudaAdvert(dict):
         deviations = [abs(v - _center) for v in values]
         return statistics.median(deviations) if len(deviations) > 0 else 0.0
 
-    def _update_filtered_rssi(self, adjusted_rssi: float) -> float:
+    @staticmethod
+    def _select_recent_window(
+        *,
+        history_values: list[float],
+        history_stamps: list[float],
+        reference_stamp: float,
+        target_window_s: float,
+        max_window_s: float,
+        min_packets: int,
+        head_value: float | None = None,
+    ) -> list[float]:
+        """Return recent samples inside an adaptive time window."""
+
+        def _collect(limit_s: float) -> list[float]:
+            values: list[float] = []
+            if head_value is not None:
+                values.append(head_value)
+            for value, stamp in zip(history_values, history_stamps, strict=False):
+                age_s = max(0.0, reference_stamp - float(stamp))
+                if age_s <= limit_s:
+                    values.append(float(value))
+                    continue
+                break
+            return values
+
+        selected = _collect(target_window_s)
+        if len(selected) < min_packets and max_window_s > target_window_s:
+            selected = _collect(max_window_s)
+        if (
+            len(selected) < min_packets
+            and len(history_values) > 0
+            and len(history_stamps) < min(len(history_values), min_packets)
+        ):
+            fallback: list[float] = []
+            if head_value is not None:
+                fallback.append(head_value)
+            fallback.extend(float(value) for value in history_values[: max(0, min_packets - len(fallback))])
+            if len(fallback) > len(selected):
+                selected = fallback
+        return selected
+
+    def _update_filtered_rssi(self, adjusted_rssi: float, sample_stamp: float | None = None) -> float:
         """
         Apply robust outlier handling + EMA and update dispersion metrics.
 
         adjusted_rssi is the RSSI series used for filtering and variance estimation.
         """
-        window, alpha, outlier_db = self._rssi_filter_policy()
-        prior = self.hist_rssi_adjusted[:window]
+        policy = self._rssi_filter_policy()
+        reference_stamp = sample_stamp or self.new_stamp or self.stamp or monotonic_time_coarse()
+        prior = self._select_recent_window(
+            history_values=self.hist_rssi_adjusted,
+            history_stamps=self.hist_stamp,
+            reference_stamp=reference_stamp,
+            target_window_s=policy.target_window_s,
+            max_window_s=policy.max_window_s,
+            min_packets=policy.min_packets,
+        )
         sample = adjusted_rssi
 
         if len(prior) >= 3:
             med = statistics.median(prior)
             mad = self._median_abs_deviation(prior, med)
             robust_sigma = max(mad * 1.4826, 1.0)
-            threshold = max(outlier_db, robust_sigma * 3.0)
+            threshold = max(policy.outlier_db, robust_sigma * 3.0)
             if abs(sample - med) > threshold:
                 if self._debug_this_device():
                     _LOGGER_TARGET.debug(
@@ -343,26 +411,36 @@ class BermudaAdvert(dict):
         if self.rssi_filtered is None:
             self.rssi_filtered = sample
         else:
-            self.rssi_filtered = (alpha * sample) + ((1 - alpha) * self.rssi_filtered)
+            self.rssi_filtered = (policy.ema_alpha * sample) + ((1 - policy.ema_alpha) * self.rssi_filtered)
+
+        adjusted_window = self._select_recent_window(
+            history_values=self.hist_rssi_adjusted,
+            history_stamps=self.hist_stamp,
+            reference_stamp=reference_stamp,
+            target_window_s=policy.target_window_s,
+            max_window_s=policy.max_window_s,
+            min_packets=policy.min_packets,
+            head_value=sample,
+        )
+        self.rssi_window_packet_count = len(adjusted_window)
+        self.rssi_window_median = statistics.median(adjusted_window) if adjusted_window else None
+
+        if len(adjusted_window) >= 3:
+            self.rssi_dispersion = self._median_abs_deviation(
+                adjusted_window,
+                self.rssi_window_median,
+            ) * 1.4826
+        else:
+            self.rssi_dispersion = 0.0
 
         self.hist_rssi_adjusted.insert(0, sample)
         self.hist_rssi_filtered.insert(0, self.rssi_filtered)
         del self.hist_rssi_adjusted[HIST_KEEP_COUNT:]
         del self.hist_rssi_filtered[HIST_KEEP_COUNT:]
 
-        adjusted_window = self.hist_rssi_adjusted[:window]
-        self.rssi_window_packet_count = len(adjusted_window)
-        self.rssi_window_median = statistics.median(adjusted_window) if adjusted_window else None
-
-        filt_window = self.hist_rssi_filtered[:window]
-        if len(filt_window) >= 3:
-            self.rssi_dispersion = self._median_abs_deviation(filt_window) * 1.4826
-        else:
-            self.rssi_dispersion = 0.0
-
         return self.rssi_filtered
 
-    def _update_raw_distance(self, reading_is_new=True) -> float | None:
+    def _update_raw_distance(self, reading_is_new=True, sample_stamp: float | None = None) -> float | None:
         """
         Converts rssi to raw distance and updates history stack and
         returns the new raw distance.
@@ -372,7 +450,7 @@ class BermudaAdvert(dict):
         """
         raw_rssi = float(self.rssi or -127.0)
         self.rssi_adjusted_raw = raw_rssi
-        filtered_rssi = self._update_filtered_rssi(raw_rssi)
+        filtered_rssi = self._update_filtered_rssi(raw_rssi, sample_stamp=sample_stamp)
 
         estimate_rssi = self.rssi_window_median if self.rssi_window_median is not None else filtered_rssi
         estimate = self._coordinator.estimate_sampled_range(
