@@ -5,6 +5,7 @@ from __future__ import annotations
 from unittest.mock import patch
 
 from homeassistant.config_entries import ConfigEntryState
+from homeassistant.components.sensor.const import SensorStateClass
 from homeassistant.helpers import entity_registry as er
 from homeassistant.setup import async_setup_component
 from pytest_homeassistant_custom_component.common import MockConfigEntry
@@ -12,6 +13,10 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 from custom_components.bermuda.bermuda_device import BermudaDevice
 from custom_components.bermuda.const import DOMAIN, NAME
 from custom_components.bermuda.sensor import (
+    BermudaSensorPositionConfidence,
+    BermudaSensorScannerAdvertStatus,
+    BermudaSensorTrackedDeviceAdvertStatus,
+    BermudaSensorTrackingConfidence,
     BermudaSensorHorizontalSpeed,
     BermudaSensorTrilatAnchorCount,
     BermudaSensorVerticalSpeed,
@@ -83,6 +88,72 @@ async def test_trilat_speed_sensors_expose_filtered_motion(hass) -> None:
 
     assert horizontal.native_value == 1.235
     assert vertical.native_value == 0.457
+
+
+async def test_trilat_confidence_sensors_expose_numeric_confidence(hass) -> None:
+    """Tracked devices should expose raw and tracking confidence as numeric sensors."""
+    entry = await setup_integration(hass)
+    coordinator = entry.runtime_data.coordinator
+
+    device = BermudaDevice("AA:BB:CC:DD:EE:67", coordinator)
+    device.create_sensor = True
+    device.trilat_confidence = 2.234
+    device.trilat_confidence_level = "low"
+    device.trilat_tracking_confidence = 6.789
+    device.trilat_tracking_confidence_level = "medium"
+    coordinator.devices[device.address] = device
+
+    raw_confidence = BermudaSensorPositionConfidence(coordinator, entry, device.address)
+    tracking_confidence = BermudaSensorTrackingConfidence(coordinator, entry, device.address)
+
+    assert raw_confidence.native_value == 2.2
+    assert raw_confidence.state_class == SensorStateClass.MEASUREMENT
+    assert tracking_confidence.native_value == 6.8
+    assert tracking_confidence.state_class == SensorStateClass.MEASUREMENT
+
+
+async def test_per_scanner_ble_status_sensors_expose_structured_status(hass) -> None:
+    """Tracked-device and scanner-side BLE status sensors should expose per-pair status."""
+    entry = await setup_integration(hass)
+    coordinator = entry.runtime_data.coordinator
+
+    tracked = BermudaDevice("AA:BB:CC:DD:EE:68", coordinator)
+    tracked.create_sensor = True
+    tracked.trilat_anchor_statuses = {
+        "aa:bb:cc:dd:ee:09": {
+            "scanner_address": "AA:BB:CC:DD:EE:09",
+            "scanner_name": "Kitchen Proxy",
+            "status": "rejected_wrong_floor",
+            "sync_state": "drifting",
+            "affects_position": False,
+        }
+    }
+    coordinator.devices[tracked.address] = tracked
+
+    scanner = _create_scanner(coordinator, "AA:BB:CC:DD:EE:09")
+    scanner.name = "Kitchen Proxy"
+
+    tracked_side = BermudaSensorScannerAdvertStatus(coordinator, entry, tracked.address, scanner.address)
+    scanner_side = BermudaSensorTrackedDeviceAdvertStatus(coordinator, entry, tracked.address, scanner.address)
+
+    assert tracked_side.native_value == "rejected_wrong_floor"
+    assert tracked_side.extra_state_attributes == {
+        "scanner_address": "AA:BB:CC:DD:EE:09",
+        "scanner_name": "Kitchen Proxy",
+        "status": "rejected_wrong_floor",
+        "sync_state": "drifting",
+        "affects_position": False,
+    }
+    assert scanner_side.native_value == "rejected_wrong_floor"
+    assert scanner_side.extra_state_attributes == {
+        "scanner_address": "AA:BB:CC:DD:EE:09",
+        "scanner_name": "Kitchen Proxy",
+        "status": "rejected_wrong_floor",
+        "sync_state": "drifting",
+        "affects_position": False,
+        "tracked_device_name": tracked.name,
+        "tracked_device_address": tracked.address,
+    }
 
 
 async def test_trilat_anchor_count_sensor_exposes_anchor_status_lines(hass) -> None:

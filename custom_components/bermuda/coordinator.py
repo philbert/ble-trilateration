@@ -1630,6 +1630,12 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         device.trilat_confidence = clamped
         device.trilat_confidence_level = self._trilat_confidence_band(clamped)
 
+    def _set_tracking_confidence(self, device: BermudaDevice, score: float) -> None:
+        """Store tracked-position confidence on the device."""
+        clamped = round(max(0.0, min(10.0, score)), 1)
+        device.trilat_tracking_confidence = clamped
+        device.trilat_tracking_confidence_level = self._trilat_confidence_band(clamped)
+
     def _compute_trilat_confidence(
         self,
         anchor_count: int,
@@ -1651,6 +1657,52 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         if floor_ambiguous:
             score -= 2.0
         return score
+
+    def _compute_tracking_confidence(
+        self,
+        *,
+        raw_score: float,
+        state: TrilatDecisionState,
+        mobility_type: str,
+        used_prior: bool,
+        mean_anchor_range_delta_m: float | None,
+        floor_ambiguous: bool = False,
+    ) -> float:
+        """Estimate confidence in the filtered tracked position rather than the raw solve."""
+        raw_component = 0.45 * max(0.0, min(10.0, raw_score))
+
+        horizontal_speed = math.hypot(state.velocity_x_mps, state.velocity_y_mps)
+        vertical_speed = abs(state.velocity_z_mps)
+
+        if mobility_type == MOBILITY_STATIONARY:
+            horizontal_ref = 0.35
+            vertical_ref = 0.15
+        else:
+            horizontal_ref = 1.50
+            vertical_ref = 0.60
+
+        horizontal_stability = max(0.0, 1.0 - min(1.0, horizontal_speed / horizontal_ref))
+        vertical_stability = max(0.0, 1.0 - min(1.0, vertical_speed / vertical_ref))
+        stability_component = (3.2 * horizontal_stability) + (1.3 * vertical_stability)
+
+        continuity_component = 1.8
+        if mean_anchor_range_delta_m is not None:
+            continuity_component *= max(0.0, 1.0 - min(1.0, mean_anchor_range_delta_m / 3.0))
+
+        prior_component = 1.0 if used_prior else 0.0
+        score = raw_component + stability_component + continuity_component + prior_component
+        if floor_ambiguous:
+            score -= 1.0
+        return score
+
+    @staticmethod
+    def _format_anchor_status_entry(entry: dict[str, object]) -> str:
+        """Render one scanner advert-status line for HA attributes."""
+        line = f"{entry['scanner_name']}: {entry['status']}"
+        sync_state = entry.get("sync_state")
+        if sync_state not in (None, "synchronized", "local", "not_scanner"):
+            line += f" (sync={sync_state})"
+        return line
 
     @staticmethod
     def _trilat_mobility_policy(mobility_type: str) -> TrilatMobilityPolicy:
@@ -2077,15 +2129,19 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             device.name_bt_serviceinfo,
         )
 
-        def _anchor_status_lines(selected_floor_id: str | None = None) -> list[str]:
-            lines: list[str] = []
-            for advert in sorted(
-                latest.values(),
-                key=lambda ad: (getattr(ad.scanner_device, "name", ad.scanner_address), ad.scanner_address),
-            ):
-                scanner = advert.scanner_device
+        def _anchor_status_entries(selected_floor_id: str | None = None) -> list[dict[str, object]]:
+            entries: list[dict[str, object]] = []
+            for scanner in sorted(self._scanners, key=lambda sc: (sc.name, sc.address)):
+                advert = latest.get(scanner.address)
                 scanner_name = getattr(scanner, "name", scanner.address)
-                if advert.stamp < nowstamp - DISTANCE_TIMEOUT:
+                sync_state = (
+                    scanner.timestamp_sync_diagnostics().get("state")
+                    if getattr(scanner, "is_scanner", False)
+                    else None
+                )
+                if advert is None:
+                    status = "no_advert"
+                elif advert.stamp < nowstamp - DISTANCE_TIMEOUT:
                     status = "rejected_stale"
                 elif selected_floor_id is not None and scanner.floor_id != selected_floor_id:
                     status = "rejected_wrong_floor"
@@ -2098,21 +2154,28 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                     status = "rejected_no_range"
                 else:
                     status = "valid"
-
-                sync_state = (
-                    scanner.timestamp_sync_diagnostics().get("state")
-                    if getattr(scanner, "is_scanner", False)
-                    else None
+                entries.append(
+                    {
+                        "scanner_address": scanner.address,
+                        "scanner_name": scanner_name,
+                        "status": status,
+                        "sync_state": sync_state,
+                        "affects_position": status == "valid",
+                    }
                 )
-                line = f"{scanner_name}: {status}"
-                if sync_state not in (None, "synchronized", "local", "not_scanner"):
-                    line += f" (sync={sync_state})"
-                lines.append(line)
-            return lines
+            return entries
+
+        def _apply_anchor_status_entries(selected_floor_id: str | None = None) -> None:
+            entries = _anchor_status_entries(selected_floor_id)
+            device.trilat_anchor_statuses = {
+                str(entry["scanner_address"]).lower(): entry
+                for entry in entries
+            }
+            device.trilat_anchor_diagnostics = [self._format_anchor_status_entry(entry) for entry in entries]
 
         fresh_any = any(advert.stamp >= nowstamp - DISTANCE_TIMEOUT for advert in latest.values())
         if not fresh_any:
-            device.trilat_anchor_diagnostics = _anchor_status_lines()
+            _apply_anchor_status_entries()
             device.set_trilat_unknown(
                 "stale_inputs",
                 floor_id=state.floor_id,
@@ -2121,6 +2184,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             )
             state.last_status = "unknown"
             self._set_trilat_confidence(device, 0.0)
+            self._set_tracking_confidence(device, 0.0)
             if _debug_this_device:
                 _LOGGER_TARGET_SPAM_LESS.debug(
                     f"trilat_unknown:{device.address}:stale_inputs",
@@ -2147,10 +2211,11 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             evidence_inputs.append((scanner_floor_id, rssi_for_score))
 
         if not evidence_inputs:
-            device.trilat_anchor_diagnostics = _anchor_status_lines()
+            _apply_anchor_status_entries()
             device.set_trilat_unknown("ambiguous_floor", floor_id=state.floor_id, floor_name=self._resolve_floor_name(state.floor_id))
             state.last_status = "unknown"
             self._set_trilat_confidence(device, 0.0)
+            self._set_tracking_confidence(device, 0.0)
             return
 
         floors = sorted({floor_id for floor_id, _rssi in evidence_inputs})
@@ -2237,7 +2302,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
 
         selected_floor_id = state.floor_id or best_floor_id
         selected_floor_name = self._resolve_floor_name(selected_floor_id)
-        device.trilat_anchor_diagnostics = _anchor_status_lines(selected_floor_id)
+        _apply_anchor_status_entries(selected_floor_id)
 
         if prev_floor_id is not None and selected_floor_id != prev_floor_id:
             for advert in latest.values():
@@ -2322,7 +2387,19 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             )
             device.trilat_status = "low_confidence"
             device.trilat_reason = "insufficient_anchors_low_confidence"
-            self._set_trilat_confidence(device, max(0.5, float(anchor_count) * 0.8))
+            raw_confidence = max(0.5, float(anchor_count) * 0.8)
+            self._set_trilat_confidence(device, raw_confidence)
+            self._set_tracking_confidence(
+                device,
+                self._compute_tracking_confidence(
+                    raw_score=raw_confidence,
+                    state=state,
+                    mobility_type=device.get_mobility_type(),
+                    used_prior=False,
+                    mean_anchor_range_delta_m=None,
+                    floor_ambiguous=floor_ambiguous_persisted,
+                ),
+            )
             state.last_mean_sigma_m = mean_sigma_m
             state.last_status = "low_confidence"
             if _debug_this_device:
@@ -2379,14 +2456,23 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 residual_m=state.last_residual_m,
             )
             device.trilat_reason = "skip_unchanged_inputs"
-            self._set_trilat_confidence(
+            raw_confidence = self._compute_trilat_confidence(
+                anchor_count=anchor_count,
+                residual_m=state.last_residual_m,
+                solver_dimension=state.last_solver_dimension,
+                floor_ambiguous=floor_ambiguous_persisted,
+                mean_sigma_m=state.last_mean_sigma_m,
+            )
+            self._set_trilat_confidence(device, raw_confidence)
+            self._set_tracking_confidence(
                 device,
-                self._compute_trilat_confidence(
-                    anchor_count=anchor_count,
-                    residual_m=state.last_residual_m,
-                    solver_dimension=state.last_solver_dimension,
+                self._compute_tracking_confidence(
+                    raw_score=raw_confidence,
+                    state=state,
+                    mobility_type=device.get_mobility_type(),
+                    used_prior=False,
+                    mean_anchor_range_delta_m=mean_anchor_range_delta_m,
                     floor_ambiguous=floor_ambiguous_persisted,
-                    mean_sigma_m=state.last_mean_sigma_m,
                 ),
             )
             self._set_trilat_speed_diagnostics(device, state)
@@ -2430,6 +2516,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                     )
             if solve_prior is not None and (mean_anchor_range_delta_m is None or mean_anchor_range_delta_m <= self._TRILAT_MAX_RESIDUAL_M):
                 initial_guess_3d = (solve_prior.x_m, solve_prior.y_m, solve_prior.z_m)
+            used_prior = solve_prior is not None
             solve_result = solve_3d_soft_l1(anchors, initial_guess=initial_guess_3d, prior=solve_prior)
         else:
             centroid = anchor_centroid(anchors)
@@ -2451,6 +2538,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                     initial_guess_2d = state.last_solution_xy
             if solve_prior is not None and (mean_anchor_range_delta_m is None or mean_anchor_range_delta_m <= self._TRILAT_MAX_RESIDUAL_M):
                 initial_guess_2d = (solve_prior.x_m, solve_prior.y_m)
+            used_prior = solve_prior is not None
             solve_result = solve_2d_soft_l1(anchors, initial_guess=initial_guess_2d, prior=solve_prior)
 
         state.last_anchor_ids = anchor_ids
@@ -2505,14 +2593,23 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             )
             device.trilat_status = "low_confidence"
             device.trilat_reason = "high_residual_low_confidence"
-            self._set_trilat_confidence(
+            raw_confidence = self._compute_trilat_confidence(
+                anchor_count=anchor_count,
+                residual_m=max(fallback_residual, self._TRILAT_MAX_RESIDUAL_M),
+                solver_dimension=solver_dimension,
+                floor_ambiguous=floor_ambiguous_persisted,
+                mean_sigma_m=mean_sigma_m,
+            )
+            self._set_trilat_confidence(device, raw_confidence)
+            self._set_tracking_confidence(
                 device,
-                self._compute_trilat_confidence(
-                    anchor_count=anchor_count,
-                    residual_m=max(fallback_residual, self._TRILAT_MAX_RESIDUAL_M),
-                    solver_dimension=solver_dimension,
+                self._compute_tracking_confidence(
+                    raw_score=raw_confidence,
+                    state=state,
+                    mobility_type=device.get_mobility_type(),
+                    used_prior=used_prior,
+                    mean_anchor_range_delta_m=mean_anchor_range_delta_m,
                     floor_ambiguous=floor_ambiguous_persisted,
-                    mean_sigma_m=mean_sigma_m,
                 ),
             )
             self._set_trilat_speed_diagnostics(device, state)
@@ -2556,14 +2653,23 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         state.last_solution_z = filtered_z if solver_dimension == "3d" or filtered_z is not None else None
         state.last_residual_m = solve_result.residual_rms_m
         state.last_status = "ok"
-        self._set_trilat_confidence(
+        raw_confidence = self._compute_trilat_confidence(
+            anchor_count=anchor_count,
+            residual_m=solve_result.residual_rms_m,
+            solver_dimension=solver_dimension,
+            floor_ambiguous=floor_ambiguous_persisted,
+            mean_sigma_m=mean_sigma_m,
+        )
+        self._set_trilat_confidence(device, raw_confidence)
+        self._set_tracking_confidence(
             device,
-            self._compute_trilat_confidence(
-                anchor_count=anchor_count,
-                residual_m=solve_result.residual_rms_m,
-                solver_dimension=solver_dimension,
+            self._compute_tracking_confidence(
+                raw_score=raw_confidence,
+                state=state,
+                mobility_type=device.get_mobility_type(),
+                used_prior=used_prior,
+                mean_anchor_range_delta_m=mean_anchor_range_delta_m,
                 floor_ambiguous=floor_ambiguous_persisted,
-                mean_sigma_m=mean_sigma_m,
             ),
         )
         self._set_trilat_speed_diagnostics(device, state)
