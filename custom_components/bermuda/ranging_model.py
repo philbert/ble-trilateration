@@ -15,6 +15,10 @@ if TYPE_CHECKING:
 MIN_LAYOUT_TRAINING_ROWS = 5
 MIN_SCANNER_BIAS_ROWS = 3
 MIN_DEVICE_BIAS_ROWS = 3
+MIN_SCANNER_SLOPE_ROWS = 15
+MIN_SCANNER_SLOPE_SPAN_M = 2.0
+MIN_SCANNER_SLOPE_DISTANCE_BUCKETS = 3
+SCANNER_SLOPE_BUCKET_SIZE_M = 1.5
 MIN_DISTANCE_M = 0.1
 MAX_DISTANCE_M = 100.0
 
@@ -48,6 +52,9 @@ class _LayoutModel:
     scanner_bias_db: dict[str, float]
     device_bias_db: dict[str, float]
     scanner_rssi_rmse_db: dict[str, float]
+    scanner_slope_intercept_db: dict[str, float]
+    scanner_slope_db_per_log10_m: dict[str, float]
+    scanner_path_loss_exponent: dict[str, float]
     global_rssi_rmse_db: float
     training_rows: int
 
@@ -128,27 +135,46 @@ class BermudaRangingModel:
         model = self._models.get(layout_hash)
         if model is None:
             return None
-        slope = model.slope_db_per_log10_m
-        if abs(slope) < 1e-9 or model.path_loss_exponent <= 0:
+        scanner_key = scanner_address.lower()
+        device_bias_db = model.device_bias_db.get(device_id, 0.0) if device_id is not None else 0.0
+
+        if scanner_key in model.scanner_slope_db_per_log10_m:
+            intercept_dbm = model.scanner_slope_intercept_db[scanner_key]
+            slope = model.scanner_slope_db_per_log10_m[scanner_key]
+            path_loss_exponent = model.scanner_path_loss_exponent[scanner_key]
+            observed_rssi = float(filtered_rssi) - device_bias_db
+        else:
+            slope = model.slope_db_per_log10_m
+            path_loss_exponent = model.path_loss_exponent
+            intercept_dbm = model.intercept_dbm + model.scanner_bias_db.get(scanner_key, 0.0) + device_bias_db
+            observed_rssi = float(filtered_rssi)
+
+        if abs(slope) < 1e-9 or path_loss_exponent <= 0:
             return None
 
-        bias_db = model.scanner_bias_db.get(scanner_address.lower(), 0.0)
-        if device_id is not None:
-            bias_db += model.device_bias_db.get(device_id, 0.0)
-        log10_distance = (float(filtered_rssi) - model.intercept_dbm - bias_db) / slope
+        log10_distance = (observed_rssi - intercept_dbm) / slope
         range_m = 10 ** log10_distance
         range_m = max(MIN_DISTANCE_M, min(range_m, MAX_DISTANCE_M))
 
-        sigma_rssi = model.scanner_rssi_rmse_db.get(scanner_address.lower(), model.global_rssi_rmse_db)
+        sigma_rssi = model.scanner_rssi_rmse_db.get(scanner_key, model.global_rssi_rmse_db)
         if live_rssi_dispersion is not None:
-            sigma_rssi = math.sqrt((sigma_rssi * sigma_rssi) + (float(live_rssi_dispersion) ** 2))
-        if live_packet_count is not None and live_packet_count > 0:
+            # Live-window dispersion is a direct multipath/noise signal, but the
+            # calibration RMSE already captures some baseline spread. Weight the
+            # live component slightly lower so calm windows are rewarded while
+            # noisy windows still widen the likelihood band quickly.
+            live_dispersion = max(0.0, float(live_rssi_dispersion))
+            sigma_rssi = math.sqrt((sigma_rssi * sigma_rssi) + ((0.8 * live_dispersion) ** 2))
+        if live_packet_count is None:
+            sigma_rssi *= 1.35
+        elif live_packet_count > 0:
             packet_count = max(1, int(live_packet_count))
-            packet_penalty = math.sqrt(max(1.0, 5.0 / float(packet_count)))
-            sigma_rssi *= packet_penalty
+            # More packets should earn a tighter estimate, but cap the reward
+            # to avoid overconfidence from bursty scanners.
+            packet_factor = math.sqrt(5.0 / float(packet_count))
+            sigma_rssi *= max(0.75, min(2.5, packet_factor))
         if timestamp_health_penalty > 0.0:
             sigma_rssi *= 1.0 + float(timestamp_health_penalty)
-        sigma_m = sigma_rssi * range_m * math.log(10) / (10 * model.path_loss_exponent)
+        sigma_m = sigma_rssi * range_m * math.log(10) / (10 * path_loss_exponent)
         sigma_m = max(0.001, sigma_m)
 
         return RangeEstimate(range_m=range_m, sigma_m=sigma_m, source="learned")
@@ -225,6 +251,47 @@ class BermudaRangingModel:
                     np.sqrt(np.mean(np.square(np.asarray(scanner_residuals, dtype=float))))
                 )
 
+        scanner_slope_intercept_db: dict[str, float] = {}
+        scanner_slope_db_per_log10_m: dict[str, float] = {}
+        scanner_path_loss_exponent: dict[str, float] = {}
+        for scanner_address, count in scanner_counts.items():
+            if count < MIN_SCANNER_SLOPE_ROWS:
+                continue
+            scanner_rows = [row for row in rows if row.scanner_address == scanner_address]
+            if len(scanner_rows) < MIN_SCANNER_SLOPE_ROWS:
+                continue
+            distance_values = [row.distance_m for row in scanner_rows]
+            if (max(distance_values) - min(distance_values)) < MIN_SCANNER_SLOPE_SPAN_M:
+                continue
+            bucket_count = len(
+                {
+                    int(math.floor(max(row.distance_m, MIN_DISTANCE_M) / SCANNER_SLOPE_BUCKET_SIZE_M))
+                    for row in scanner_rows
+                }
+            )
+            if bucket_count < MIN_SCANNER_SLOPE_DISTANCE_BUCKETS:
+                continue
+
+            sub_design = np.asarray(
+                [[1.0, math.log10(max(row.distance_m, MIN_DISTANCE_M))] for row in scanner_rows],
+                dtype=float,
+            )
+            sub_observed = np.asarray(
+                [
+                    row.rssi_dbm - device_bias_db.get(row.device_id, 0.0)
+                    for row in scanner_rows
+                ],
+                dtype=float,
+            )
+            sub_coeffs, *_subrest = np.linalg.lstsq(sub_design, sub_observed, rcond=None)
+            scanner_intercept_dbm = float(sub_coeffs[0])
+            scanner_slope = float(sub_coeffs[1])
+            if scanner_slope >= -1e-6:
+                continue
+            scanner_slope_intercept_db[scanner_address] = scanner_intercept_dbm
+            scanner_slope_db_per_log10_m[scanner_address] = scanner_slope
+            scanner_path_loss_exponent[scanner_address] = max(0.01, -scanner_slope / 10.0)
+
         return _LayoutModel(
             intercept_dbm=intercept_dbm,
             slope_db_per_log10_m=slope_db_per_log10_m,
@@ -232,6 +299,9 @@ class BermudaRangingModel:
             scanner_bias_db=scanner_bias_db,
             device_bias_db=device_bias_db,
             scanner_rssi_rmse_db=scanner_rssi_rmse_db,
+            scanner_slope_intercept_db=scanner_slope_intercept_db,
+            scanner_slope_db_per_log10_m=scanner_slope_db_per_log10_m,
+            scanner_path_loss_exponent=scanner_path_loss_exponent,
             global_rssi_rmse_db=global_rssi_rmse_db,
             training_rows=len(rows),
         )
@@ -247,4 +317,5 @@ class BermudaRangingModel:
             "path_loss_exponent": model.path_loss_exponent,
             "scanner_bias_count": len(model.scanner_bias_db),
             "device_bias_count": len(model.device_bias_db),
+            "scanner_slope_count": len(model.scanner_slope_db_per_log10_m),
         }
