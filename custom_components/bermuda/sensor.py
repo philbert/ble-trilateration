@@ -87,6 +87,7 @@ async def async_setup_entry(
             entities.append(BermudaSensorTrilatFloor(coordinator, entry, address))
             entities.append(BermudaSensorTrilatAnchorCount(coordinator, entry, address))
             entities.append(BermudaSensorPositionConfidence(coordinator, entry, address))
+            entities.append(BermudaSensorTrackingConfidence(coordinator, entry, address))
             entities.append(BermudaSensorHorizontalSpeed(coordinator, entry, address))
             entities.append(BermudaSensorVerticalSpeed(coordinator, entry, address))
 
@@ -132,6 +133,8 @@ async def async_setup_entry(
                     )
                     entities.append(BermudaSensorScannerRange(coordinator, entry, address, scanner))
                     entities.append(BermudaSensorScannerRangeRaw(coordinator, entry, address, scanner))
+                    entities.append(BermudaSensorScannerAdvertStatus(coordinator, entry, address, scanner))
+                    entities.append(BermudaSensorTrackedDeviceAdvertStatus(coordinator, entry, address, scanner))
                     created_entry = created_scanners.setdefault(scanner, [])
                     created_entry.append(address)
         # _LOGGER.debug("Sensor received new_device signal for %s", address)
@@ -440,6 +443,100 @@ class BermudaSensorScannerRangeRaw(BermudaSensorScannerRange):
         return None
 
 
+class BermudaSensorScannerAdvertStatus(BermudaSensor):
+    """Tracked-device-side status of how a scanner advert was treated."""
+
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(
+        self,
+        coordinator: BermudaDataUpdateCoordinator,
+        config_entry,
+        address: str,
+        scanner_address: str,
+    ) -> None:
+        super().__init__(coordinator, config_entry, address)
+        self._scanner = coordinator.devices[scanner_address]
+
+    def _status_entry(self) -> Mapping[str, Any] | None:
+        statuses = getattr(self._device, "trilat_anchor_statuses", {})
+        return statuses.get(self._scanner.address.lower())
+
+    @property
+    def unique_id(self):
+        return f"{self._device.unique_id}_{self._scanner.address_wifi_mac or self._scanner.address}_ble_status"
+
+    @property
+    def name(self):
+        return f"BLE Status to {self._scanner.name}"
+
+    @property
+    def native_value(self):
+        status_entry = self._status_entry()
+        if status_entry is None:
+            return "no_advert"
+        return status_entry.get("status")
+
+    @property
+    def entity_registry_enabled_default(self) -> bool:
+        return True
+
+    @property
+    def extra_state_attributes(self) -> Mapping[str, Any] | None:
+        status_entry = dict(self._status_entry() or {})
+        status_entry.setdefault("scanner_name", self._scanner.name)
+        status_entry.setdefault("scanner_address", self._scanner.address)
+        return status_entry
+
+
+class BermudaSensorTrackedDeviceAdvertStatus(BermudaSensor):
+    """Scanner-side mirror of tracked-device advert handling status."""
+
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(
+        self,
+        coordinator: BermudaDataUpdateCoordinator,
+        config_entry,
+        tracked_address: str,
+        scanner_address: str,
+    ) -> None:
+        super().__init__(coordinator, config_entry, scanner_address)
+        self._tracked_device = coordinator.devices[tracked_address]
+
+    def _status_entry(self) -> Mapping[str, Any] | None:
+        statuses = getattr(self._tracked_device, "trilat_anchor_statuses", {})
+        return statuses.get(self._device.address.lower())
+
+    @property
+    def unique_id(self):
+        return f"{self._device.unique_id}_{self._tracked_device.unique_id}_tracked_ble_status"
+
+    @property
+    def name(self):
+        return f"{self._tracked_device.name} BLE Status"
+
+    @property
+    def native_value(self):
+        status_entry = self._status_entry()
+        if status_entry is None:
+            return "no_advert"
+        return status_entry.get("status")
+
+    @property
+    def entity_registry_enabled_default(self) -> bool:
+        return True
+
+    @property
+    def extra_state_attributes(self) -> Mapping[str, Any] | None:
+        status_entry = dict(self._status_entry() or {})
+        status_entry.setdefault("tracked_device_name", self._tracked_device.name)
+        status_entry.setdefault("tracked_device_address", self._tracked_device.address)
+        status_entry.setdefault("scanner_name", self._device.name)
+        status_entry.setdefault("scanner_address", self._device.address)
+        return status_entry
+
+
 class BermudaSensorAreaSwitchReason(BermudaSensor):
     """Sensor for area switch reason."""
 
@@ -620,8 +717,37 @@ class BermudaSensorPositionConfidence(BermudaSensor):
         return round(confidence, 1)
 
     @property
+    def state_class(self):
+        return SensorStateClass.MEASUREMENT
+
+    @property
+    def entity_registry_enabled_default(self) -> bool:
+        return True
+
+    @property
     def extra_state_attributes(self) -> Mapping[str, Any] | None:
         return {"level": getattr(self._device, "trilat_confidence_level", "low")}
+
+
+class BermudaSensorTrackingConfidence(BermudaSensorPositionConfidence):
+    """Diagnostic sensor for filtered tracked-position confidence."""
+
+    @property
+    def unique_id(self):
+        return f"{self._device.unique_id}_tracking_confidence"
+
+    @property
+    def name(self):
+        return "Tracking Confidence"
+
+    @property
+    def native_value(self):
+        confidence = getattr(self._device, "trilat_tracking_confidence", 0.0)
+        return round(confidence, 1)
+
+    @property
+    def extra_state_attributes(self) -> Mapping[str, Any] | None:
+        return {"level": getattr(self._device, "trilat_tracking_confidence_level", "low")}
 
 
 class BermudaSensorHorizontalSpeed(BermudaSensor):

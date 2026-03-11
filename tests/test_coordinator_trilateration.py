@@ -11,6 +11,11 @@ from custom_components.bermuda.coordinator import BermudaDataUpdateCoordinator
 from custom_components.bermuda.room_classifier import RoomClassification
 
 
+class _DummyScanner(SimpleNamespace):
+    def __hash__(self):
+        return hash(self.address)
+
+
 class _DummyDevice:
     def __init__(self, address: str, mobility_type: str = "moving"):
         self.address = address
@@ -136,14 +141,17 @@ def test_trilat_unknown_when_inputs_stale():
 
 def _make_scanner(coordinator, address, floor_id, x_m, y_m, z_m=None):
     """Helper: register a scanner device in the coordinator."""
-    sc = SimpleNamespace(
+    sc = _DummyScanner(
         address=address,
+        name=address,
         floor_id=floor_id,
         anchor_x_m=x_m,
         anchor_y_m=y_m,
         anchor_z_m=z_m,
+        is_scanner=False,
     )
     coordinator.devices[address] = sc
+    coordinator._scanners.add(sc)
     return sc
 
 
