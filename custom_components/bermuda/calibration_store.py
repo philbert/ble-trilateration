@@ -99,6 +99,16 @@ class BermudaCalibrationStore:
             await self._store.async_save(self._data)
         return removed
 
+    async def async_clear_room(self, room_area_id: str) -> int:
+        """Delete all samples for one room area id."""
+        await self.async_ensure_loaded()
+        kept = [sample for sample in self._data["samples"] if sample.get("room_area_id") != room_area_id]
+        removed = len(self._data["samples"]) - len(kept)
+        if removed:
+            self._data["samples"] = kept
+            await self._store.async_save(self._data)
+        return removed
+
     async def async_clear_anchor_layout(self, anchor_layout_hash: str) -> int:
         """Delete all samples tied to an anchor layout hash."""
         await self.async_ensure_loaded()

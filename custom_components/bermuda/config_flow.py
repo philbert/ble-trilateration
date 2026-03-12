@@ -271,6 +271,7 @@ class BermudaOptionsFlowHandler(OptionsFlowWithConfigEntry):
         if summary["sample_count"] > 0:
             menu_options["calibration_samples_delete_one"] = "Delete One Sample"
             menu_options["calibration_samples_clear_device"] = "Clear Samples For Device"
+            menu_options["calibration_samples_clear_room"] = "Clear Samples For Room"
             menu_options["calibration_samples_clear_current_layout"] = "Clear Samples For Current Anchor Layout"
             menu_options["calibration_samples_clear_all"] = "Clear All Samples"
 
@@ -342,6 +343,33 @@ class BermudaOptionsFlowHandler(OptionsFlowWithConfigEntry):
                 }
             ),
             description_placeholders={"summary": "Delete all saved calibration samples for one device."},
+        )
+
+    async def async_step_calibration_samples_clear_room(self, user_input=None):
+        """Delete all samples for one room."""
+        rooms = self.coordinator.calibration.get_room_samples()
+        options = [
+            SelectOptionDict(
+                value=room_area_id,
+                label=f"{details['name']} ({details['count']})",
+            )
+            for room_area_id, details in sorted(rooms.items(), key=lambda item: str(item[1]["name"]))
+        ]
+        if user_input is not None:
+            removed = await self.coordinator.calibration.async_clear_room(user_input["room_area_id"])
+            self._last_calibration_status = f"Deleted {removed} calibration sample(s) for the selected room."
+            return await self.async_step_calibration_samples()
+
+        return self.async_show_form(
+            step_id="calibration_samples_clear_room",
+            data_schema=vol.Schema(
+                {
+                    vol.Required("room_area_id"): SelectSelector(
+                        SelectSelectorConfig(options=options, multiple=False, mode=SelectSelectorMode.DROPDOWN)
+                    )
+                }
+            ),
+            description_placeholders={"summary": "Delete all saved calibration samples for one room."},
         )
 
     async def async_step_calibration_samples_clear_current_layout(self, user_input=None):

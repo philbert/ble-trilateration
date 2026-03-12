@@ -75,6 +75,85 @@ async def test_options_flow(hass: HomeAssistant, setup_bermuda_entry: MockConfig
     }
 
 
+async def test_calibration_samples_options_flow_clear_room(hass: HomeAssistant, setup_bermuda_entry: MockConfigEntry):
+    """Calibration samples flow should offer room clearing and delete samples for one room."""
+    coordinator = setup_bermuda_entry.runtime_data.coordinator
+    living = ar.async_get(hass).async_create("Living Room")
+    kitchen = ar.async_get(hass).async_create("Kitchen")
+
+    await coordinator.calibration_store.async_add_sample(
+        {
+            "id": "sample_living_1",
+            "created_at": "2026-03-06T12:00:00+00:00",
+            "device_id": "device_one",
+            "device_name": "Device One",
+            "device_address": "aa:bb:cc:dd:ee:01",
+            "room_area_id": living.id,
+            "room_name": living.name,
+            "position": {"x_m": 1.0, "y_m": 2.0, "z_m": 1.0},
+            "sample_radius_m": 1.0,
+            "anchor_layout_hash": coordinator.calibration.current_anchor_layout_hash,
+            "anchors": {},
+            "quality": {"status": "accepted", "eligible_anchor_count": 3, "reason": None},
+        }
+    )
+    await coordinator.calibration_store.async_add_sample(
+        {
+            "id": "sample_living_2",
+            "created_at": "2026-03-06T13:00:00+00:00",
+            "device_id": "device_one",
+            "device_name": "Device One",
+            "device_address": "aa:bb:cc:dd:ee:01",
+            "room_area_id": living.id,
+            "room_name": living.name,
+            "position": {"x_m": 2.0, "y_m": 3.0, "z_m": 1.0},
+            "sample_radius_m": 1.0,
+            "anchor_layout_hash": coordinator.calibration.current_anchor_layout_hash,
+            "anchors": {},
+            "quality": {"status": "accepted", "eligible_anchor_count": 3, "reason": None},
+        }
+    )
+    await coordinator.calibration_store.async_add_sample(
+        {
+            "id": "sample_kitchen_1",
+            "created_at": "2026-03-06T14:00:00+00:00",
+            "device_id": "device_one",
+            "device_name": "Device One",
+            "device_address": "aa:bb:cc:dd:ee:01",
+            "room_area_id": kitchen.id,
+            "room_name": kitchen.name,
+            "position": {"x_m": 4.0, "y_m": 5.0, "z_m": 1.0},
+            "sample_radius_m": 1.0,
+            "anchor_layout_hash": coordinator.calibration.current_anchor_layout_hash,
+            "anchors": {},
+            "quality": {"status": "accepted", "eligible_anchor_count": 3, "reason": None},
+        }
+    )
+    result = await hass.config_entries.options.async_init(setup_bermuda_entry.entry_id)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], user_input={"next_step_id": "calibration_samples"}
+    )
+    assert result["type"] == FlowResultType.MENU
+    assert result["step_id"] == "calibration_samples"
+    assert "calibration_samples_clear_room" in result["menu_options"]
+
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], user_input={"next_step_id": "calibration_samples_clear_room"}
+    )
+    assert result["type"] == FlowResultType.FORM
+    assert result["step_id"] == "calibration_samples_clear_room"
+
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], user_input={"room_area_id": living.id}
+    )
+    assert result["type"] == FlowResultType.MENU
+    assert result["step_id"] == "calibration_samples"
+    assert "Deleted 2 calibration sample(s) for the selected room." in result["description_placeholders"]["summary"]
+
+    remaining_rooms = [sample["room_area_id"] for sample in coordinator.calibration.samples()]
+    assert remaining_rooms == [kitchen.id]
+
+
 async def test_topology_options_flow_add_edit_delete_group(hass: HomeAssistant, setup_bermuda_entry: MockConfigEntry):
     """Topology options flow should add, edit and delete connector groups."""
     floors = fr.async_get(hass)
