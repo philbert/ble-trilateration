@@ -345,6 +345,11 @@ class BermudaCalibrationManager:
             notes=notes,
         )
         self._sessions[session.session_id] = session
+        self._update_session_notification(
+            session,
+            status="started",
+            expected_complete_at=(started_dt + timedelta(seconds=duration_s)).isoformat(),
+        )
         task = asyncio.create_task(self._async_wait_and_finalize(session.session_id))
         self._session_tasks[session.session_id] = task
         task.add_done_callback(lambda _task, session_id=session.session_id: self._session_tasks.pop(session_id, None))
@@ -622,14 +627,34 @@ class BermudaCalibrationManager:
                 "quality_reason": quality_reason,
             },
         )
-        title = "Bermuda calibration sample complete"
+        self._update_session_notification(
+            session,
+            status=quality_status,
+            sample_id=sample_id,
+            quality_reason=quality_reason,
+        )
+
+    def _update_session_notification(
+        self,
+        session: _CalibrationSession,
+        *,
+        status: str,
+        expected_complete_at: str | None = None,
+        sample_id: str | None = None,
+        quality_reason: str | None = None,
+    ) -> None:
+        """Create or update the persistent notification for one calibration session."""
+        title = "Bermuda calibration sample"
         message = (
             f"Device: {session.device_name}\n"
             f"Room: {session.room_name}\n"
             f"Position: x={session.position['x_m']:.3f}, y={session.position['y_m']:.3f}, z={session.position['z_m']:.3f}\n"
-            f"Status: {quality_status}\n"
-            f"Sample ID: {sample_id or 'not_saved'}"
+            f"Status: {status}"
         )
+        if expected_complete_at is not None:
+            message += f"\nExpected complete at: {expected_complete_at}"
+        if sample_id is not None:
+            message += f"\nSample ID: {sample_id or 'not_saved'}"
         if session.notes:
             message += f"\nNotes: {session.notes}"
         if quality_reason is not None:

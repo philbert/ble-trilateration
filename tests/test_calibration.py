@@ -95,12 +95,26 @@ async def test_record_calibration_sample_service(hass: HomeAssistant, setup_berm
                 await task
             await hass.async_block_till_done()
 
-            notify_mock.assert_called_once()
-            assert "Bermuda calibration sample complete" == notify_mock.call_args.kwargs["title"]
-            assert notify_mock.call_args.kwargs["notification_id"] == f"bermuda_calibration_{session_id}"
-            notification_message = notify_mock.call_args.args[1]
-            assert "Position: x=4.200, y=1.800, z=1.100" in notification_message
-            assert "Notes: Near sofa" in notification_message
+            assert notify_mock.call_count == 2
+            start_call = notify_mock.call_args_list[0]
+            finish_call = notify_mock.call_args_list[1]
+
+            assert "Bermuda calibration sample" == start_call.kwargs["title"]
+            assert start_call.kwargs["notification_id"] == f"bermuda_calibration_{session_id}"
+            start_message = start_call.args[1]
+            assert "Room: Living Room" in start_message
+            assert "Position: x=4.200, y=1.800, z=1.100" in start_message
+            assert "Status: started" in start_message
+            assert "Expected complete at:" in start_message
+            assert "Notes: Near sofa" in start_message
+
+            assert "Bermuda calibration sample" == finish_call.kwargs["title"]
+            assert finish_call.kwargs["notification_id"] == f"bermuda_calibration_{session_id}"
+            finish_message = finish_call.args[1]
+            assert "Position: x=4.200, y=1.800, z=1.100" in finish_message
+            assert "Status: accepted" in finish_message
+            assert "Sample ID:" in finish_message
+            assert "Notes: Near sofa" in finish_message
     finally:
         unsub()
 
