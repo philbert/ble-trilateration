@@ -80,6 +80,9 @@ async def test_record_calibration_sample_service(hass: HomeAssistant, setup_berm
             assert response["device_id"] == device_entry.id
             assert isinstance(response["expected_complete_at"], str)
             assert "T" in response["expected_complete_at"]
+            assert response["x_m"] == 4.2
+            assert response["y_m"] == 1.8
+            assert response["z_m"] == 1.1
             assert response["sample_radius_m"] == 1.0
             session_id = response["session_id"]
 
