@@ -114,6 +114,8 @@ async def test_record_calibration_sample_service(hass: HomeAssistant, setup_berm
             assert "Position: x=4.200, y=1.800, z=1.100" in finish_message
             assert "Status: accepted" in finish_message
             assert "Sample ID:" in finish_message
+            assert "Quality: " in finish_message
+            assert "Quality details: anchors=3" in finish_message
             assert "Notes: Near sofa" in finish_message
     finally:
         unsub()
@@ -129,6 +131,13 @@ async def test_record_calibration_sample_service(hass: HomeAssistant, setup_berm
     assert sample["room_area_id"] == area.id
     assert sample["position"] == {"x_m": 4.2, "y_m": 1.8, "z_m": 1.1}
     assert sample["sample_radius_m"] == 1.0
+    assert sample["quality"]["status"] == "accepted"
+    assert sample["quality"]["level"] in {"high", "medium", "low"}
+    assert isinstance(sample["quality"]["score_01"], float)
+    assert sample["quality"]["eligible_anchor_count"] == 3
+    assert sample["quality"]["total_packet_count"] == 3
+    assert "median_rssi_mad_db" in sample["quality"]
+    assert "geometry_quality_01" in sample["quality"]
     assert len(sample["anchors"]) == 3
     first_anchor = next(iter(sample["anchors"].values()))
     assert "count" not in first_anchor["buckets_1s"][0]

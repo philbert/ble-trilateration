@@ -32,6 +32,7 @@ from .const import (
     DISTANCE_TIMEOUT,
     DOMAIN_PRIVATE_BLE_DEVICE,
 )
+from .trilateration import AnchorMeasurement, solve_quality_metrics_2d, solve_quality_metrics_3d
 
 if TYPE_CHECKING:
     from .bermuda_advert import BermudaAdvert
@@ -131,6 +132,7 @@ class BermudaCalibrationManager:
         samples = self.samples()
         by_room: dict[str, int] = {}
         by_device: dict[str, int] = {}
+        by_quality: dict[str, int] = {}
         current_layout_hash = self.current_anchor_layout_hash
         current_layout_count = 0
         for sample in samples:
@@ -138,6 +140,8 @@ class BermudaCalibrationManager:
             by_room[room_name] = by_room.get(room_name, 0) + 1
             device_name = str(sample.get("device_name") or sample.get("device_id") or "Unknown")
             by_device[device_name] = by_device.get(device_name, 0) + 1
+            quality_level = self._sample_quality_level(sample)
+            by_quality[quality_level] = by_quality.get(quality_level, 0) + 1
             if sample.get("anchor_layout_hash") == current_layout_hash:
                 current_layout_count += 1
         recent = sorted(samples, key=lambda sample: sample.get("created_at", ""), reverse=True)[:5]
@@ -145,6 +149,7 @@ class BermudaCalibrationManager:
             "sample_count": len(samples),
             "by_room": by_room,
             "by_device": by_device,
+            "by_quality": by_quality,
             "current_layout_hash": current_layout_hash,
             "current_layout_count": current_layout_count,
             "recent": recent,
@@ -259,6 +264,20 @@ class BermudaCalibrationManager:
             )
             details["count"] = int(details["count"]) + 1
         return room_map
+
+    @staticmethod
+    def _sample_quality_level(sample: dict[str, Any]) -> str:
+        """Return the persisted quality level or derive a fallback."""
+        quality = sample.get("quality") or {}
+        if isinstance(quality, dict):
+            if level := quality.get("level"):
+                return str(level)
+            status = str(quality.get("status") or "")
+            if status == CALIBRATION_QUALITY_REJECTED:
+                return "rejected"
+            if status == CALIBRATION_QUALITY_POOR:
+                return "low"
+        return "medium"
 
     def register_change_callback(self, callback) -> None:
         """Register a callback fired after stored samples change."""
@@ -523,19 +542,67 @@ class BermudaCalibrationManager:
         created_at = now().isoformat()
         anchors: dict[str, Any] = {}
         eligible_anchor_count = 0
+        packet_counts: list[int] = []
+        rssi_mads: list[float] = []
+        rssi_spans: list[float] = []
+        sample_x = float(session.position["x_m"])
+        sample_y = float(session.position["y_m"])
+        sample_z = float(session.position["z_m"])
+        geometry_anchors_2d: list[AnchorMeasurement] = []
+        geometry_anchors_3d: list[AnchorMeasurement] = []
         for scanner_address, accumulator in sorted(session.anchors.items()):
             if not accumulator.values:
                 continue
             eligible_anchor_count += 1
+            packet_count = len(accumulator.values)
+            rssi_mad = round(self._median_abs_deviation(accumulator.values), 3)
+            rssi_min = min(accumulator.values)
+            rssi_max = max(accumulator.values)
+            rssi_span = round(rssi_max - rssi_min, 3)
+            packet_counts.append(packet_count)
+            rssi_mads.append(rssi_mad)
+            rssi_spans.append(rssi_span)
+
+            anchor_position = deepcopy(accumulator.anchor_position)
+            anchor_x = anchor_position.get("x_m")
+            anchor_y = anchor_position.get("y_m")
+            anchor_z = anchor_position.get("z_m")
+            if anchor_x is not None and anchor_y is not None:
+                distance_xy = math.hypot(sample_x - float(anchor_x), sample_y - float(anchor_y))
+                geometry_anchors_2d.append(
+                    AnchorMeasurement(
+                        scanner_address=scanner_address,
+                        x_m=float(anchor_x),
+                        y_m=float(anchor_y),
+                        range_m=distance_xy,
+                        sigma_m=1.0,
+                    )
+                )
+                if anchor_z is not None:
+                    geometry_anchors_3d.append(
+                        AnchorMeasurement(
+                            scanner_address=scanner_address,
+                            x_m=float(anchor_x),
+                            y_m=float(anchor_y),
+                            z_m=float(anchor_z),
+                            range_m=math.sqrt(
+                                ((sample_x - float(anchor_x)) ** 2)
+                                + ((sample_y - float(anchor_y)) ** 2)
+                                + ((sample_z - float(anchor_z)) ** 2)
+                            ),
+                            sigma_m=1.0,
+                        )
+                    )
+
             anchors[scanner_address] = {
                 "scanner_name": accumulator.scanner_name,
-                "anchor_position": deepcopy(accumulator.anchor_position),
-                "packet_count": len(accumulator.values),
+                "anchor_position": anchor_position,
+                "packet_count": packet_count,
                 "rssi_median": round(statistics.median(accumulator.values), 3),
                 "rssi_mean": round(statistics.fmean(accumulator.values), 3),
-                "rssi_mad": round(self._median_abs_deviation(accumulator.values), 3),
-                "rssi_min": min(accumulator.values),
-                "rssi_max": max(accumulator.values),
+                "rssi_mad": rssi_mad,
+                "rssi_min": rssi_min,
+                "rssi_max": rssi_max,
                 "first_seen_at": accumulator.first_seen_at,
                 "last_seen_at": accumulator.last_seen_at,
                 "buckets_1s": [
@@ -556,6 +623,38 @@ class BermudaCalibrationManager:
             quality_status = CALIBRATION_QUALITY_POOR
             quality_reason = "insufficient_anchors"
 
+        geometry_quality_01 = 0.0
+        geometry_gdop: float | None = None
+        if len(geometry_anchors_3d) >= 4:
+            geometry_metrics = solve_quality_metrics_3d(sample_x, sample_y, sample_z, geometry_anchors_3d)
+            geometry_quality_01 = geometry_metrics.geometry_quality_01
+            geometry_gdop = geometry_metrics.gdop
+        elif len(geometry_anchors_2d) >= 3:
+            geometry_metrics = solve_quality_metrics_2d(sample_x, sample_y, geometry_anchors_2d)
+            geometry_quality_01 = geometry_metrics.geometry_quality_01
+            geometry_gdop = geometry_metrics.gdop
+
+        total_packet_count = sum(packet_counts)
+        median_packet_count = float(statistics.median(packet_counts)) if packet_counts else 0.0
+        median_rssi_mad_db = round(float(statistics.median(rssi_mads)), 3) if rssi_mads else 0.0
+        median_rssi_span_db = round(float(statistics.median(rssi_spans)), 3) if rssi_spans else 0.0
+
+        anchor_score = min(1.0, eligible_anchor_count / 5.0)
+        packet_score = min(1.0, median_packet_count / 3.0) if median_packet_count > 0 else 0.0
+        stability_score = max(0.0, min(1.0, 1.0 - (median_rssi_mad_db / 10.0)))
+        quality_score_01 = round(
+            (0.35 * anchor_score)
+            + (0.25 * packet_score)
+            + (0.20 * stability_score)
+            + (0.20 * geometry_quality_01),
+            3,
+        )
+        quality_level = self._quality_level_from_metrics(
+            quality_status=quality_status,
+            quality_score_01=quality_score_01,
+            eligible_anchor_count=eligible_anchor_count,
+        )
+
         return {
             "id": f"sample_{uuid4().hex[:12]}",
             "created_at": created_at,
@@ -573,10 +672,36 @@ class BermudaCalibrationManager:
             "anchors": anchors,
             "quality": {
                 "status": quality_status,
+                "level": quality_level,
+                "score_01": quality_score_01,
                 "eligible_anchor_count": eligible_anchor_count,
+                "total_packet_count": total_packet_count,
+                "median_packet_count": round(median_packet_count, 3),
+                "median_rssi_mad_db": median_rssi_mad_db,
+                "median_rssi_span_db": median_rssi_span_db,
+                "geometry_quality_01": round(geometry_quality_01, 3),
+                "geometry_gdop": round(float(geometry_gdop), 3) if geometry_gdop is not None else None,
                 "reason": quality_reason,
             },
         }
+
+    @staticmethod
+    def _quality_level_from_metrics(
+        *,
+        quality_status: str,
+        quality_score_01: float,
+        eligible_anchor_count: int,
+    ) -> str:
+        """Return a user-facing quality level from persisted sample metrics."""
+        if quality_status == CALIBRATION_QUALITY_REJECTED:
+            return "rejected"
+        if quality_status == CALIBRATION_QUALITY_POOR or eligible_anchor_count < 3:
+            return "low"
+        if quality_score_01 >= 0.75:
+            return "high"
+        if quality_score_01 >= 0.45:
+            return "medium"
+        return "low"
 
     def _resolve_device_from_registry_id(self, registry_id: str) -> BermudaDevice | None:
         """Return the matching Bermuda device for a Home Assistant device registry id."""
@@ -655,6 +780,20 @@ class BermudaCalibrationManager:
             message += f"\nExpected complete at: {expected_complete_at}"
         if sample_id is not None:
             message += f"\nSample ID: {sample_id or 'not_saved'}"
+        if sample_id is not None and status != "started":
+            sample = next((stored for stored in self.samples() if stored.get("id") == sample_id), None)
+            if sample is not None:
+                quality = sample.get("quality") or {}
+                message += (
+                    f"\nQuality: {quality.get('level', 'unknown')} "
+                    f"(status={quality.get('status', 'unknown')}, score={float(quality.get('score_01', 0.0)):.2f})"
+                )
+                message += (
+                    f"\nQuality details: anchors={int(quality.get('eligible_anchor_count', 0))}, "
+                    f"packets={int(quality.get('total_packet_count', 0))}, "
+                    f"median_mad={float(quality.get('median_rssi_mad_db', 0.0)):.2f} dB, "
+                    f"geometry={float(quality.get('geometry_quality_01', 0.0)):.2f}"
+                )
         if session.notes:
             message += f"\nNotes: {session.notes}"
         if quality_reason is not None:
