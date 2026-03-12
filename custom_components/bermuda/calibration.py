@@ -602,9 +602,12 @@ class BermudaCalibrationManager:
         message = (
             f"Device: {session.device_name}\n"
             f"Room: {session.room_name}\n"
+            f"Position: x={session.position['x_m']:.3f}, y={session.position['y_m']:.3f}, z={session.position['z_m']:.3f}\n"
             f"Status: {quality_status}\n"
             f"Sample ID: {sample_id or 'not_saved'}"
         )
+        if session.notes:
+            message += f"\nNotes: {session.notes}"
         if quality_reason is not None:
             message += f"\nReason: {quality_reason}"
         persistent_notification.async_create(

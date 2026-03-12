@@ -98,6 +98,9 @@ async def test_record_calibration_sample_service(hass: HomeAssistant, setup_berm
             notify_mock.assert_called_once()
             assert "Bermuda calibration sample complete" == notify_mock.call_args.kwargs["title"]
             assert notify_mock.call_args.kwargs["notification_id"] == f"bermuda_calibration_{session_id}"
+            notification_message = notify_mock.call_args.args[1]
+            assert "Position: x=4.200, y=1.800, z=1.100" in notification_message
+            assert "Notes: Near sofa" in notification_message
     finally:
         unsub()
 
