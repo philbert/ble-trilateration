@@ -9,6 +9,7 @@ from homeassistant.components.sensor.const import SensorDeviceClass, SensorState
 from homeassistant.const import (
     STATE_UNAVAILABLE,
     EntityCategory,
+    UnitOfLength,
     UnitOfSpeed,
 )
 from homeassistant.core import HomeAssistant, callback
