@@ -104,6 +104,13 @@
           "device_id": "Device"
         }
       },
+      "calibration_samples_clear_room": {
+        "title": "Clear Room Samples",
+        "description": "{summary}",
+        "data": {
+          "room_area_id": "Room"
+        }
+      },
       "calibration_samples_clear_current_layout": {
         "title": "Clear Current Anchor Layout Samples",
         "description": "{summary}",

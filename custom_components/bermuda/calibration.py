@@ -243,6 +243,23 @@ class BermudaCalibrationManager:
             }
         return device_map
 
+    def get_room_samples(self) -> dict[str, dict[str, str | int]]:
+        """Return a map of room area ids present in storage."""
+        room_map: dict[str, dict[str, str | int]] = {}
+        for sample in self.samples():
+            room_area_id = sample.get("room_area_id")
+            if not room_area_id:
+                continue
+            details = room_map.setdefault(
+                room_area_id,
+                {
+                    "name": str(sample.get("room_name") or room_area_id),
+                    "count": 0,
+                },
+            )
+            details["count"] = int(details["count"]) + 1
+        return room_map
+
     def register_change_callback(self, callback) -> None:
         """Register a callback fired after stored samples change."""
         self._change_callbacks.append(callback)
@@ -264,6 +281,13 @@ class BermudaCalibrationManager:
     async def async_clear_device(self, device_id: str) -> int:
         """Delete all samples for one device."""
         removed = await self._store.async_clear_device(device_id)
+        if removed:
+            await self._async_notify_changed()
+        return removed
+
+    async def async_clear_room(self, room_area_id: str) -> int:
+        """Delete all samples for one room."""
+        removed = await self._store.async_clear_room(room_area_id)
         if removed:
             await self._async_notify_changed()
         return removed
