@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.components.sensor.const import SensorStateClass
+from homeassistant.const import EntityCategory
 from homeassistant.helpers import entity_registry as er
 from homeassistant.setup import async_setup_component
 from pytest_homeassistant_custom_component.common import MockConfigEntry
@@ -17,11 +18,16 @@ from custom_components.bermuda.sensor import (
     BermudaSensorPositionConfidence,
     BermudaSensorResidualConsistency,
     BermudaSensorScannerAdvertStatus,
+    BermudaSensorTrilatFloor,
+    BermudaSensorTrilatX,
+    BermudaSensorTrilatY,
+    BermudaSensorTrilatZ,
     BermudaSensorTrackedDeviceAdvertStatus,
     BermudaSensorTrackingConfidence,
     BermudaSensorHorizontalSpeed,
     BermudaSensorTrilatAnchorCount,
     BermudaSensorVerticalSpeed,
+    _remove_retired_sensor_entities,
 )
 
 from .const import MOCK_CONFIG
@@ -90,6 +96,8 @@ async def test_trilat_speed_sensors_expose_filtered_motion(hass) -> None:
 
     assert horizontal.native_value == 1.235
     assert vertical.native_value == 0.457
+    assert horizontal.name == "Speed Horizontal"
+    assert vertical.name == "Speed Vertical"
 
 
 async def test_trilat_confidence_sensors_expose_numeric_confidence(hass) -> None:
@@ -127,6 +135,60 @@ async def test_trilat_confidence_sensors_expose_numeric_confidence(hass) -> None
         "normalized_residual_rms": 1.234,
         "residual_m": 0.9,
     }
+    assert raw_confidence.entity_category is None
+    assert tracking_confidence.entity_category is None
+    assert geometry_quality.entity_category is None
+    assert residual_consistency.entity_category == EntityCategory.DIAGNOSTIC
+
+
+async def test_promoted_trilat_sensors_are_normal_sensors(hass) -> None:
+    """Core trilat sensors should no longer live in the diagnostic category."""
+    entry = await setup_integration(hass)
+    coordinator = entry.runtime_data.coordinator
+
+    device = BermudaDevice("AA:BB:CC:DD:EE:69", coordinator)
+    device.create_sensor = True
+    coordinator.devices[device.address] = device
+
+    assert BermudaSensorTrilatX(coordinator, entry, device.address).entity_category is None
+    assert BermudaSensorTrilatY(coordinator, entry, device.address).entity_category is None
+    assert BermudaSensorTrilatZ(coordinator, entry, device.address).entity_category is None
+    assert BermudaSensorTrilatFloor(coordinator, entry, device.address).entity_category is None
+    assert BermudaSensorTrilatAnchorCount(coordinator, entry, device.address).entity_category is None
+
+
+async def test_retired_legacy_sensor_entities_are_pruned(hass) -> None:
+    """Retired legacy sensor entities should be removed from the entity registry."""
+    entry = await setup_integration(hass)
+    ent_reg = er.async_get(hass)
+
+    distance = ent_reg.async_get_or_create(
+        "sensor",
+        DOMAIN,
+        "AA:BB:CC:DD:EE:70_range",
+        config_entry=entry,
+        suggested_object_id="legacy_distance",
+    )
+    scanner = ent_reg.async_get_or_create(
+        "sensor",
+        DOMAIN,
+        "AA:BB:CC:DD:EE:70_scanner",
+        config_entry=entry,
+        suggested_object_id="legacy_scanner",
+    )
+    keep = ent_reg.async_get_or_create(
+        "sensor",
+        DOMAIN,
+        "AA:BB:CC:DD:EE:70_tracking_confidence",
+        config_entry=entry,
+        suggested_object_id="tracking_confidence",
+    )
+
+    _remove_retired_sensor_entities(hass, entry.entry_id)
+
+    assert ent_reg.async_get(distance.entity_id) is None
+    assert ent_reg.async_get(scanner.entity_id) is None
+    assert ent_reg.async_get(keep.entity_id) is not None
 
 
 async def test_per_scanner_ble_status_sensors_expose_structured_status(hass) -> None:
