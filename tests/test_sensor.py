@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.components.sensor.const import SensorStateClass
-from homeassistant.const import EntityCategory
+from homeassistant.const import EntityCategory, UnitOfLength
 from homeassistant.helpers import entity_registry as er
 from homeassistant.setup import async_setup_component
 from pytest_homeassistant_custom_component.common import MockConfigEntry
@@ -148,13 +148,23 @@ async def test_promoted_trilat_sensors_are_normal_sensors(hass) -> None:
 
     device = BermudaDevice("AA:BB:CC:DD:EE:69", coordinator)
     device.create_sensor = True
+    device.trilat_x_m = 1.1
+    device.trilat_y_m = 2.2
+    device.trilat_z_m = 3.3
     coordinator.devices[device.address] = device
 
-    assert BermudaSensorTrilatX(coordinator, entry, device.address).entity_category is None
-    assert BermudaSensorTrilatY(coordinator, entry, device.address).entity_category is None
-    assert BermudaSensorTrilatZ(coordinator, entry, device.address).entity_category is None
+    trilat_x = BermudaSensorTrilatX(coordinator, entry, device.address)
+    trilat_y = BermudaSensorTrilatY(coordinator, entry, device.address)
+    trilat_z = BermudaSensorTrilatZ(coordinator, entry, device.address)
+
+    assert trilat_x.entity_category is None
+    assert trilat_y.entity_category is None
+    assert trilat_z.entity_category is None
     assert BermudaSensorTrilatFloor(coordinator, entry, device.address).entity_category is None
     assert BermudaSensorTrilatAnchorCount(coordinator, entry, device.address).entity_category is None
+    assert trilat_x.native_unit_of_measurement == UnitOfLength.METERS
+    assert trilat_y.native_unit_of_measurement == UnitOfLength.METERS
+    assert trilat_z.native_unit_of_measurement == UnitOfLength.METERS
 
 
 async def test_retired_legacy_sensor_entities_are_pruned(hass) -> None:
