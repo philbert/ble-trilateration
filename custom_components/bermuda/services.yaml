@@ -22,14 +22,17 @@ record_calibration_sample:
     room_area_id:
       required: true
       example: "living_room"
+    x_y_z_m:
+      required: false
+      example: "12.5,0.5,3.7"
     x_m:
-      required: true
+      required: false
       example: "4.2"
     y_m:
-      required: true
+      required: false
       example: "1.8"
     z_m:
-      required: true
+      required: false
       example: "1.1"
     sample_radius_m:
       required: false

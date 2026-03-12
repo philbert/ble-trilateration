@@ -199,17 +199,21 @@
           "name": "Room Area",
           "description": "Area id for the room label associated with this calibration point."
         },
+        "x_y_z_m": {
+          "name": "X, Y, Z Coordinates",
+          "description": "Declared coordinates in metres as `x,y,z`, for example `12.5,0.5,3.7`."
+        },
         "x_m": {
           "name": "X Coordinate",
-          "description": "Declared X coordinate in metres."
+          "description": "Declared X coordinate in metres. Optional if `x_y_z_m` is provided."
         },
         "y_m": {
           "name": "Y Coordinate",
-          "description": "Declared Y coordinate in metres."
+          "description": "Declared Y coordinate in metres. Optional if `x_y_z_m` is provided."
         },
         "z_m": {
           "name": "Z Coordinate",
-          "description": "Declared Z coordinate in metres."
+          "description": "Declared Z coordinate in metres. Optional if `x_y_z_m` is provided."
         },
         "sample_radius_m": {
           "name": "Sample Radius",

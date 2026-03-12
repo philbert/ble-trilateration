@@ -346,9 +346,10 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 {
                     vol.Required("device_id"): cv.string,
                     vol.Required("room_area_id"): cv.string,
-                    vol.Required("x_m"): vol.Coerce(float),
-                    vol.Required("y_m"): vol.Coerce(float),
-                    vol.Required("z_m"): vol.Coerce(float),
+                    vol.Optional("x_y_z_m"): cv.string,
+                    vol.Optional("x_m"): vol.Coerce(float),
+                    vol.Optional("y_m"): vol.Coerce(float),
+                    vol.Optional("z_m"): vol.Coerce(float),
                     vol.Optional("sample_radius_m"): vol.Coerce(float),
                     vol.Optional("room_radius_m"): vol.Coerce(float),
                     vol.Optional("duration_s", default=60): vol.All(vol.Coerce(int), vol.Range(min=1)),
@@ -3017,18 +3018,38 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             return None
         return self.devices.get(str(device_address).lower())
 
+    @staticmethod
+    def _parse_calibration_position(call_data: dict) -> tuple[float, float, float]:
+        """Return calibration sample coordinates from packed or split service inputs."""
+        packed_xyz = call_data.get("x_y_z_m")
+        if packed_xyz is not None:
+            parts = [part.strip() for part in str(packed_xyz).split(",")]
+            if len(parts) != 3 or any(part == "" for part in parts):
+                raise vol.Invalid("x_y_z_m must be provided as 'x,y,z' in metres.")
+            try:
+                return tuple(float(part) for part in parts)
+            except ValueError as err:
+                raise vol.Invalid("x_y_z_m must contain numeric x, y, and z values.") from err
+
+        missing = [field for field in ("x_m", "y_m", "z_m") if field not in call_data]
+        if missing:
+            raise vol.Invalid("Provide either x_y_z_m or all of x_m, y_m, and z_m.")
+
+        return (float(call_data["x_m"]), float(call_data["y_m"]), float(call_data["z_m"]))
+
     async def service_record_calibration_sample(self, call: ServiceCall) -> ServiceResponse:
         """Start an asynchronous calibration sample capture session."""
         sample_radius_m = call.data.get("sample_radius_m")
         if sample_radius_m is None:
             sample_radius_m = call.data.get("room_radius_m", DEFAULT_SAMPLE_RADIUS_M)
+        x_m, y_m, z_m = self._parse_calibration_position(call.data)
         try:
             response = await self.calibration.async_start_session(
                 device_id=call.data["device_id"],
                 room_area_id=call.data["room_area_id"],
-                x_m=call.data["x_m"],
-                y_m=call.data["y_m"],
-                z_m=call.data["z_m"],
+                x_m=x_m,
+                y_m=y_m,
+                z_m=z_m,
                 sample_radius_m=sample_radius_m,
                 duration_s=call.data.get("duration_s", 60),
                 notes=call.data.get("notes") or None,

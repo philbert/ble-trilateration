@@ -69,9 +69,7 @@ async def test_record_calibration_sample_service(hass: HomeAssistant, setup_berm
                 {
                     "device_id": device_entry.id,
                     "room_area_id": area.id,
-                    "x_m": 4.2,
-                    "y_m": 1.8,
-                    "z_m": 1.1,
+                    "x_y_z_m": "4.2, 1.8, 1.1",
                     "duration_s": 1,
                     "notes": "Near sofa",
                 },
@@ -176,6 +174,64 @@ async def test_record_calibration_sample_service_accepts_legacy_room_radius(hass
     sample = coordinator.calibration.samples()[0]
     assert sample["sample_radius_m"] == 1.4
     assert "room_radius_m" not in sample
+
+
+async def test_record_calibration_sample_service_accepts_split_xyz(hass: HomeAssistant, setup_bermuda_entry):
+    """Split x_m/y_m/z_m service inputs should remain accepted."""
+    coordinator = setup_bermuda_entry.runtime_data.coordinator
+
+    area = ar.async_get(hass).async_create("Living Room")
+    devreg = dr.async_get(hass)
+    device_entry = devreg.async_get_or_create(
+        config_entry_id=setup_bermuda_entry.entry_id,
+        connections={(dr.CONNECTION_BLUETOOTH, "AA:BB:CC:DD:EE:12")},
+        name="Phil Phone",
+    )
+
+    target = BermudaDevice("aa:bb:cc:dd:ee:12", coordinator)
+    target.name = "Phil Phone"
+    coordinator.devices[target.address] = target
+
+    scanner = BermudaDevice("aa:bb:cc:dd:10:12", coordinator)
+    scanner.name = "Scanner"
+    scanner.anchor_enabled = True
+    scanner.anchor_x_m = 1.0
+    scanner.anchor_y_m = 2.0
+    scanner.anchor_z_m = 3.0
+    coordinator.devices[scanner.address] = scanner
+    coordinator._scanner_list.add(scanner.address)
+    target.adverts[(target.address, scanner.address)] = SimpleNamespace(
+        scanner_address=scanner.address,
+        stamp=monotonic_time_coarse(),
+        rssi=-65.0,
+    )
+
+    response = await hass.services.async_call(
+        DOMAIN,
+        "record_calibration_sample",
+        {
+            "device_id": device_entry.id,
+            "room_area_id": area.id,
+            "x_m": 4.2,
+            "y_m": 1.8,
+            "z_m": 1.1,
+            "duration_s": 1,
+        },
+        blocking=True,
+        return_response=True,
+    )
+
+    session_id = response["session_id"]
+    coordinator.calibration.capture_update()
+    await coordinator.calibration._async_finalize_session(session_id)
+
+    task = coordinator.calibration._session_tasks.pop(session_id)
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+    sample = coordinator.calibration.samples()[0]
+    assert sample["position"] == {"x_m": 4.2, "y_m": 1.8, "z_m": 1.1}
 
 
 async def test_calibration_store_management(hass: HomeAssistant, setup_bermuda_entry):
