@@ -12,6 +12,7 @@ from homeassistant.helpers import floor_registry as fr
 from homeassistant.data_entry_flow import FlowResultType
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
+from custom_components.bermuda.config_flow import BermudaOptionsFlowHandler
 from custom_components.bermuda.const import DOMAIN
 from custom_components.bermuda.const import NAME
 
@@ -152,6 +153,98 @@ async def test_calibration_samples_options_flow_clear_room(hass: HomeAssistant, 
 
     remaining_rooms = [sample["room_area_id"] for sample in coordinator.calibration.samples()]
     assert remaining_rooms == [kitchen.id]
+
+
+async def test_calibration_samples_summary_shows_quality_and_delete_labels_are_human_sorted(
+    hass: HomeAssistant, setup_bermuda_entry: MockConfigEntry
+):
+    """Calibration sample UI should show by-quality summary and human-friendly labels."""
+    coordinator = setup_bermuda_entry.runtime_data.coordinator
+    office = ar.async_get(hass).async_create("Ana's Office")
+    living = ar.async_get(hass).async_create("Living Room")
+
+    await coordinator.calibration_store.async_add_sample(
+        {
+            "id": "sample_living_mid",
+            "created_at": "2026-03-12T10:46:04.742880+01:00",
+            "device_id": "device_b",
+            "device_name": "Phil's iPhone",
+            "device_address": "aa:bb:cc:dd:ee:02",
+            "room_area_id": living.id,
+            "room_name": living.name,
+            "position": {"x_m": 15.8, "y_m": 8.0, "z_m": 3.3},
+            "sample_radius_m": 1.0,
+            "anchor_layout_hash": coordinator.calibration.current_anchor_layout_hash,
+            "anchors": {},
+            "quality": {
+                "status": "accepted",
+                "level": "medium",
+                "eligible_anchor_count": 3,
+                "reason": None,
+            },
+        }
+    )
+    await coordinator.calibration_store.async_add_sample(
+        {
+            "id": "sample_office_high",
+            "created_at": "2026-03-12T10:44:40.220352+01:00",
+            "device_id": "device_a",
+            "device_name": "Phil's iPhone",
+            "device_address": "aa:bb:cc:dd:ee:01",
+            "room_area_id": office.id,
+            "room_name": office.name,
+            "position": {"x_m": 12.5, "y_m": 0.5, "z_m": 3.7},
+            "sample_radius_m": 1.0,
+            "anchor_layout_hash": coordinator.calibration.current_anchor_layout_hash,
+            "anchors": {},
+            "quality": {
+                "status": "accepted",
+                "level": "high",
+                "eligible_anchor_count": 4,
+                "reason": None,
+            },
+        }
+    )
+    await coordinator.calibration_store.async_add_sample(
+        {
+            "id": "sample_office_low",
+            "created_at": "2026-03-12T10:46:05.742880+01:00",
+            "device_id": "device_a",
+            "device_name": "Phil's iPhone",
+            "device_address": "aa:bb:cc:dd:ee:01",
+            "room_area_id": office.id,
+            "room_name": office.name,
+            "position": {"x_m": 12.5, "y_m": 0.5, "z_m": 3.7},
+            "sample_radius_m": 1.0,
+            "anchor_layout_hash": coordinator.calibration.current_anchor_layout_hash,
+            "anchors": {},
+            "quality": {
+                "status": "poor_quality",
+                "level": "low",
+                "eligible_anchor_count": 2,
+                "reason": "insufficient_anchors",
+            },
+        }
+    )
+
+    result = await hass.config_entries.options.async_init(setup_bermuda_entry.entry_id)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], user_input={"next_step_id": "calibration_samples"}
+    )
+    assert result["type"] == FlowResultType.MENU
+    assert "By quality:" in result["description_placeholders"]["summary"]
+    assert "- high: `1`" in result["description_placeholders"]["summary"]
+    assert "- medium: `1`" in result["description_placeholders"]["summary"]
+    assert "- low: `1`" in result["description_placeholders"]["summary"]
+
+    flow = BermudaOptionsFlowHandler(setup_bermuda_entry)
+    flow.coordinator = coordinator
+    labels = [flow._format_sample_label(sample) for sample in flow._get_samples_for_selection()]
+    assert labels == [
+        "Ana's Office | 12.5,0.5,3.7 | Phil's iPhone | high | 2026-03-12 10:44:40",
+        "Ana's Office | 12.5,0.5,3.7 | Phil's iPhone | low | 2026-03-12 10:46:05",
+        "Living Room | 15.8,8.0,3.3 | Phil's iPhone | medium | 2026-03-12 10:46:04",
+    ]
 
 
 async def test_topology_options_flow_add_edit_delete_group(hass: HomeAssistant, setup_bermuda_entry: MockConfigEntry):

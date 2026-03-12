@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import TYPE_CHECKING
 
 import voluptuous as vol
@@ -294,7 +295,7 @@ class BermudaOptionsFlowHandler(OptionsFlowWithConfigEntry):
 
     async def async_step_calibration_samples_delete_one(self, user_input=None):
         """Delete one persisted calibration sample."""
-        samples = self._get_samples_newest_first()
+        samples = self._get_samples_for_selection()
         options = [
             SelectOptionDict(value=sample["id"], label=self._format_sample_label(sample))
             for sample in samples
@@ -409,21 +410,35 @@ class BermudaOptionsFlowHandler(OptionsFlowWithConfigEntry):
             description_placeholders={"summary": "Confirm to delete all saved calibration samples."},
         )
 
-    def _get_samples_newest_first(self) -> list[dict]:
-        """Return stored calibration samples newest first."""
+    def _get_samples_for_selection(self) -> list[dict]:
+        """Return stored calibration samples sorted for human-friendly selection."""
         return sorted(
             self.coordinator.calibration.samples(),
-            key=lambda sample: sample.get("created_at", ""),
-            reverse=True,
+            key=lambda sample: (
+                str(sample.get("room_name") or sample.get("room_area_id") or "Unknown").lower(),
+                float((sample.get("position") or {}).get("x_m", 0.0) or 0.0),
+                float((sample.get("position") or {}).get("y_m", 0.0) or 0.0),
+                float((sample.get("position") or {}).get("z_m", 0.0) or 0.0),
+                str(sample.get("device_name") or sample.get("device_id") or "Unknown").lower(),
+                self._sample_quality_sort_key(sample),
+                str(sample.get("created_at", "")),
+            ),
         )
 
     def _format_sample_label(self, sample: dict) -> str:
         """Create a compact label for one calibration sample."""
-        status = sample.get("quality", {}).get("status", "unknown")
-        created_at = sample.get("created_at", "")
+        position = sample.get("position") or {}
         room_name = sample.get("room_name", sample.get("room_area_id", "Unknown"))
         device_name = sample.get("device_name", sample.get("device_id", "Unknown"))
-        return f"{created_at} | {room_name} | {device_name} | {status}"
+        quality_level = self._sample_quality_level(sample)
+        created_at = self._format_sample_timestamp(sample.get("created_at", ""))
+        return (
+            f"{room_name} | "
+            f"{float(position.get('x_m', 0.0) or 0.0):.1f},"
+            f"{float(position.get('y_m', 0.0) or 0.0):.1f},"
+            f"{float(position.get('z_m', 0.0) or 0.0):.1f} | "
+            f"{device_name} | {quality_level} | {created_at}"
+        )
 
     def _format_calibration_summary(self, summary: dict, include_recent: bool = False) -> str:
         """Build markdown summary for calibration samples."""
@@ -446,12 +461,48 @@ class BermudaOptionsFlowHandler(OptionsFlowWithConfigEntry):
             lines.append("By device:")
             for device_name, count in sorted(summary["by_device"].items()):
                 lines.append(f"- {device_name}: `{count}`")
+        if summary["by_quality"]:
+            lines.append("")
+            lines.append("By quality:")
+            for quality_level in ("high", "medium", "low", "rejected"):
+                count = summary["by_quality"].get(quality_level)
+                if count:
+                    lines.append(f"- {quality_level}: `{count}`")
         if include_recent and summary["recent"]:
             lines.append("")
             lines.append("Recent samples:")
             for sample in summary["recent"]:
                 lines.append(f"- {self._format_sample_label(sample)}")
         return "\n".join(lines)
+
+    @staticmethod
+    def _sample_quality_level(sample: dict) -> str:
+        """Return the persisted user-facing quality level for one sample."""
+        quality = sample.get("quality") or {}
+        if isinstance(quality, dict):
+            if level := quality.get("level"):
+                return str(level)
+            status = str(quality.get("status") or "")
+            if status == "rejected":
+                return "rejected"
+            if status == "poor_quality":
+                return "low"
+        return "medium"
+
+    @classmethod
+    def _sample_quality_sort_key(cls, sample: dict) -> int:
+        """Sort higher-quality samples first within otherwise equal labels."""
+        return {"high": 0, "medium": 1, "low": 2, "rejected": 3}.get(cls._sample_quality_level(sample), 4)
+
+    @staticmethod
+    def _format_sample_timestamp(created_at: str) -> str:
+        """Format a persisted sample timestamp for config-flow display."""
+        if not created_at:
+            return "unknown"
+        try:
+            return datetime.fromisoformat(created_at).strftime("%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            return created_at
 
     async def async_step_topology(self, user_input=None):
         """Manage connector-group topology."""
