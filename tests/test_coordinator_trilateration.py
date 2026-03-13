@@ -11,7 +11,7 @@ from custom_components.bermuda.const import (
     DISTANCE_TIMEOUT,
 )
 from custom_components.bermuda.coordinator import BermudaDataUpdateCoordinator
-from custom_components.bermuda.room_classifier import RoomClassification
+from custom_components.bermuda.room_classifier import GlobalFingerprintResult, RoomClassification
 
 
 class _DummyScanner(SimpleNamespace):
@@ -145,6 +145,7 @@ def _make_coordinator():
     coordinator.devices = {}
     coordinator._scanners = set()
     coordinator._trilat_decision_state = {}
+    coordinator.calibration = SimpleNamespace(current_anchor_layout_hash="layout-a")
     coordinator.fr = SimpleNamespace(async_get_floor=lambda floor_id: SimpleNamespace(name=f"Floor {floor_id}"))
     coordinator.ar = SimpleNamespace(async_get_area=lambda _area_id: None)
     coordinator.get_scanner_anchor_x = lambda scanner_addr: getattr(coordinator.devices.get(scanner_addr), "anchor_x_m", None)
@@ -342,6 +343,114 @@ def test_phase2_soft_includes_other_floor_anchors_when_enabled():
     assert status_entry["soft_include_active"] is True
     assert status_entry["affects_position"] is True
     assert any("soft_included" in line for line in device.trilat_cross_floor_anchor_diagnostics)
+
+
+def test_floor_challenger_pauses_when_fingerprint_supports_current_floor():
+    """Strong current-floor fingerprints should pause a floor challenger instead of switching."""
+    coordinator = _make_coordinator()
+    coordinator.room_classifier = SimpleNamespace(
+        fingerprint_global=lambda **_kwargs: GlobalFingerprintResult(
+            area_id="guest_room",
+            floor_id="f1",
+            reason="ok",
+            floor_confidence=0.82,
+            room_confidence=0.68,
+            best_score=0.62,
+            second_score=0.21,
+            floor_scores={"f1": 0.62, "f2": 0.14},
+        )
+    )
+    device = _DummyDevice("dev-phase3-hold")
+
+    sc_f1a = _make_scanner(coordinator, "p3h-a", "f1", 0.0, 0.0)
+    sc_f1b = _make_scanner(coordinator, "p3h-b", "f1", 6.0, 0.0)
+    sc_f1c = _make_scanner(coordinator, "p3h-c", "f1", 0.0, 8.0)
+    sc_f2a = _make_scanner(coordinator, "p3h-d", "f2", 0.0, 0.0)
+    sc_f2b = _make_scanner(coordinator, "p3h-e", "f2", 6.0, 0.0)
+    sc_f2c = _make_scanner(coordinator, "p3h-f", "f2", 0.0, 8.0)
+
+    with patch("custom_components.bermuda.coordinator.monotonic_time_coarse", return_value=100.0):
+        device.adverts = {
+            ("dev-phase3-hold", sc_f1a.address): _make_advert(sc_f1a, 100.0, -70.0, 5.0),
+            ("dev-phase3-hold", sc_f1b.address): _make_advert(sc_f1b, 100.0, -70.0, 5.0),
+            ("dev-phase3-hold", sc_f1c.address): _make_advert(sc_f1c, 100.0, -70.0, 5.0),
+        }
+        coordinator._refresh_trilateration_for_device(device)
+
+    state = coordinator._get_trilat_decision_state(device)
+    assert state.floor_id == "f1"
+
+    with patch("custom_components.bermuda.coordinator.monotonic_time_coarse", return_value=120.0):
+        device.adverts = {
+            ("dev-phase3-hold", sc_f1a.address): _make_advert(sc_f1a, 120.0, -82.0, 5.0),
+            ("dev-phase3-hold", sc_f1b.address): _make_advert(sc_f1b, 120.0, -82.0, 5.0),
+            ("dev-phase3-hold", sc_f1c.address): _make_advert(sc_f1c, 120.0, -82.0, 5.0),
+            ("dev-phase3-hold", sc_f2a.address): _make_advert(sc_f2a, 120.0, -58.0, 5.0),
+            ("dev-phase3-hold", sc_f2b.address): _make_advert(sc_f2b, 120.0, -58.0, 5.0),
+            ("dev-phase3-hold", sc_f2c.address): _make_advert(sc_f2c, 120.0, -58.0, 5.0),
+        }
+        state.floor_challenger_id = "f2"
+        state.floor_challenger_since = 101.0
+        coordinator._refresh_trilateration_for_device(device)
+
+    assert state.floor_id == "f1"
+    assert state.floor_challenger_id == "f2"
+    assert device.trilat_floor_diagnostics["fingerprint_floor_id"] == "f1"
+    assert device.trilat_floor_diagnostics["fingerprint_hold_active"] is True
+    assert device.trilat_floor_diagnostics["fingerprint_hold_elapsed_s"] == 0.0
+
+
+def test_floor_challenger_switches_earlier_when_fingerprint_supports_challenger():
+    """Strong challenger-floor fingerprints should reduce floor-switch dwell."""
+    coordinator = _make_coordinator()
+    coordinator.room_classifier = SimpleNamespace(
+        fingerprint_global=lambda **_kwargs: GlobalFingerprintResult(
+            area_id="garage_front",
+            floor_id="f2",
+            reason="ok",
+            floor_confidence=0.81,
+            room_confidence=0.66,
+            best_score=0.61,
+            second_score=0.22,
+            floor_scores={"f1": 0.15, "f2": 0.61},
+        )
+    )
+    device = _DummyDevice("dev-phase3-switch")
+
+    sc_f1a = _make_scanner(coordinator, "p3s-a", "f1", 0.0, 0.0)
+    sc_f1b = _make_scanner(coordinator, "p3s-b", "f1", 6.0, 0.0)
+    sc_f1c = _make_scanner(coordinator, "p3s-c", "f1", 0.0, 8.0)
+    sc_f2a = _make_scanner(coordinator, "p3s-d", "f2", 0.0, 0.0)
+    sc_f2b = _make_scanner(coordinator, "p3s-e", "f2", 6.0, 0.0)
+    sc_f2c = _make_scanner(coordinator, "p3s-f", "f2", 0.0, 8.0)
+
+    with patch("custom_components.bermuda.coordinator.monotonic_time_coarse", return_value=100.0):
+        device.adverts = {
+            ("dev-phase3-switch", sc_f1a.address): _make_advert(sc_f1a, 100.0, -70.0, 5.0),
+            ("dev-phase3-switch", sc_f1b.address): _make_advert(sc_f1b, 100.0, -70.0, 5.0),
+            ("dev-phase3-switch", sc_f1c.address): _make_advert(sc_f1c, 100.0, -70.0, 5.0),
+        }
+        coordinator._refresh_trilateration_for_device(device)
+
+    state = coordinator._get_trilat_decision_state(device)
+    assert state.floor_id == "f1"
+
+    with patch("custom_components.bermuda.coordinator.monotonic_time_coarse", return_value=106.0):
+        device.adverts = {
+            ("dev-phase3-switch", sc_f1a.address): _make_advert(sc_f1a, 106.0, -82.0, 5.0),
+            ("dev-phase3-switch", sc_f1b.address): _make_advert(sc_f1b, 106.0, -82.0, 5.0),
+            ("dev-phase3-switch", sc_f1c.address): _make_advert(sc_f1c, 106.0, -82.0, 5.0),
+            ("dev-phase3-switch", sc_f2a.address): _make_advert(sc_f2a, 106.0, -58.0, 5.0),
+            ("dev-phase3-switch", sc_f2b.address): _make_advert(sc_f2b, 106.0, -58.0, 5.0),
+            ("dev-phase3-switch", sc_f2c.address): _make_advert(sc_f2c, 106.0, -58.0, 5.0),
+        }
+        state.floor_challenger_id = "f2"
+        state.floor_challenger_since = 101.0
+        coordinator._refresh_trilateration_for_device(device)
+
+    assert state.floor_id == "f2"
+    assert device.trilat_floor_diagnostics["fingerprint_floor_id"] == "f2"
+    assert device.trilat_floor_diagnostics["effective_required_dwell_s"] == 4.0
 
 
 def test_phase2_keeps_mean_sigma_and_z_bounds_same_floor_only():

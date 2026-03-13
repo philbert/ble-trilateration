@@ -60,7 +60,7 @@ from .calibration import BermudaCalibrationManager
 from .calibration_store import BermudaCalibrationStore
 from .bermuda_irk import BermudaIrkManager
 from .ranging_model import BermudaRangingModel
-from .room_classifier import BermudaRoomClassifier
+from .room_classifier import BermudaRoomClassifier, GlobalFingerprintResult
 from .scanner_anchor_store import BermudaScannerAnchorStore
 from .const import (
     _LOGGER,
@@ -1678,6 +1678,9 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         last_status: str = "unknown"
         room_challenger_id: str | None = None
         room_challenger_since: float = 0.0
+        challenger_fingerprint_hold_since: float = 0.0
+        challenger_fingerprint_hold_total_s: float = 0.0
+        challenger_fingerprint_hold_expired: bool = False
 
     _TRILAT_MIN_ANCHORS: int = 3
     _TRILAT_MIN_ANCHORS_3D: int = 4
@@ -1686,6 +1689,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
     _TRILAT_DEFAULT_ANCHOR_SIGMA_M: float = 8.0
     _TRILAT_DIAGNOSTIC_OTHER_FLOOR_SIGMA_MULTIPLIER: float = 4.0
     _TRILAT_FLOOR_AMBIGUITY_RATIO: float = 0.2
+    _TRILAT_FINGERPRINT_FLOOR_CONFIDENCE_HIGH: float = 0.70
     _TRILAT_FLOOR_SWITCH_PRIOR_WINDOW_S: float = 12.0
     _TRILAT_FLOOR_SWITCH_PRIOR_SIGMA_MULTIPLIER: float = 2.5
     _TRILAT_RANGE_DELTA_EPSILON_M: float = 0.2
@@ -2316,8 +2320,19 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             floor_ambiguity: bool = False,
             floor_ambiguous_persisted: bool = False,
             challenger_margin: float | None = None,
+            effective_required_dwell_s: float | None = None,
+            challenger_effective_dwell_s: float | None = None,
+            fingerprint_result: GlobalFingerprintResult | None = None,
+            fingerprint_hold_active: bool = False,
+            fingerprint_hold_elapsed_s: float | None = None,
+            fingerprint_hold_ceiling_s: float | None = None,
         ) -> None:
             floor_evidence = floor_evidence or {}
+            fingerprint_result = fingerprint_result or GlobalFingerprintResult(
+                area_id=None,
+                floor_id=None,
+                reason="no_trained_rooms",
+            )
             device.trilat_floor_evidence = dict(floor_evidence)
             device.trilat_floor_evidence_names = {
                 floor_id: self._resolve_floor_name(floor_id)
@@ -2353,6 +2368,21 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 "required_margin": policy.floor_switch_margin,
                 "challenger_dwell_s": challenger_dwell_s,
                 "required_dwell_s": policy.floor_dwell_seconds,
+                "challenger_effective_dwell_s": challenger_effective_dwell_s,
+                "effective_required_dwell_s": effective_required_dwell_s,
+                "fingerprint_area_id": fingerprint_result.area_id,
+                "fingerprint_floor_id": fingerprint_result.floor_id,
+                "fingerprint_floor_name": self._resolve_floor_name(fingerprint_result.floor_id),
+                "fingerprint_reason": fingerprint_result.reason,
+                "fingerprint_floor_confidence": fingerprint_result.floor_confidence,
+                "fingerprint_room_confidence": fingerprint_result.room_confidence,
+                "fingerprint_best_score": fingerprint_result.best_score,
+                "fingerprint_second_score": fingerprint_result.second_score,
+                "fingerprint_floor_scores": dict(fingerprint_result.floor_scores),
+                "fingerprint_hold_active": fingerprint_hold_active,
+                "fingerprint_hold_elapsed_s": fingerprint_hold_elapsed_s,
+                "fingerprint_hold_ceiling_s": fingerprint_hold_ceiling_s,
+                "fingerprint_hold_expired": state.challenger_fingerprint_hold_expired,
                 "soft_include_other_floor_anchors_enabled": soft_include_other_floor_anchors,
                 "cross_floor_anchor_count": device.trilat_cross_floor_anchor_count,
                 "floor_switch_count": getattr(device, "trilat_floor_switch_count", 0),
@@ -2509,6 +2539,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             return
 
         evidence_inputs: list[tuple[str, float]] = []
+        global_live_rssi_by_scanner: dict[str, float] = {}
         penalty_db = self.trilat_cross_floor_penalty_db()
         for advert in latest.values():
             if advert.stamp < nowstamp - DISTANCE_TIMEOUT:
@@ -2524,12 +2555,23 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             if rssi_for_score is None:
                 continue
             evidence_inputs.append((scanner_floor_id, rssi_for_score))
+            global_live_rssi_by_scanner[advert.scanner_address.lower()] = float(rssi_for_score)
+
+        layout_hash = self.current_anchor_layout_hash() if getattr(self, "calibration", None) is not None else ""
+        fingerprint_result = GlobalFingerprintResult(area_id=None, floor_id=None, reason="no_trained_rooms")
+        room_classifier = getattr(self, "room_classifier", None)
+        if layout_hash and room_classifier is not None and hasattr(room_classifier, "fingerprint_global"):
+            fingerprint_result = room_classifier.fingerprint_global(
+                layout_hash=layout_hash,
+                live_rssi_by_scanner=global_live_rssi_by_scanner,
+            )
 
         if not evidence_inputs:
             _apply_anchor_status_entries()
             _apply_floor_diagnostics(
                 reason="ambiguous_floor",
                 selected_floor_id=state.floor_id,
+                fingerprint_result=fingerprint_result,
             )
             device.set_trilat_unknown("ambiguous_floor", floor_id=state.floor_id, floor_name=self._resolve_floor_name(state.floor_id))
             state.last_status = "unknown"
@@ -2587,32 +2629,93 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
 
         current_floor_score: float | None = None
         floor_margin: float | None = None
+        effective_required_dwell_s = float(policy.floor_dwell_seconds)
+        challenger_effective_dwell_s: float | None = None
+        fingerprint_hold_active = False
+        fingerprint_hold_elapsed_s = 0.0
+        fingerprint_hold_ceiling_s = float(policy.floor_dwell_seconds) * 2.0
         if state.floor_id is None:
             state.floor_id = best_floor_id
             state.floor_challenger_id = None
             state.floor_challenger_since = 0.0
+            state.challenger_fingerprint_hold_since = 0.0
+            state.challenger_fingerprint_hold_total_s = 0.0
+            state.challenger_fingerprint_hold_expired = False
         elif best_floor_id != state.floor_id:
             current_floor_score = floor_evidence.get(state.floor_id, 0.0)
             floor_margin = (best_floor_score - current_floor_score) / max(best_floor_score, 1e-9)
             required_margin = policy.floor_switch_margin
-            required_dwell = policy.floor_dwell_seconds
+            effective_required_dwell_s = float(policy.floor_dwell_seconds)
 
             if floor_margin >= required_margin:
                 if state.floor_challenger_id != best_floor_id:
                     state.floor_challenger_id = best_floor_id
                     state.floor_challenger_since = nowstamp
-                elif nowstamp - state.floor_challenger_since >= required_dwell:
+                    state.challenger_fingerprint_hold_since = 0.0
+                    state.challenger_fingerprint_hold_total_s = 0.0
+                    state.challenger_fingerprint_hold_expired = False
+
+                fingerprint_supports_current_floor = (
+                    fingerprint_result.reason == "ok"
+                    and fingerprint_result.floor_id == state.floor_id
+                    and fingerprint_result.floor_confidence >= self._TRILAT_FINGERPRINT_FLOOR_CONFIDENCE_HIGH
+                )
+                fingerprint_supports_challenger = (
+                    fingerprint_result.reason == "ok"
+                    and fingerprint_result.floor_id == state.floor_challenger_id
+                    and fingerprint_result.floor_confidence >= self._TRILAT_FINGERPRINT_FLOOR_CONFIDENCE_HIGH
+                )
+
+                if fingerprint_supports_current_floor and not state.challenger_fingerprint_hold_expired:
+                    if state.challenger_fingerprint_hold_since <= 0.0:
+                        state.challenger_fingerprint_hold_since = nowstamp
+                    active_hold_s = max(0.0, nowstamp - state.challenger_fingerprint_hold_since)
+                    projected_hold_s = state.challenger_fingerprint_hold_total_s + active_hold_s
+                    if projected_hold_s < fingerprint_hold_ceiling_s:
+                        fingerprint_hold_active = True
+                        fingerprint_hold_elapsed_s = projected_hold_s
+                    else:
+                        state.challenger_fingerprint_hold_total_s = fingerprint_hold_ceiling_s
+                        state.challenger_fingerprint_hold_since = 0.0
+                        state.challenger_fingerprint_hold_expired = True
+                        fingerprint_hold_elapsed_s = state.challenger_fingerprint_hold_total_s
+                else:
+                    if state.challenger_fingerprint_hold_since > 0.0:
+                        state.challenger_fingerprint_hold_total_s += max(
+                            0.0,
+                            nowstamp - state.challenger_fingerprint_hold_since,
+                        )
+                        state.challenger_fingerprint_hold_since = 0.0
+                    fingerprint_hold_elapsed_s = state.challenger_fingerprint_hold_total_s
+
+                if fingerprint_supports_challenger:
+                    effective_required_dwell_s *= 0.5
+
+                challenger_effective_dwell_s = max(
+                    0.0,
+                    (nowstamp - state.floor_challenger_since) - fingerprint_hold_elapsed_s,
+                )
+                if not fingerprint_hold_active and challenger_effective_dwell_s >= effective_required_dwell_s:
                     state.floor_id = best_floor_id
                     state.floor_challenger_id = None
                     state.floor_challenger_since = 0.0
+                    state.challenger_fingerprint_hold_since = 0.0
+                    state.challenger_fingerprint_hold_total_s = 0.0
+                    state.challenger_fingerprint_hold_expired = False
             else:
                 state.floor_challenger_id = None
                 state.floor_challenger_since = 0.0
+                state.challenger_fingerprint_hold_since = 0.0
+                state.challenger_fingerprint_hold_total_s = 0.0
+                state.challenger_fingerprint_hold_expired = False
         else:
             current_floor_score = floor_evidence.get(state.floor_id, 0.0)
             floor_margin = 0.0
             state.floor_challenger_id = None
             state.floor_challenger_since = 0.0
+            state.challenger_fingerprint_hold_since = 0.0
+            state.challenger_fingerprint_hold_total_s = 0.0
+            state.challenger_fingerprint_hold_expired = False
 
         selected_floor_id = state.floor_id or best_floor_id
         selected_floor_name = self._resolve_floor_name(selected_floor_id)
@@ -2629,6 +2732,12 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             floor_ambiguity=floor_ambiguity,
             floor_ambiguous_persisted=floor_ambiguous_persisted,
             challenger_margin=floor_margin,
+            effective_required_dwell_s=effective_required_dwell_s,
+            challenger_effective_dwell_s=challenger_effective_dwell_s,
+            fingerprint_result=fingerprint_result,
+            fingerprint_hold_active=fingerprint_hold_active,
+            fingerprint_hold_elapsed_s=fingerprint_hold_elapsed_s,
+            fingerprint_hold_ceiling_s=fingerprint_hold_ceiling_s,
         )
 
         if prev_floor_id is not None and selected_floor_id != prev_floor_id:
@@ -2652,6 +2761,12 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 floor_ambiguity=floor_ambiguity,
                 floor_ambiguous_persisted=floor_ambiguous_persisted,
                 challenger_margin=floor_margin,
+                effective_required_dwell_s=effective_required_dwell_s,
+                challenger_effective_dwell_s=challenger_effective_dwell_s,
+                fingerprint_result=fingerprint_result,
+                fingerprint_hold_active=fingerprint_hold_active,
+                fingerprint_hold_elapsed_s=fingerprint_hold_elapsed_s,
+                fingerprint_hold_ceiling_s=fingerprint_hold_ceiling_s,
             )
 
         if _debug_this_device:
@@ -2667,7 +2782,8 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 f"trilat_floor_diag:{device.address}",
                 (
                     "Trilat floor diag: %s selected=%s challenger=%s margin=%s "
-                    "cross_floor=%d switches=%d resets=%d evidence=[%s]"
+                    "cross_floor=%d switches=%d resets=%d fp_floor=%s fp_conf=%s "
+                    "fp_reason=%s fp_hold=%s/%s effective_dwell=%s/%s evidence=[%s]"
                 ),
                 device.name,
                 selected_floor_id,
@@ -2676,6 +2792,13 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 device.trilat_cross_floor_anchor_count,
                 getattr(device, "trilat_floor_switch_count", 0),
                 getattr(device, "trilat_floor_switch_reset_count", 0),
+                fingerprint_result.floor_id,
+                f"{fingerprint_result.floor_confidence:.3f}",
+                fingerprint_result.reason,
+                f"{fingerprint_hold_elapsed_s:.3f}" if fingerprint_hold_elapsed_s is not None else "n/a",
+                f"{fingerprint_hold_ceiling_s:.3f}" if fingerprint_hold_ceiling_s is not None else "n/a",
+                f"{challenger_effective_dwell_s:.3f}" if challenger_effective_dwell_s is not None else "n/a",
+                f"{effective_required_dwell_s:.3f}" if effective_required_dwell_s is not None else "n/a",
                 evidence_str,
             )
 

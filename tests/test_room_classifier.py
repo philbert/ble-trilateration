@@ -282,6 +282,120 @@ async def test_fingerprint_score_breaks_geometry_tie() -> None:
 
 
 @pytest.mark.asyncio
+async def test_fingerprint_global_can_pick_a_room_on_another_floor() -> None:
+    """Cross-floor fingerprint scoring should return the strongest floor-aware room candidate."""
+    classifier = BermudaRoomClassifier(
+        _FakeCalibration(
+            [
+                {
+                    "anchor_layout_hash": "layout-a",
+                    "room_area_id": "living_room",
+                    "position": {"x_m": 0.0, "y_m": 0.0, "z_m": 0.0},
+                    "sample_radius_m": 1.0,
+                    "quality": {"status": "accepted"},
+                    "anchors": {
+                        "scanner_a": {"rssi_median": -51.0},
+                        "scanner_b": {"rssi_median": -77.0},
+                    },
+                },
+                {
+                    "anchor_layout_hash": "layout-a",
+                    "room_area_id": "office",
+                    "position": {"x_m": 0.0, "y_m": 0.0, "z_m": 3.0},
+                    "sample_radius_m": 1.0,
+                    "quality": {"status": "accepted"},
+                    "anchors": {
+                        "scanner_a": {"rssi_median": -76.0},
+                        "scanner_b": {"rssi_median": -52.0},
+                    },
+                },
+            ]
+        ),
+        _FakeAreaRegistry(),
+    )
+
+    await classifier.async_rebuild()
+
+    result = classifier.fingerprint_global(
+        layout_hash="layout-a",
+        live_rssi_by_scanner={"scanner_a": -75.0, "scanner_b": -53.0},
+    )
+
+    assert result.reason == "ok"
+    assert result.area_id == "office"
+    assert result.floor_id == "upper"
+    assert result.floor_confidence > 0.7
+
+
+@pytest.mark.asyncio
+async def test_fingerprint_global_floor_confidence_is_based_on_best_room_per_floor() -> None:
+    """Floor confidence should not be inflated just because one floor has more rooms."""
+    classifier = BermudaRoomClassifier(
+        _FakeCalibration(
+            [
+                {
+                    "anchor_layout_hash": "layout-a",
+                    "room_area_id": "living_room",
+                    "position": {"x_m": 0.0, "y_m": 0.0, "z_m": 0.0},
+                    "sample_radius_m": 1.0,
+                    "quality": {"status": "accepted"},
+                    "anchors": {
+                        "scanner_a": {"rssi_median": -52.0},
+                        "scanner_b": {"rssi_median": -80.0},
+                    },
+                },
+                {
+                    "anchor_layout_hash": "layout-a",
+                    "room_area_id": "bedroom",
+                    "position": {"x_m": 1.0, "y_m": 0.0, "z_m": 0.0},
+                    "sample_radius_m": 1.0,
+                    "quality": {"status": "accepted"},
+                    "anchors": {
+                        "scanner_a": {"rssi_median": -63.0},
+                        "scanner_b": {"rssi_median": -72.0},
+                    },
+                },
+                {
+                    "anchor_layout_hash": "layout-a",
+                    "room_area_id": "office",
+                    "position": {"x_m": 0.0, "y_m": 0.0, "z_m": 3.0},
+                    "sample_radius_m": 1.0,
+                    "quality": {"status": "accepted"},
+                    "anchors": {
+                        "scanner_a": {"rssi_median": -65.0},
+                        "scanner_b": {"rssi_median": -53.0},
+                    },
+                },
+            ]
+        ),
+        _FakeAreaRegistry(),
+    )
+
+    await classifier.async_rebuild()
+
+    result = classifier.fingerprint_global(
+        layout_hash="layout-a",
+        live_rssi_by_scanner={"scanner_a": -53.0, "scanner_b": -79.0},
+    )
+
+    room_scores, _ = classifier._fingerprint_room_scores(
+        classifier._fingerprints["layout-a"],
+        {"scanner_a": -53.0, "scanner_b": -79.0},
+    )
+    naive_floor_confidence = (
+        room_scores["living_room"] + room_scores["bedroom"]
+    ) / (
+        room_scores["living_room"] + room_scores["bedroom"] + room_scores["office"]
+    )
+
+    assert result.floor_id == "ground"
+    expected_ground = result.floor_scores["ground"]
+    expected_upper = result.floor_scores["upper"]
+    assert result.floor_confidence == pytest.approx(expected_ground / (expected_ground + expected_upper))
+    assert result.floor_confidence < naive_floor_confidence
+
+
+@pytest.mark.asyncio
 async def test_transition_strength_prefers_nearby_rooms() -> None:
     """Transition strength should be higher for nearby sample clouds than distant ones."""
     classifier = BermudaRoomClassifier(

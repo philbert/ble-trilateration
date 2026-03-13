@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import math
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from .const import DEFAULT_SAMPLE_RADIUS_M
@@ -42,6 +42,20 @@ class RoomClassification:
     topk_used: int = 0
     geometry_score: float = 0.0
     fingerprint_score: float = 0.0
+
+
+@dataclass(frozen=True)
+class GlobalFingerprintResult:
+    """Cross-floor fingerprint-only classification result."""
+
+    area_id: str | None
+    floor_id: str | None
+    reason: str
+    floor_confidence: float = 0.0
+    room_confidence: float = 0.0
+    best_score: float = 0.0
+    second_score: float = 0.0
+    floor_scores: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -237,6 +251,69 @@ class BermudaRoomClassifier:
             topk_used=topk_used,
             geometry_score=geometry_score,
             fingerprint_score=fingerprint_score,
+        )
+
+    def fingerprint_global(
+        self,
+        *,
+        layout_hash: str,
+        live_rssi_by_scanner: dict[str, float] | None = None,
+    ) -> GlobalFingerprintResult:
+        """Score fingerprints across all floors for split-level arbitration."""
+        fingerprints = self._fingerprints.get(layout_hash, [])
+        if not fingerprints:
+            return GlobalFingerprintResult(area_id=None, floor_id=None, reason="no_trained_rooms")
+
+        fingerprint_scores, _fingerprint_topk = self._fingerprint_room_scores(
+            fingerprints,
+            live_rssi_by_scanner or {},
+        )
+        if not fingerprint_scores:
+            return GlobalFingerprintResult(area_id=None, floor_id=None, reason="weak_room_evidence")
+
+        area_floor_ids: dict[str, str | None] = {}
+        for sample in fingerprints:
+            area_floor_ids.setdefault(sample.area_id, sample.floor_id)
+
+        ranked_rooms = sorted(fingerprint_scores.items(), key=lambda row: (row[1], row[0]), reverse=True)
+        best_area_id, best_score = ranked_rooms[0]
+        second_score = ranked_rooms[1][1] if len(ranked_rooms) > 1 else 0.0
+
+        floor_scores: dict[str, float] = {}
+        for area_id, room_score in fingerprint_scores.items():
+            floor_id = area_floor_ids.get(area_id)
+            if floor_id is None:
+                continue
+            floor_scores[floor_id] = max(floor_scores.get(floor_id, 0.0), room_score)
+
+        if not floor_scores:
+            return GlobalFingerprintResult(area_id=None, floor_id=None, reason="missing_floor")
+
+        ranked_floors = sorted(floor_scores.items(), key=lambda row: (row[1], row[0]), reverse=True)
+        best_floor_id, best_floor_score = ranked_floors[0]
+        total_floor_score = sum(floor_scores.values())
+        total_room_score = sum(fingerprint_scores.values())
+        floor_confidence = best_floor_score / total_floor_score if total_floor_score > 0.0 else 0.0
+        room_confidence = best_score / total_room_score if total_room_score > 0.0 else 0.0
+
+        result_area_id: str | None = best_area_id
+        reason = "ok"
+        if best_score < ROOM_SCORE_MIN:
+            result_area_id = None
+            reason = "weak_room_evidence"
+        elif len(ranked_rooms) > 1 and (best_score / max(second_score, 1e-9)) < ROOM_SCORE_RATIO_MIN:
+            result_area_id = None
+            reason = "room_ambiguity"
+
+        return GlobalFingerprintResult(
+            area_id=result_area_id,
+            floor_id=best_floor_id,
+            reason=reason,
+            floor_confidence=floor_confidence,
+            room_confidence=room_confidence,
+            best_score=best_score,
+            second_score=second_score,
+            floor_scores=floor_scores,
         )
 
     def _geometry_room_scores(
