@@ -524,3 +524,68 @@ This is the minimum change set that tests the central hypotheses without committ
 - Cross-floor fingerprint diagnostics provide useful floor/room evidence on known traces.
 - Soft cross-floor anchor inclusion improves continuity without materially worsening residual quality.
 - A decision on true global 3D-first solving is deferred until replay data demonstrates that it is both observable and beneficial.
+
+---
+
+## Engineer Review — 2026-03-13 (revision)
+
+*Reviewed against the revised plan. The major concerns from the first review have been correctly incorporated: the problem statement is now accurate, the phase ordering is right, global 3D is correctly deferred, and Phase 1 (cold reset elimination) is correctly prioritised as the first change. The following comments address remaining implementation-level issues specific to this revision.*
+
+---
+
+### Stage 2 implementation detail: `_apply_soft_vertical_prior` will misfire with cross-floor anchors
+
+When cross-floor anchors are included in Stage 2, the coordinator computes `anchor_z_bounds` from all included anchors (coordinator.py:2498-2503). This tuple feeds directly into `_apply_soft_vertical_prior` (lines 2040-2061), which pulls solved z toward the anchor height band.
+
+With only same-floor anchors, `anchor_z_bounds` spans the ceiling heights of that floor — a physically meaningful band. With cross-floor anchors included, `anchor_z_bounds` spans from the lowest-floor ceiling to the highest-floor ceiling. `_apply_soft_vertical_prior` will then pull z toward the centroid of all floor heights, which does not correspond to any real floor the device is on.
+
+This means Stage 2 needs an explicit decision about what to do with `_apply_soft_vertical_prior`:
+
+- **Option A:** Exclude cross-floor anchors from the `anchor_z_bounds` calculation (keep z bounds floor-scoped) while still including them in the 2D solve.
+- **Option B:** Disable `_apply_soft_vertical_prior` when cross-floor anchors are present.
+- **Option C:** Accept the multi-floor z bounds as a wider comfort zone and rely on the prior sigma instead.
+
+Option A is probably cleanest for the Stage 2 flag: include cross-floor anchors in the 2D solve path but continue computing `anchor_z_bounds` only from same-floor anchors until Stage 6 changes the z model.
+
+---
+
+### Stage 2 implementation detail: sigma chain application point and effect on `mean_sigma_m`
+
+The current sigma chain in the coordinator (lines 2473-2476):
+
+```
+effective_sigma_m = base_sigma or default (8.0 m)
+effective_sigma_m *= age_multiplier (1x–3x)
+```
+
+The floor mismatch multiplier should be applied after age inflation, making the full chain:
+
+```
+effective_sigma_m *= age_multiplier * floor_mismatch_multiplier
+```
+
+One consequence: `mean_sigma_m` (line 2497) averages sigma across all anchors and feeds into `_compute_trilat_confidence`. When cross-floor anchors with 4x–8x inflated sigma are included, `mean_sigma_m` rises significantly, which reduces raw confidence even if the same-floor anchors are perfectly good. The plan should decide whether cross-floor anchors participate in `mean_sigma_m` (dragging confidence down even in healthy situations) or are excluded from the confidence calculation while still contributing to the solve.
+
+The simplest approach: include cross-floor anchors in the solve, exclude them from `mean_sigma_m`. This separates "confidence in the same-floor measurement quality" from "did we include cross-floor anchors as a fallback."
+
+---
+
+### Phase 3 (cross-floor fingerprint diagnostics) does not depend on Phase 2
+
+The plan sequences Phase 3 after Phase 2. Fingerprint scoring is independent of the trilateration solver — it only needs RSSI vectors, not a completed solve. Phase 3 could run in parallel with or even before Phase 2, which would let fingerprint experiment results inform how aggressively to pursue soft anchor inclusion.
+
+If fingerprint cross-floor accuracy is strong (Experiment 3 passes), it reduces the pressure to get Phase 2 sigma tuning exactly right. If it is weak, that changes the priorities for Phase 4. Running Phase 3 diagnostics earlier would produce this decision data sooner.
+
+---
+
+### Stage 4 / room_classifier.py: current interface requires floor_id and returns early if None
+
+`room_classifier.classify()` takes `floor_id` as a parameter (line 158) and returns `RoomClassification(area_id=None, reason="missing_floor")` immediately if `floor_id is None` (lines 169-170). The existing interface has no path for cross-floor scoring.
+
+Adding the cross-floor fingerprint mode described in Stage 4 requires a new calling convention — either a separate method, an `all_floors: bool` flag, or making `floor_id` optional with different behavior when absent. This is a small design choice but it should be made explicitly so the diagnostic path and the eventual production path use the same interface rather than being bolted on separately.
+
+---
+
+### The first implementation slice is correct as written
+
+The five-step slice (diagnostics → cold reset fix → soft anchor inclusion → fingerprint diagnostics → replay before changing room assignment) is the right sequence and scope. One addition worth including in step 1: log whether `floor_switch cold reset` fired and how many times per session. This single counter will immediately quantify the state-reset instability before any code changes are made, and provides a direct regression metric for Phase 1.
