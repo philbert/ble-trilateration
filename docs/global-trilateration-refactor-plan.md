@@ -908,163 +908,95 @@ Stage 5 builds a floor posterior from RSSI evidence, fingerprint output, continu
 
 ---
 
-## Engineer Review — 2026-03-13 (second pass, full code read)
+## Engineer Review — 2026-03-13 (third pass, post-incorporation review)
 
-*Reviewed against coordinator.py:2300–2554, room_classifier.py, trilateration.py, calibration.py, and the transition-sample capture shape proposed in Stage 5. The previous reviews are correct. The following comments identify remaining blocking issues and things the plan still does not answer.*
-
----
-
-### 1. Executive Verdict
-
-The direction is basically right. Phase ordering is correct. Deferring global 3D is correct. The first coding slice is correct. Two things are still wrong and one is still unfinished.
-
-**Still wrong:**
-- The transition-sample capture shape has an unresolvable coordinate-frame problem that will silently corrupt proximity checks unless fixed before any samples are captured.
-- The Stage 6 floor arbitration rule is still described as a priority table, not an algorithm. The "final review" note identified this and the main plan body still has no concrete decision procedure.
-
-**Still unfinished:**
-- The plan asks whether cross-floor anchors should be excluded from `mean_sigma_m` (Phase 2 coordinator bullet 4) but never answers. This needs to be a decision in the plan, not a question, because it determines the confidence model for every Phase 2 outcome.
+*All findings from the second-pass review have been incorporated into the main plan body. This review starts from the current state of the plan and identifies new issues only.*
 
 ---
 
-### 2. Critical Findings
+### Executive Verdict
 
-**Finding 1: `_apply_soft_vertical_prior` misfires under Phase 2 — the plan presents this as a choice when it is not.**
+The plan is substantially better. The previous blocking issues are gone: `_apply_soft_vertical_prior` is committed to Option A, `mean_sigma_m` exclusion is decided, EWMA role-change clearing is in scope, `fingerprint_global()` is named, `anchor_layout_hash` is in the transition-sample shape, `capture_duration_s` is demoted to metadata, the adjacency problem is dissolved by using a single other-floor multiplier, and the arbitration procedure has concrete rules with thresholds.
 
-The historical note correctly identifies the problem. coordinator.py:2498-2503 computes `anchor_z_bounds` from all included anchors. With cross-floor anchors included, this spans from basement to top_floor. `_apply_soft_vertical_prior` (lines 2040-2061) then pulls `z` toward the centroid of all floors — which is nowhere a person stands.
-
-Options A/B/C are presented as a choice. Only Option A is safe for Phase 2: compute `anchor_z_bounds` from same-floor anchors only while still including cross-floor anchors in the 2D solve. Option B discards a useful guard. Option C pulls toward a physically meaningless centroid. The plan should commit to Option A explicitly.
-
-**Finding 2: `mean_sigma_m` question is still open but must be answered before Phase 2.**
-
-coordinator.py:2497 averages sigma across all anchors into `mean_sigma_m`, which feeds `_compute_trilat_confidence`. If 3 good same-floor anchors at sigma=1.5 m are joined by 2 cross-floor anchors at sigma=6 m (4× inflation), `mean_sigma_m` rises from 1.5 to 2.7. Every adjacent-floor solve gets a confidence penalty even when the same-floor geometry is healthy.
-
-The answer is: exclude cross-floor anchors from `mean_sigma_m`. Track cross-floor anchor count separately as a diagnostic field. This separates "measurement quality on the chosen floor" from "did we fall back to cross-floor evidence."
-
-**Finding 3: `_build_transition_strengths` already exists in room_classifier.py. The plan never mentions it.**
-
-room_classifier.py:308-349 builds `self._transition_strengths`, an intra-floor room-to-room soft plausibility table derived from sample cloud overlap/gap. `transition_strength()` (lines 137-150) is already a public method.
-
-The proposed transition-sample concept adds explicit inter-floor transition priors. These serve different purposes and should stay separate. But the plan should acknowledge the existing mechanism so implementers do not confuse it with the new one, and so there is no accidental overlap if transition samples are later considered for intra-floor transitions too.
-
-**Finding 4: The fingerprint cross-floor interface problem has a simple fix the plan does not name.**
-
-`_fingerprint_room_scores()` (room_classifier.py:269-306) and `_geometry_room_scores()` (lines 242-267) are pure functions that take a pre-filtered sample list. The floor filter happens at lines 172-173 inside `classify()`, before either method is called.
-
-The cross-floor mode does not need a new calling convention on `classify()`. It needs a second entrypoint — `classify_global()` or `fingerprint_global()` — that calls `_fingerprint_room_scores` with all fingerprints unfiltered and returns `(room, floor_id, score)`. The existing `classify()` remains unchanged. The plan should commit to this interface rather than leaving the choice open.
-
-**Finding 5: EWMA state contamination under Phase 2 is unaddressed.**
-
-When a cross-floor anchor is first included, `advert.trilat_range_ewma_m` is initialized to `advert.rssi_distance_raw` (coordinator.py:2479). That raw distance is biased by floor penetration. If the floor then reverts and the anchor becomes same-floor, its EWMA starts from a contaminated prior. The EWMA decay at line 2481 takes several cycles to flush the bias.
-
-Decision required: when an anchor transitions from cross-floor to same-floor status (i.e., the selected floor changed), clear `advert.trilat_range_ewma_m` for that anchor. Add a per-anchor `last_floor_role` field and reset on role change.
-
-**Finding 6: "Adjacent floor" has no mechanical definition and Phase 2 arrives before transition samples exist.**
-
-Phase 2 uses "adjacent floor: 4×, non-adjacent: 8×" inflation without defining adjacency. HA floors are semantic string IDs with no ordering. The coordinator has no ordered floor list. `transition_floor_ids` in transition samples would solve this — but Phase 2 comes before Phase 4.
-
-For Phase 2: treat all non-selected floors as a single "other" category with one inflation factor. Remove the two-tier inflation from Phase 2 scope and move it to Phase 4 where `transition_floor_ids` can define adjacency properly. This eliminates a dependency that does not exist yet.
+Four new issues remain. Two are correctness problems in the arbitration procedure. Two are interface specification gaps that will cause friction at implementation time.
 
 ---
 
-### 3. Transition-Sample Model: Blocking Problems
+### Finding 1: Rule 2 of the arbitration procedure can cause indefinite floor lock
 
-The concept is the right abstraction. Two issues must be resolved before building the capture infrastructure.
+Rule 2 says: if `fingerprint_floor_confidence > 0.70` and fingerprint agrees with current floor, clear the challenger and hold.
 
-**Coordinate frame is unspecified — blocking.**
+The problem is that "clear challenger" resets `floor_challenger_since` to zero. If fingerprint consistently shows high confidence for the current floor — which it will if the device has moved toward a new floor but is still in a corridor with mixed RSSI — Rule 2 fires every update cycle, resetting the challenger timer each time. The dwell timer never advances. The floor switch never happens, regardless of how long the RSSI floor evidence has been pointing at the challenger.
 
-The proposed shape includes `x_y_z_m`. Calibration sample positions are stored under `anchor_layout_hash` (room_classifier.py:86, 109). Positions only have meaning within a layout hash. If the anchor layout changes, all positions under the old hash are deprecated.
+The existing dwell mechanism gives the challenger a finite time window: it accumulates `floor_challenger_since` and switches after `required_dwell`. Rule 2 breaks that guarantee by continuously resetting the timer.
 
-Transition samples must store `anchor_layout_hash` alongside `x_y_z_m`. Without it, proximity checks after any layout change produce silently wrong results. This must be decided before capture infrastructure is built, because retroactively migrating position data without knowing which layout it came from is not feasible.
-
-Merge strategy for the same `(room_area_id, transition_name, layout_hash)`: take the position centroid, union the `transition_floor_ids`, keep the larger `sample_radius_m`.
-
-**`duration_s` is ambiguous — remove or rename.**
-
-`duration_s` in the capture shape implies a capture session parameter, not a persistent property of the transition point. The existing `_CalibrationSession` (calibration.py) already has `duration_s` as a session field.
-
-If `duration_s` is intended to control the floor-switch dwell reduction at runtime, that is a policy parameter and belongs in configuration, not house metadata. Remove it from the transition-sample shape. If needed for data quality annotation, put it in a capture-metadata subkey.
-
-**`transition_floor_ids` solves the adjacency problem — keep it.**
-
-Explicitly listing the floors a transition connects is better than trying to infer adjacency from HA floor ordering. It also means Phase 4 data can retrospectively inform Phase 2 adjacency. No change needed here.
-
-**Proximity computation mechanism needs to be specified.**
-
-The plan says "if the current solved position or fingerprint candidate is near a transition sample." The fingerprint candidate is a `(room, floor)` pair, not a position. The check should be: solved position within `sample_radius_m` of the transition point AND `room_area_id` matches the current room AND `transition_floor_ids` includes the challenger floor. When position quality is low, fall back to room match only. Spell this out in the plan.
+Fix: Rule 2 should suppress challenger advancement for a maximum of `base_required_dwell * 2` seconds. After that ceiling, fingerprint evidence loses its veto right and the challenger timer is allowed to proceed normally. Alternatively, Rule 2 should not clear the challenger but should instead pause timer advancement (keep `floor_challenger_since` frozen at its current value rather than resetting it to zero). The latter is cleaner: the challenger is still alive, just not accumulating time while fingerprint disagrees.
 
 ---
 
-### 4. Concrete Floor Arbitration Rule
+### Finding 2: `fingerprint_floor_confidence` measures room-level ambiguity, not floor-level ambiguity
 
-Replace the Stage 6 priority-table prose with the following procedure:
+The arbitration procedure defines:
 
 ```
-Inputs at each update cycle:
-  rssi_floor_evidence: dict[floor_id → float]         (already computed)
-  floor_challenger_id, floor_challenger_since           (existing state)
-  fingerprint_global: (floor_id, room_id, score, second_score)
-  fingerprint_floor_confidence = score / (score + second_score)   [0..1]
-  transition_support: float [0..1]  (nearest matching transition sample for challenger)
-  geometry_quality_01, residual_consistency_01
-  prev_stable_floor_id, prev_stable_room_id
-
-Rule 1 — No active challenger:
-  If floor_challenger_id is None: hold current floor. Done.
-
-Rule 2 — Fingerprint strongly agrees with current floor:
-  If fingerprint_floor_confidence > 0.70
-  AND fingerprint_global.floor_id == current_floor:
-    Clear challenger. Hold current floor. Done.
-
-Rule 3 — Fingerprint strongly supports challenger:
-  If fingerprint_floor_confidence > 0.70
-  AND fingerprint_global.floor_id == floor_challenger_id:
-    effective_required_dwell = required_dwell * 0.5
-
-Rule 4 — Transition sample supports challenger:
-  If transition_support > 0.6:
-    effective_required_dwell *= (1.0 - 0.4 * transition_support)
-    (up to 40% additional reduction, applied after Rule 3 if both trigger)
-
-Rule 5 — Both signals are weak:
-  If fingerprint_floor_confidence < 0.40
-  AND geometry_quality_01 < 0.30:
-    Hold current floor. Lower confidence. Do not advance challenger timer. Done.
-
-Rule 6 — Default:
-  Apply existing margin/dwell challenger state machine with effective_required_dwell.
+fingerprint_floor_confidence = best_score / max(best_score + second_score, 1e-9)
 ```
 
-Key properties: concrete thresholds, fingerprint and transition support modify the existing dwell/margin parameters rather than creating a parallel decision path, Rule 5 explicitly encodes the "both weak, hold state" case. The output is still "hold vs. advance challenger," not a probability, which keeps the state machine debuggable.
+`second_score` is the second-best room score across all floors. If the two best rooms are on the same floor — for example, Kitchen and Living Room are both on `ground_floor` and are close in RSSI space — then `fingerprint_floor_confidence` will be low even though floor is unambiguous. The device is clearly on `ground_floor`, but Rules 2 and 5 would not fire correctly because the confidence calculation reflects intra-floor room ambiguity, not inter-floor floor ambiguity.
+
+The rules need a `fingerprint_floor_confidence` that compares the best floor's aggregate score against the second-best floor's aggregate score, not the best room against the second-best room.
+
+Fix: `fingerprint_global()` should return both a `floor_confidence` and a `room_confidence`. `floor_confidence` is computed as: sum of scores for all rooms on the best floor divided by the sum of all room scores across all floors. This gives a well-behaved floor discrimination signal regardless of how many rooms are on each floor. The arbitration rules use `floor_confidence` for Rules 2, 3, and 5.
+
+This also affects the unit test spec (line 626): the test for `fingerprint_global()` producing a candidate outside the current floor should verify `floor_confidence`, not just that `area_id` differs.
 
 ---
 
-### 5. Phase Sequencing: Two Gaps
+### Finding 3: `RoomClassification` has no `floor_id` field — `fingerprint_global()` needs a new return type
 
-**Phase 3 (fingerprint diagnostics) should start at the same time as Phase 0, not after Phase 2.**
+`RoomClassification` (room_classifier.py:34-44) stores `area_id`, `reason`, `best_area_id`, `best_score`, `second_score`, `topk_used`, `geometry_score`, `fingerprint_score`. It does not store `floor_id`.
 
-Fingerprint scoring needs only RSSI vectors, not solver output. Running Experiment 3 as a test script requires ~50 lines of code and no behavior changes. The result is a go/no-go gate for Phases 4 and 5. Getting that data earlier reduces the risk of building Phase 4/5 infrastructure that turns out to be useless. There is no reason to wait for Phase 2.
+The arbitration procedure uses `fingerprint_global.floor_id` directly (Rules 2 and 3). If `fingerprint_global()` returns a `RoomClassification`, the caller has to do a separate area-registry lookup to get `floor_id` from `area_id`, which means the coordinator has to import or receive an area-registry reference and do an `async_get_area()` call in the middle of the decision procedure.
 
-**Phase 4 has a hard dependency on the coordinate-frame decision.**
+Either `fingerprint_global()` returns a new dataclass — something like `GlobalFingerprintResult(area_id, floor_id, floor_confidence, room_confidence, best_score, second_score)` — or it returns a `RoomClassification` extended with `floor_id` and `floor_confidence` fields.
 
-Do not start building `bermuda.record_transition_sample` until the `anchor_layout_hash` question is resolved. Once samples are captured in the wrong frame, migration is painful.
-
-**Smallest next implementation that yields the most information:**
-
-Phase 0 diagnostics and Phase 1 cold-reset elimination together in one slice. Phase 0 logging first (no behavior change), then the cold-reset fix. Run Experiment 3 as a test script in parallel. If the `Guest Room → Garage front` failure disappears after Phase 1, Phases 2–5 can be deprioritized. If it does not, the Phase 0 logs identify whether anchor starvation or room classifier gating is the remaining cause.
+This is a small design decision but it must be made before the interface is implemented, otherwise the coordinator and the classifier will end up with a coupling that was not planned.
 
 ---
 
-### 6. Concrete Plan Changes Required
+### Finding 4: Stage 5's `transition_support_01` fallback is room-area granularity when position is weak
 
-1. **Commit to Option A** for `_apply_soft_vertical_prior` in the Phase 2 spec. Remove it as a choice.
-2. **Commit to excluding cross-floor anchors from `mean_sigma_m`**. Add a separate `cross_floor_anchor_count` diagnostic.
-3. **Remove the two-tier adjacent/non-adjacent inflation from Phase 2**. Use a single non-selected-floor multiplier in Phase 2. Move tiered inflation to Phase 4 where `transition_floor_ids` defines adjacency.
-4. **Add `anchor_layout_hash` to the transition-sample capture shape.** Document the merge strategy.
-5. **Remove `duration_s` from the transition-sample top-level shape**, or rename to `capture_duration_s` in a metadata subkey.
-6. **Replace Stage 6 arbitration prose with the concrete decision procedure** above.
-7. **Move the Experiment 3 go/no-go gate into the main Phase 3 section**, not just the historical notes.
-8. **Add a note** that `_build_transition_strengths` (room_classifier.py:308-349) already handles intra-floor transition plausibility and that the new transition-sample model is inter-floor only.
-9. **Add EWMA role-change clearing** to the Phase 2 coordinator spec: clear `advert.trilat_range_ewma_m` when an anchor's same-floor vs. cross-floor role changes.
-10. **Add the `classify_global()` / `fingerprint_global()` interface decision** to the Phase 3 room_classifier.py spec.
+The three-state model is:
+
+- `1.0`: position quality acceptable, solved position within `sample_radius_m`, room matches, challenger in `transition_floor_ids`
+- `0.5`: position quality low, but room matches and challenger in `transition_floor_ids`
+- `0.0`: otherwise
+
+When position quality is poor, the fallback to `0.5` is based only on room-area match. A room like "entrance" could span 20 m² or more. A device anywhere in that room gets `transition_support_01 = 0.5` regardless of whether it is physically near the transition point or at the opposite end of the room. Combined with Rule 4 (`transition_support_01 > 0.60` required to reduce dwell), the `0.5` fallback never triggers Rule 4 anyway — so this is not an active correctness problem. But the plan should note this explicitly: the `0.5` fallback exists for diagnostic completeness and future use, not to influence the current arbitration dwell. If that intent is correct, add a comment in the Stage 5 runtime behavior section. If the `0.5` case is intended to influence arbitration, the Rule 4 threshold needs to be lowered to `> 0.4` and the room-granularity risk should be called out.
+
+---
+
+### Finding 5: EWMA interaction between Stage 2 and Stage 3 is undocumented
+
+Stage 3 says "retain EWMA range state where safe." Stage 2 says "clear EWMA when an anchor changes role between same-floor and non-selected-floor participation." When both stages are active, the behavior is:
+
+- Floor switch does not clear EWMAs (Stage 3).
+- An anchor that was same-floor and becomes other-floor on the next update has its EWMA cleared (Stage 2).
+- An anchor that was other-floor and becomes same-floor on the next update has its EWMA cleared (Stage 2).
+- An anchor that was same-floor and remains same-floor through a floor switch keeps its EWMA (Stage 3 + Stage 2 together).
+
+This is correct behavior but the interaction is implicit. An implementer reading Stage 3 in isolation ("retain EWMA range state where safe") will ask what "safe" means and may not immediately connect it to the Stage 2 role-change rule. The "where safe" qualifier should be replaced with an explicit cross-reference: "retain EWMA range state; the Stage 2 role-change rule (clear on same-floor ↔ other-floor transition) applies independently of floor switch."
+
+---
+
+### What to fix before implementation
+
+1. **Rule 2: Replace "clear challenger" with "pause challenger timer advancement"** and add a maximum hold ceiling of `base_required_dwell * 2` seconds. After that ceiling, fingerprint evidence loses its veto and the timer runs normally.
+
+2. **`fingerprint_global()` return type: Specify a new `GlobalFingerprintResult` dataclass** with `area_id`, `floor_id`, `floor_confidence`, `room_confidence`, `best_score`, `second_score`. Compute `floor_confidence` as the best-floor aggregate score fraction, not room best-vs-second. Update the arbitration rules to reference `floor_confidence` explicitly.
+
+3. **`transition_support_01 = 0.5` fallback: Add a note in Stage 5** clarifying that the fallback value is below the Rule 4 trigger threshold (0.60) by design, meaning it influences diagnostics but not current arbitration dwell. If that intent changes, the Rule 4 threshold needs a corresponding adjustment.
+
+4. **Stage 3 "where safe": Replace with a cross-reference to the Stage 2 role-change rule.** State explicitly: "safe = the anchor's floor role did not change. An anchor that changes between same-floor and other-floor status has its EWMA cleared by the Stage 2 rule regardless of whether a floor switch occurred."
+
+5. **Recommended first implementation slice (line 803)**: Move "Implement `fingerprint_global()` as an offline test script" to step 1b (concurrent with Phase 0 logging), not step 3. It requires no coordinator changes, only a standalone script exercising the classifier. Running it before Phase 1 means Experiment 3 results are available when evaluating whether Phase 1 alone solved the problem.
