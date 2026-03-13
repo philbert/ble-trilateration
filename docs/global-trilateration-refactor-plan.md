@@ -663,3 +663,23 @@ Adding the cross-floor fingerprint mode described in Stage 4 requires a new call
 ### The first implementation slice is correct as written
 
 The five-step slice (diagnostics → cold reset fix → soft anchor inclusion → fingerprint diagnostics → replay before changing room assignment) is the right sequence and scope. One addition worth including in step 1: log whether `floor_switch cold reset` fired and how many times per session. This single counter will immediately quantify the state-reset instability before any code changes are made, and provides a direct regression metric for Phase 1.
+
+---
+
+## Engineer Review — 2026-03-13 (final)
+
+### Run Experiment 3 before building Phases 3–5
+
+The entire cross-floor fingerprint stack (Stages 4 and 5, Phases 3–5) rests on one assumption: that calibration fingerprints can discriminate `Guest Room` from `Garage front` and `street_level` rooms from `ground_floor` rooms when scored globally. If that assumption fails — sparse calibration coverage, rooms too similar in RSSI space, or floor penetration too variable to be consistent — then Phases 3–5 produce no improvement.
+
+Experiment 3 (cross-floor fingerprint accuracy) can be run right now against existing calibration data with no code changes beyond a test script. It should be treated as a go/no-go gate before any of Phase 3–5 is built, not as a parallel experiment. If it passes, proceed. If it fails, Phases 4 and 5 need to be rethought entirely.
+
+### Each phase needs an exit criterion before the next phase starts
+
+The plan describes what each phase does but never says when to stop. After Phase 1 (cold reset fix), someone needs to evaluate: did this alone resolve most of the `Guest Room → Garage front` failures? If yes, Phases 2–5 may not be worth building. After Phase 2, someone needs to evaluate: did soft anchor inclusion improve continuity, or did inflated-sigma cross-floor anchors just add noise?
+
+Without explicit go/no-go criteria per phase, the plan risks building all six phases sequentially regardless of whether earlier phases already solved the problem. Add a one-paragraph decision gate to each phase: what metric to measure, what threshold constitutes success, and what happens if the threshold is not met.
+
+### The floor arbitration rule in Stage 5 is still unspecified
+
+Stage 5 builds a floor posterior from RSSI evidence, fingerprint output, continuity, and optionally solved z. The plan does not say what happens when these disagree — which is exactly the split-level case this plan exists to fix. "Hybrid floor posterior" is an implementation strategy, not a decision rule. Before Phase 4 is built, there needs to be an explicit answer to: when RSSI evidence says `street_level` and fingerprint says `ground_floor` and continuity says `ground_floor`, what wins and by how much? That decision rule is the core of the design. Everything else is plumbing.
