@@ -180,6 +180,12 @@ class BermudaDevice(dict):
         self.trilat_floor_diagnostics: dict[str, object] = {}
         self.trilat_cross_floor_anchor_count: int = 0
         self.trilat_cross_floor_anchor_diagnostics: list[str] = []
+        self.trilat_floor_switch_count: int = 0
+        self.trilat_floor_switch_last_at: float | None = None
+        self.trilat_floor_switch_last_from_floor_id: str | None = None
+        self.trilat_floor_switch_last_to_floor_id: str | None = None
+        self.trilat_floor_switch_last_from_name: str | None = None
+        self.trilat_floor_switch_last_to_name: str | None = None
         self.trilat_floor_switch_reset_count: int = 0
         self.trilat_floor_switch_reset_last_at: float | None = None
         self.trilat_floor_switch_reset_last_from_floor_id: str | None = None

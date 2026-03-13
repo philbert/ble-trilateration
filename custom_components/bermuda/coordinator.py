@@ -1604,6 +1604,8 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         floor_challenger_id: str | None = None
         floor_challenger_since: float = 0.0
         floor_ambiguous_since: float = 0.0
+        last_floor_change_at: float = 0.0
+        last_floor_change_from_id: str | None = None
         last_anchor_ids: tuple[str, ...] = ()
         last_anchor_ranges: dict[str, float] = field(default_factory=dict)
         last_anchor_z: dict[str, float | None] = field(default_factory=dict)
@@ -1632,6 +1634,8 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
     _TRILAT_DEFAULT_ANCHOR_SIGMA_M: float = 8.0
     _TRILAT_DIAGNOSTIC_OTHER_FLOOR_SIGMA_MULTIPLIER: float = 4.0
     _TRILAT_FLOOR_AMBIGUITY_RATIO: float = 0.2
+    _TRILAT_FLOOR_SWITCH_PRIOR_WINDOW_S: float = 12.0
+    _TRILAT_FLOOR_SWITCH_PRIOR_SIGMA_MULTIPLIER: float = 2.5
     _TRILAT_RANGE_DELTA_EPSILON_M: float = 0.2
     _TRILAT_MAX_POSITION_SPEED_MPS: float = 5.0
     _TRILAT_MAX_VERTICAL_SPEED_MPS: float = 1.5
@@ -2008,6 +2012,11 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             + (0.10 * sigma_term)
             + (0.28 * range_delta_term)
         ) * status_multiplier
+        sigma_xy *= self._floor_switch_prior_sigma_scale(
+            state,
+            nowstamp=nowstamp,
+            mobility_type=mobility_type,
+        )
         sigma_xy = max(0.25, sigma_xy)
 
         if solver_dimension == "3d":
@@ -2022,6 +2031,11 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 + (0.08 * sigma_term)
                 + (0.12 * range_delta_term)
             ) * status_multiplier
+            sigma_z *= self._floor_switch_prior_sigma_scale(
+                state,
+                nowstamp=nowstamp,
+                mobility_type=mobility_type,
+            )
             sigma_z = max(0.35, sigma_z)
             return SolvePrior3D(
                 x_m=predicted_x,
@@ -2037,6 +2051,28 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             y_m=predicted_y,
             sigma_x_m=sigma_xy,
             sigma_y_m=sigma_xy,
+        )
+
+    def _floor_switch_prior_sigma_scale(
+        self,
+        state: TrilatDecisionState,
+        *,
+        nowstamp: float,
+        mobility_type: str,
+    ) -> float:
+        """Weaken the carried prior briefly after a floor switch instead of dropping it."""
+        if state.last_floor_change_at <= 0.0:
+            return 1.0
+        age_s = max(0.0, nowstamp - state.last_floor_change_at)
+        window_s = self._TRILAT_FLOOR_SWITCH_PRIOR_WINDOW_S
+        if mobility_type == MOBILITY_STATIONARY:
+            window_s *= 1.5
+        if age_s >= window_s:
+            return 1.0
+        remaining = 1.0 - (age_s / max(window_s, 1e-9))
+        return 1.0 + (
+            (self._TRILAT_FLOOR_SWITCH_PRIOR_SIGMA_MULTIPLIER - 1.0)
+            * remaining
         )
 
     @staticmethod
@@ -2238,6 +2274,9 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             ambiguity_ratio = None
             if total_floor_score is not None and total_floor_score > 0.0 and best_floor_score is not None:
                 ambiguity_ratio = (best_floor_score - (second_floor_score or 0.0)) / total_floor_score
+            floor_switch_age_s = None
+            if state.last_floor_change_at > 0.0:
+                floor_switch_age_s = max(0.0, nowstamp - state.last_floor_change_at)
             device.trilat_floor_diagnostics = {
                 "reason": reason,
                 "selected_floor_id": selected_floor_id,
@@ -2260,6 +2299,29 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 "challenger_dwell_s": challenger_dwell_s,
                 "required_dwell_s": policy.floor_dwell_seconds,
                 "cross_floor_anchor_count": device.trilat_cross_floor_anchor_count,
+                "floor_switch_count": getattr(device, "trilat_floor_switch_count", 0),
+                "floor_switch_last_at": getattr(device, "trilat_floor_switch_last_at", None),
+                "floor_switch_last_from_floor_id": getattr(
+                    device,
+                    "trilat_floor_switch_last_from_floor_id",
+                    None,
+                ),
+                "floor_switch_last_to_floor_id": getattr(
+                    device,
+                    "trilat_floor_switch_last_to_floor_id",
+                    None,
+                ),
+                "floor_switch_last_from_name": getattr(
+                    device,
+                    "trilat_floor_switch_last_from_name",
+                    None,
+                ),
+                "floor_switch_last_to_name": getattr(
+                    device,
+                    "trilat_floor_switch_last_to_name",
+                    None,
+                ),
+                "floor_switch_age_s": floor_switch_age_s,
                 "floor_switch_reset_count": getattr(device, "trilat_floor_switch_reset_count", 0),
                 "floor_switch_reset_last_at": getattr(device, "trilat_floor_switch_reset_last_at", None),
                 "floor_switch_reset_last_from_floor_id": getattr(
@@ -2504,33 +2566,16 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         )
 
         if prev_floor_id is not None and selected_floor_id != prev_floor_id:
-            device.trilat_floor_switch_reset_count = getattr(device, "trilat_floor_switch_reset_count", 0) + 1
-            device.trilat_floor_switch_reset_last_at = nowstamp
-            device.trilat_floor_switch_reset_last_from_floor_id = prev_floor_id
-            device.trilat_floor_switch_reset_last_to_floor_id = selected_floor_id
-            device.trilat_floor_switch_reset_last_from_name = self._resolve_floor_name(prev_floor_id)
-            device.trilat_floor_switch_reset_last_to_name = selected_floor_name
-            for advert in latest.values():
-                advert.trilat_range_ewma_m = None
-            state.last_anchor_ids = ()
-            state.last_anchor_ranges.clear()
-            state.last_anchor_z.clear()
-            state.last_solution_xy = None
-            state.last_solution_z = None
-            state.velocity_x_mps = 0.0
-            state.velocity_y_mps = 0.0
-            state.velocity_z_mps = 0.0
-            state.last_filter_stamp = 0.0
-            state.last_solver_dimension = "2d"
-            state.last_residual_m = None
-            state.last_mean_sigma_m = None
-            state.last_geometry_quality_01 = 0.0
-            state.last_residual_consistency_01 = 0.0
-            state.last_geometry_gdop = None
-            state.last_geometry_condition = None
-            state.last_normalized_residual_rms = None
+            state.last_floor_change_at = nowstamp
+            state.last_floor_change_from_id = prev_floor_id
+            device.trilat_floor_switch_count = getattr(device, "trilat_floor_switch_count", 0) + 1
+            device.trilat_floor_switch_last_at = nowstamp
+            device.trilat_floor_switch_last_from_floor_id = prev_floor_id
+            device.trilat_floor_switch_last_to_floor_id = selected_floor_id
+            device.trilat_floor_switch_last_from_name = self._resolve_floor_name(prev_floor_id)
+            device.trilat_floor_switch_last_to_name = selected_floor_name
             _apply_floor_diagnostics(
-                reason="floor_switch_cold_reset",
+                reason="floor_switch_preserved_state",
                 selected_floor_id=selected_floor_id,
                 floor_evidence=floor_evidence,
                 best_floor_id=best_floor_id,
@@ -2556,13 +2601,14 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 f"trilat_floor_diag:{device.address}",
                 (
                     "Trilat floor diag: %s selected=%s challenger=%s margin=%s "
-                    "cross_floor=%d resets=%d evidence=[%s]"
+                    "cross_floor=%d switches=%d resets=%d evidence=[%s]"
                 ),
                 device.name,
                 selected_floor_id,
                 state.floor_challenger_id,
                 f"{floor_margin:.3f}" if floor_margin is not None else "n/a",
                 device.trilat_cross_floor_anchor_count,
+                getattr(device, "trilat_floor_switch_count", 0),
                 getattr(device, "trilat_floor_switch_reset_count", 0),
                 evidence_str,
             )

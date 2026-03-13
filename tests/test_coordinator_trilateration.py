@@ -53,6 +53,12 @@ class _DummyDevice:
         self.trilat_floor_diagnostics = {}
         self.trilat_cross_floor_anchor_count = 0
         self.trilat_cross_floor_anchor_diagnostics = []
+        self.trilat_floor_switch_count = 0
+        self.trilat_floor_switch_last_at = None
+        self.trilat_floor_switch_last_from_floor_id = None
+        self.trilat_floor_switch_last_to_floor_id = None
+        self.trilat_floor_switch_last_from_name = None
+        self.trilat_floor_switch_last_to_name = None
         self.trilat_floor_switch_reset_count = 0
         self.trilat_floor_switch_reset_last_at = None
         self.trilat_floor_switch_reset_last_from_floor_id = None
@@ -492,32 +498,49 @@ def test_area_switch_requires_extra_dwell_for_weak_transition():
         assert device.area_id == "living_room"
 
 
-def test_trilat_ewma_resets_on_floor_change():
-    """Switching floors must reset per-advert EWMA so stale cross-floor ranges are discarded."""
+def test_trilat_floor_switch_preserves_state_and_ewma():
+    """Switching floors should preserve continuity state and existing EWMA values."""
     coordinator = _make_coordinator()
     device = _DummyDevice("dev-ewma")
 
-    sc_a = _make_scanner(coordinator, "ew-a", "f1", 0.0, 0.0)
-    sc_b1 = _make_scanner(coordinator, "ew-b1", "f2", 5.0, 0.0)
-    sc_b2 = _make_scanner(coordinator, "ew-b2", "f2", 0.0, 5.0)
+    sc_a = _make_scanner(coordinator, "ew-a", "f1", 0.0, 0.0, z_m=0.0)
+    sc_b = _make_scanner(coordinator, "ew-b", "f1", 6.0, 0.0, z_m=0.0)
+    sc_c = _make_scanner(coordinator, "ew-c", "f1", 0.0, 8.0, z_m=0.0)
+    sc_d = _make_scanner(coordinator, "ew-d", "f1", 0.0, 0.0, z_m=2.0)
+    sc_e1 = _make_scanner(coordinator, "ew-e1", "f2", 0.0, 0.0)
+    sc_e2 = _make_scanner(coordinator, "ew-e2", "f2", 6.0, 0.0)
+    sc_e3 = _make_scanner(coordinator, "ew-e3", "f2", 0.0, 8.0)
 
     fresh = time.monotonic()
-    adv_a = _make_advert(sc_a, fresh, -70.0, 4.0)
-    adv_b1 = _make_advert(sc_b1, fresh, -60.0, 3.0)
-    adv_b2 = _make_advert(sc_b2, fresh, -60.0, 3.0)
+    dist_3d = 26.0**0.5
+    adv_a = _make_advert(sc_a, fresh, -60.0, dist_3d)
+    adv_b = _make_advert(sc_b, fresh, -60.0, dist_3d)
+    adv_c = _make_advert(sc_c, fresh, -60.0, dist_3d)
+    adv_d = _make_advert(sc_d, fresh, -60.0, dist_3d)
+    adv_e1 = _make_advert(sc_e1, fresh, -60.0, 5.0)
+    adv_e2 = _make_advert(sc_e2, fresh, -60.0, 5.0)
+    adv_e3 = _make_advert(sc_e3, fresh, -60.0, 5.0)
 
-    # First call: only f1 scanner visible → floor = f1, EWMA initialised.
-    device.adverts = {("dev-ewma", sc_a.address): adv_a}
+    # First call: solve a stable 3D point on f1.
+    device.adverts = {
+        ("dev-ewma", sc_a.address): adv_a,
+        ("dev-ewma", sc_b.address): adv_b,
+        ("dev-ewma", sc_c.address): adv_c,
+        ("dev-ewma", sc_d.address): adv_d,
+    }
     coordinator._refresh_trilateration_for_device(device)
     state = coordinator._get_trilat_decision_state(device)
     assert state.floor_id == "f1"
     assert adv_a.trilat_range_ewma_m is not None
+    assert device.trilat_z_m is not None
+    prior_z = device.trilat_z_m
 
     # Expose the f2 scanners and force the challenger dwell to be already expired.
     device.adverts = {
         ("dev-ewma", sc_a.address): adv_a,
-        ("dev-ewma", sc_b1.address): adv_b1,
-        ("dev-ewma", sc_b2.address): adv_b2,
+        ("dev-ewma", sc_e1.address): adv_e1,
+        ("dev-ewma", sc_e2.address): adv_e2,
+        ("dev-ewma", sc_e3.address): adv_e3,
     }
     state.floor_challenger_id = "f2"
     state.floor_challenger_since = time.monotonic() - 100.0
@@ -525,15 +548,18 @@ def test_trilat_ewma_resets_on_floor_change():
     coordinator._refresh_trilateration_for_device(device)
 
     assert state.floor_id == "f2", "floor should have switched to f2"
-    # Cross-floor scanner (f1) must have its EWMA cleared so stale ranges are discarded.
-    assert adv_a.trilat_range_ewma_m is None, "EWMA must be reset on floor change for cross-floor scanner"
-    # New floor's scanners get freshly initialized to rssi_distance_raw in the same call.
-    assert adv_b1.trilat_range_ewma_m == adv_b1.rssi_distance_raw
-    assert adv_b2.trilat_range_ewma_m == adv_b2.rssi_distance_raw
-    assert device.trilat_floor_switch_reset_count == 1
-    assert device.trilat_floor_switch_reset_last_from_floor_id == "f1"
-    assert device.trilat_floor_switch_reset_last_to_floor_id == "f2"
-    assert device.trilat_floor_diagnostics["reason"] == "floor_switch_cold_reset"
+    assert adv_a.trilat_range_ewma_m is not None, "EWMA should be preserved across floor switches"
+    assert adv_e1.trilat_range_ewma_m == adv_e1.rssi_distance_raw
+    assert adv_e2.trilat_range_ewma_m == adv_e2.rssi_distance_raw
+    assert adv_e3.trilat_range_ewma_m == adv_e3.rssi_distance_raw
+    assert device.trilat_floor_switch_count == 1
+    assert device.trilat_floor_switch_last_from_floor_id == "f1"
+    assert device.trilat_floor_switch_last_to_floor_id == "f2"
+    assert device.trilat_floor_switch_reset_count == 0
+    assert device.trilat_floor_diagnostics["reason"] == "floor_switch_preserved_state"
+    assert state.last_solution_xy is not None
+    assert device.trilat_z_m is not None
+    assert abs(device.trilat_z_m - prior_z) < 1.0
 
 
 def test_solve_skips_when_inputs_unchanged():
@@ -934,3 +960,47 @@ def test_trilat_solve_prior_skips_cross_floor_state():
     )
 
     assert prior is None
+
+
+def test_trilat_solve_prior_is_weakened_after_floor_switch():
+    """Recent floor changes should inflate the carry-over prior uncertainty."""
+    coordinator = _make_coordinator()
+    device = _DummyDevice("dev-prior-floor-switch", mobility_type="stationary")
+    state = coordinator._get_trilat_decision_state(device)
+    state.floor_id = "f2"
+    state.last_solution_xy = (4.0, 5.0)
+    state.last_solution_z = 2.0
+    state.velocity_x_mps = 0.5
+    state.velocity_y_mps = -0.25
+    state.velocity_z_mps = 0.1
+    state.last_filter_stamp = 100.0
+    state.last_residual_m = 0.4
+    state.last_mean_sigma_m = 1.0
+    state.last_status = "ok"
+
+    baseline = coordinator._build_trilat_solve_prior(
+        state,
+        nowstamp=102.0,
+        mobility_type=device.get_mobility_type(),
+        solver_dimension="3d",
+        selected_floor_id="f2",
+        mean_sigma_m=1.0,
+        mean_anchor_range_delta_m=0.5,
+    )
+
+    state.last_floor_change_at = 101.5
+    state.last_floor_change_from_id = "f1"
+    switched = coordinator._build_trilat_solve_prior(
+        state,
+        nowstamp=102.0,
+        mobility_type=device.get_mobility_type(),
+        solver_dimension="3d",
+        selected_floor_id="f2",
+        mean_sigma_m=1.0,
+        mean_anchor_range_delta_m=0.5,
+    )
+
+    assert baseline is not None
+    assert switched is not None
+    assert switched.sigma_x_m > baseline.sigma_x_m
+    assert switched.sigma_z_m > baseline.sigma_z_m
