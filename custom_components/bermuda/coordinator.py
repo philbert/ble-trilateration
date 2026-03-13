@@ -2471,6 +2471,13 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 for entry in cross_floor_entries
             ]
 
+        def _anchor_status_count_summary() -> str:
+            counts: dict[str, int] = {}
+            for entry in device.trilat_anchor_statuses.values():
+                status = str(entry.get("status", "unknown"))
+                counts[status] = counts.get(status, 0) + 1
+            return ", ".join(f"{status}={counts[status]}" for status in sorted(counts)) or "none"
+
         fresh_any = any(advert.stamp >= nowstamp - DISTANCE_TIMEOUT for advert in latest.values())
         if not fresh_any:
             _apply_anchor_status_entries()
@@ -2786,10 +2793,11 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             if _debug_this_device:
                 _LOGGER_TARGET_SPAM_LESS.debug(
                     f"trilat_low_conf:{device.address}:insufficient_anchors",
-                    "Trilat: %s low confidence (insufficient_anchors), floor=%s anchors=%d",
+                    "Trilat: %s low confidence (insufficient_anchors), floor=%s anchors=%d status_counts=[%s]",
                     device.name,
                     selected_floor_name,
                     anchor_count,
+                    _anchor_status_count_summary(),
                 )
             return
 

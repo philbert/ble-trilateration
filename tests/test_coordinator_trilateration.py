@@ -199,12 +199,13 @@ def test_trilat_low_confidence_with_insufficient_anchors():
     coordinator = _make_coordinator()
     device = _DummyDevice("dev-b")
 
-    scanner = SimpleNamespace(
+    scanner = _DummyScanner(
         address="scanner-a",
         floor_id="f1",
         anchor_x_m=0.0,
         anchor_y_m=0.0,
         name="Scanner A",
+        is_scanner=False,
     )
     coordinator.devices[scanner.address] = scanner
 
@@ -219,6 +220,40 @@ def test_trilat_low_confidence_with_insufficient_anchors():
     assert device.trilat_anchor_count == 1
     assert device.trilat_x_m is not None
     assert device.trilat_y_m is not None
+
+
+def test_trilat_low_confidence_logs_anchor_status_counts():
+    """Targeted insufficient-anchor logs should include anchor rejection counts."""
+    coordinator = _make_coordinator()
+    device = _DummyDevice("dev-low-log")
+
+    scanner = _DummyScanner(
+        address="scanner-a",
+        floor_id="f1",
+        anchor_x_m=0.0,
+        anchor_y_m=0.0,
+        name="Scanner A",
+        is_scanner=False,
+    )
+    coordinator.devices[scanner.address] = scanner
+    coordinator._scanners.add(scanner)
+
+    fresh_stamp = time.monotonic()
+    advert = _make_advert(scanner, fresh_stamp, -72.0, 3.5)
+    device.adverts = {("dev-low-log", scanner.address): advert}
+
+    with (
+        patch("custom_components.bermuda.coordinator.debug_device_match", return_value=True),
+        patch("custom_components.bermuda.coordinator._LOGGER_TARGET_SPAM_LESS.debug") as log_debug,
+    ):
+        coordinator._refresh_trilateration_for_device(device)
+
+    assert any(
+        call.args[0] == "trilat_low_conf:dev-low-log:insufficient_anchors"
+        and "status_counts=[%s]" in call.args[1]
+        and call.args[-1] == "valid=1"
+        for call in log_debug.call_args_list
+    )
 
 
 def test_floor_evidence_cross_floor_penalty_selects_correct_floor():
