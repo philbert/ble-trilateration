@@ -239,9 +239,10 @@ Runtime behavior:
   - `1.0` when solved position quality is acceptable, the current room context matches `room_area_id`, the solved position is within `sample_radius_m`, and `transition_floor_ids` includes the challenger floor,
   - `0.5` when solved position quality is low but the room context still matches `room_area_id` and the challenger floor is listed,
   - `0.0` otherwise,
+- keep a short recent-transition memory driven by proximity to any transition sample, even when room assignment lags the physical movement through the transition point,
 - the `0.5` fallback is intentionally below the current Rule 4 trigger threshold (`> 0.60`), so it informs diagnostics in the first rollout without reducing dwell,
-- reduce floor-switch penalty / dwell only from this soft support score,
-- transition support is advisory only and must never hard-block a switch.
+- reduce floor-switch penalty / dwell only from immediate or recent transition support,
+- if transition samples exist for the current layout, there is no plausible current or recent route to the challenger floor, and fingerprint evidence still prefers the current floor, Bermuda may veto the switch rather than forcing a no-route floor change.
 
 Why this is the right scope:
 
@@ -279,6 +280,7 @@ Inputs each update:
     second_score
   )
   transition_support_01
+  transition_recent_support_01
   geometry_support_01 = min(geometry_quality_01, residual_consistency_01)
 
 Rule 1:
@@ -309,10 +311,16 @@ Rule 4:
     effective_required_dwell *= (1.0 - 0.4 * transition_support_01)
 
 Rule 5:
+  If transition samples exist for the active layout,
+  transition_support_01 <= 0.60,
+  and fingerprint_global still prefers current_floor_id:
+    veto the challenger switch and preserve the challenger state.
+
+Rule 6:
   If fingerprint_global.floor_confidence < 0.40 and geometry_support_01 < 0.30:
     hold current_floor_id, lower confidence, and do not advance the challenger timer.
 
-Rule 6:
+Rule 7:
   Otherwise apply the existing floor margin / dwell challenger state machine
   using effective_required_dwell. Transition support can reduce dwell, but
   it does not bypass margin checks or force a switch by itself.
@@ -610,7 +618,8 @@ Expected payoff:
 ### Phase 5: Hybrid floor arbitration
 
 - if diagnostics validate fingerprint usefulness, feed fingerprint floor evidence into the floor posterior,
-- feed transition-sample support into floor challenger arbitration as a soft prior,
+- feed immediate and recent transition-sample support into floor challenger arbitration as a soft prior,
+- allow no-route vetoes only when fingerprint evidence still prefers the current floor,
 - require an explicit replay threshold before promoting it:
   - target `>85%` floor-correct top-room on known traces,
   - target score gap or confidence margin large enough to avoid frequent ambiguity,
@@ -664,7 +673,7 @@ Expected payoff:
 - transition samples are captured through timed sessions and persist live anchor observations plus quality,
 - transition samples do not merge away distinct `x/y/z` points inside the same room,
 - a challenger floor with nearby matching transition support gets reduced switch penalty / dwell,
-- a challenger floor without nearby matching transition support does not get forced through,
+- a challenger floor without nearby or recent matching transition support does not get forced through when fingerprint still prefers the current floor,
 - hybrid floor arbitration can hold ambiguity instead of forcing a wrong room,
 - geometry quality and residual consistency reduce the influence of weak solves.
 
@@ -678,6 +687,7 @@ Required scenarios:
 - `Guest Room -> Garage front` failure replay,
 - split-level stair traversal between basement, street, and ground,
 - split-level traversal where Bermuda misses an explicit stairwell dwell but should still recover through soft evidence,
+- split-level traversal where room assignment lags the transition point but recent-transition memory should still authorize the real floor change,
 - outdoor transition into `garage_front`,
 - sparse-anchor periods where 3D temporarily drops to 2D.
 
@@ -686,7 +696,7 @@ Required scenarios:
 - no immediate collapse from `Guest Room` to `Garage front` caused solely by a floor challenger,
 - no full solver cold restart after a brief floor flip,
 - same-floor anchors are not lost merely because floor evidence briefly favored another level,
-- supported floor changes are easier near declared transition points without becoming mandatory checkpoints,
+- supported floor changes are easier near declared transition points or just after them, without becoming mandatory checkpoints,
 - floor confidence degrades before room assignment becomes physically implausible,
 - fingerprint-global diagnostics are measurable against the current assignment logic.
 

@@ -1704,6 +1704,11 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         challenger_fingerprint_hold_since: float = 0.0
         challenger_fingerprint_hold_total_s: float = 0.0
         challenger_fingerprint_hold_expired: bool = False
+        recent_transition_name: str | None = None
+        recent_transition_room_area_id: str | None = None
+        recent_transition_floor_ids: tuple[str, ...] = ()
+        recent_transition_support_01: float = 0.0
+        recent_transition_seen_at: float = 0.0
 
     _TRILAT_MIN_ANCHORS: int = 3
     _TRILAT_MIN_ANCHORS_3D: int = 4
@@ -1715,6 +1720,8 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
     _TRILAT_FINGERPRINT_FLOOR_CONFIDENCE_HIGH: float = 0.70
     _TRILAT_FINGERPRINT_FLOOR_CONFIDENCE_MODERATE: float = 0.55
     _TRILAT_FINGERPRINT_FLOOR_SCORE_RATIO_HOLD: float = 1.25
+    _TRILAT_TRANSITION_SUPPORT_REQUIRED: float = 0.60
+    _TRILAT_RECENT_TRANSITION_WINDOW_S: float = 20.0
     _TRILAT_FLOOR_SWITCH_PRIOR_WINDOW_S: float = 12.0
     _TRILAT_FLOOR_SWITCH_PRIOR_SIGMA_MULTIPLIER: float = 2.5
     _TRILAT_RANGE_DELTA_EPSILON_M: float = 0.2
@@ -2381,6 +2388,12 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             fingerprint_hold_ceiling_s: float | None = None,
             fingerprint_switch_veto_active: bool = False,
             transition_support_01: float = 0.0,
+            transition_immediate_support_01: float = 0.0,
+            transition_recent_support_01: float = 0.0,
+            transition_recent_age_s: float | None = None,
+            transition_recent_name: str | None = None,
+            transition_recent_floor_ids: tuple[str, ...] = (),
+            transition_switch_veto_active: bool = False,
             transition_dwell_reduction_applied: bool = False,
         ) -> None:
             floor_evidence = floor_evidence or {}
@@ -2449,6 +2462,15 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 "fingerprint_hold_expired": state.challenger_fingerprint_hold_expired,
                 "fingerprint_switch_veto_active": fingerprint_switch_veto_active,
                 "transition_support_01": transition_support_01,
+                "transition_immediate_support_01": transition_immediate_support_01,
+                "transition_recent_support_01": transition_recent_support_01,
+                "transition_recent_age_s": transition_recent_age_s,
+                "transition_recent_name": transition_recent_name,
+                "transition_recent_floor_ids": list(transition_recent_floor_ids),
+                "transition_recent_floor_names": [
+                    self._resolve_floor_name(floor_id) for floor_id in transition_recent_floor_ids
+                ],
+                "transition_switch_veto_active": transition_switch_veto_active,
                 "transition_dwell_reduction_applied": transition_dwell_reduction_applied,
                 "soft_include_other_floor_anchors_enabled": soft_include_other_floor_anchors,
                 "cross_floor_anchor_count": device.trilat_cross_floor_anchor_count,
@@ -2633,6 +2655,61 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 live_rssi_by_scanner=global_live_rssi_by_scanner,
             )
 
+        geometry_quality_01 = max(0.0, min(1.0, float(device.trilat_geometry_quality or 0.0) / 10.0))
+
+        def _refresh_recent_transition_context() -> dict[str, object]:
+            if not layout_hash or not hasattr(self.calibration, "transition_support_diagnostics"):
+                return {}
+            transition_diag = self.calibration.transition_support_diagnostics(
+                layout_hash=layout_hash,
+                x_m=device.trilat_x_m,
+                y_m=device.trilat_y_m,
+                z_m=device.trilat_z_m,
+                room_area_id=None,
+                challenger_floor_id=None,
+                geometry_quality_01=geometry_quality_01,
+            )
+            best_floor_ids = tuple(str(floor_id) for floor_id in (transition_diag.get("transition_best_floor_ids") or []) if floor_id)
+            best_within_radius = bool(transition_diag.get("transition_best_within_radius"))
+            if best_within_radius and best_floor_ids:
+                support_01 = 1.0 if geometry_quality_01 >= 0.30 else 0.5
+                state.recent_transition_name = str(transition_diag.get("transition_best_name") or "") or None
+                state.recent_transition_room_area_id = (
+                    str(transition_diag.get("transition_best_room_area_id") or "") or None
+                )
+                state.recent_transition_floor_ids = best_floor_ids
+                state.recent_transition_support_01 = support_01
+                state.recent_transition_seen_at = nowstamp
+            elif (
+                state.recent_transition_seen_at > 0.0
+                and (nowstamp - state.recent_transition_seen_at) > self._TRILAT_RECENT_TRANSITION_WINDOW_S
+            ):
+                state.recent_transition_name = None
+                state.recent_transition_room_area_id = None
+                state.recent_transition_floor_ids = ()
+                state.recent_transition_support_01 = 0.0
+                state.recent_transition_seen_at = 0.0
+            return transition_diag
+
+        def _recent_transition_support_for_challenger(challenger_floor_id: str | None) -> tuple[float, float | None]:
+            if (
+                challenger_floor_id is None
+                or state.recent_transition_seen_at <= 0.0
+                or challenger_floor_id not in state.recent_transition_floor_ids
+            ):
+                return 0.0, None
+            age_s = max(0.0, nowstamp - state.recent_transition_seen_at)
+            if age_s > self._TRILAT_RECENT_TRANSITION_WINDOW_S:
+                state.recent_transition_name = None
+                state.recent_transition_room_area_id = None
+                state.recent_transition_floor_ids = ()
+                state.recent_transition_support_01 = 0.0
+                state.recent_transition_seen_at = 0.0
+                return 0.0, None
+            return state.recent_transition_support_01, age_s
+
+        transition_context_diag = _refresh_recent_transition_context()
+
         def _transition_support_for_challenger(challenger_floor_id: str | None) -> float:
             if (
                 not layout_hash
@@ -2647,7 +2724,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 z_m=device.trilat_z_m,
                 room_area_id=self._stable_area_id(device),
                 challenger_floor_id=challenger_floor_id,
-                geometry_quality_01=max(0.0, min(1.0, float(device.trilat_geometry_quality or 0.0) / 10.0)),
+                geometry_quality_01=geometry_quality_01,
             )
             return float(transition_diag.get("transition_support_01", 0.0) or 0.0)
 
@@ -2720,7 +2797,11 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         fingerprint_hold_elapsed_s = 0.0
         fingerprint_hold_ceiling_s = float(policy.floor_dwell_seconds) * 2.0
         fingerprint_switch_veto_active = False
+        transition_switch_veto_active = False
         transition_support_01 = 0.0
+        transition_immediate_support_01 = 0.0
+        transition_recent_support_01 = 0.0
+        transition_recent_age_s: float | None = None
         transition_dwell_reduction_applied = False
         if state.floor_id is None:
             state.floor_id = best_floor_id
@@ -2808,8 +2889,12 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 if fingerprint_supports_challenger:
                     effective_required_dwell_s *= 0.5
 
-                transition_support_01 = _transition_support_for_challenger(state.floor_challenger_id)
-                if transition_support_01 > 0.60:
+                transition_immediate_support_01 = _transition_support_for_challenger(state.floor_challenger_id)
+                transition_recent_support_01, transition_recent_age_s = _recent_transition_support_for_challenger(
+                    state.floor_challenger_id
+                )
+                transition_support_01 = max(transition_immediate_support_01, transition_recent_support_01)
+                if transition_support_01 > self._TRILAT_TRANSITION_SUPPORT_REQUIRED:
                     effective_required_dwell_s *= (1.0 - (0.4 * transition_support_01))
                     transition_dwell_reduction_applied = True
 
@@ -2820,6 +2905,14 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 if not fingerprint_hold_active and challenger_effective_dwell_s >= effective_required_dwell_s:
                     if fingerprint_supports_current_floor:
                         fingerprint_switch_veto_active = True
+                    elif (
+                        int(transition_context_diag.get("transition_layout_sample_count", 0) or 0) > 0
+                        and transition_support_01 <= self._TRILAT_TRANSITION_SUPPORT_REQUIRED
+                        and fingerprint_has_floor_signal
+                        and state.floor_id is not None
+                        and current_floor_fp_score >= challenger_floor_fp_score
+                    ):
+                        transition_switch_veto_active = True
                     else:
                         state.floor_id = best_floor_id
                         state.floor_challenger_id = None
@@ -2865,6 +2958,12 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             fingerprint_hold_ceiling_s=fingerprint_hold_ceiling_s,
             fingerprint_switch_veto_active=fingerprint_switch_veto_active,
             transition_support_01=transition_support_01,
+            transition_immediate_support_01=transition_immediate_support_01,
+            transition_recent_support_01=transition_recent_support_01,
+            transition_recent_age_s=transition_recent_age_s,
+            transition_recent_name=state.recent_transition_name,
+            transition_recent_floor_ids=state.recent_transition_floor_ids,
+            transition_switch_veto_active=transition_switch_veto_active,
             transition_dwell_reduction_applied=transition_dwell_reduction_applied,
         )
 
@@ -2897,6 +2996,12 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 fingerprint_hold_ceiling_s=fingerprint_hold_ceiling_s,
                 fingerprint_switch_veto_active=fingerprint_switch_veto_active,
                 transition_support_01=transition_support_01,
+                transition_immediate_support_01=transition_immediate_support_01,
+                transition_recent_support_01=transition_recent_support_01,
+                transition_recent_age_s=transition_recent_age_s,
+                transition_recent_name=state.recent_transition_name,
+                transition_recent_floor_ids=state.recent_transition_floor_ids,
+                transition_switch_veto_active=transition_switch_veto_active,
                 transition_dwell_reduction_applied=transition_dwell_reduction_applied,
             )
 
@@ -2915,7 +3020,9 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                     "Trilat floor diag: %s selected=%s challenger=%s margin=%s "
                     "cross_floor=%d switches=%d resets=%d fp_floor=%s fp_conf=%s "
                     "fp_reason=%s fp_hold=%s/%s fp_veto=%s effective_dwell=%s/%s "
-                    "transition_support=%s transition_dwell=%s evidence=[%s]"
+                    "transition_support=%s transition_immediate=%s transition_recent=%s "
+                    "transition_recent_age=%s transition_recent_name=%s transition_veto=%s "
+                    "transition_dwell=%s evidence=[%s]"
                 ),
                 device.name,
                 selected_floor_id,
@@ -2933,6 +3040,11 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 f"{challenger_effective_dwell_s:.3f}" if challenger_effective_dwell_s is not None else "n/a",
                 f"{effective_required_dwell_s:.3f}" if effective_required_dwell_s is not None else "n/a",
                 f"{transition_support_01:.3f}",
+                f"{transition_immediate_support_01:.3f}",
+                f"{transition_recent_support_01:.3f}",
+                f"{transition_recent_age_s:.3f}" if transition_recent_age_s is not None else "n/a",
+                state.recent_transition_name,
+                transition_switch_veto_active,
                 transition_dwell_reduction_applied,
                 evidence_str,
             )

@@ -661,6 +661,171 @@ def test_floor_challenger_does_not_reduce_dwell_on_weak_transition_support():
     assert device.trilat_floor_diagnostics["effective_required_dwell_s"] == 8.0
 
 
+def test_floor_challenger_vetoes_without_plausible_transition_route():
+    """A cross-floor challenger should be vetoed when transition samples exist but no route supports it."""
+    coordinator = _make_coordinator()
+    coordinator.room_classifier = SimpleNamespace(
+        fingerprint_global=lambda **_kwargs: GlobalFingerprintResult(
+            area_id="guest_room",
+            floor_id="f1",
+            reason="ok",
+            floor_confidence=0.60,
+            room_confidence=0.48,
+            best_score=0.40,
+            second_score=0.39,
+            floor_scores={"f1": 0.40, "f2": 0.39},
+        )
+    )
+
+    def _transition_diag(**kwargs):
+        room_area_id = kwargs.get("room_area_id")
+        challenger_floor_id = kwargs.get("challenger_floor_id")
+        if room_area_id is None and challenger_floor_id is None:
+            return {
+                "transition_layout_sample_count": 1,
+                "transition_best_within_radius": False,
+                "transition_best_floor_ids": ["f2"],
+            }
+        return {
+            "transition_layout_sample_count": 1,
+            "transition_support_01": 0.0,
+            "transition_best_within_radius": False,
+            "transition_best_floor_ids": ["f2"],
+        }
+
+    coordinator.calibration = SimpleNamespace(
+        current_anchor_layout_hash="layout-a",
+        transition_support_diagnostics=_transition_diag,
+    )
+    device = _DummyDevice("dev-transition-veto")
+    device.area_id = "guest_room"
+    device.area_last_seen_id = "guest_room"
+
+    sc_f1a = _make_scanner(coordinator, "tv-a", "f1", 0.0, 0.0)
+    sc_f1b = _make_scanner(coordinator, "tv-b", "f1", 6.0, 0.0)
+    sc_f1c = _make_scanner(coordinator, "tv-c", "f1", 0.0, 8.0)
+    sc_f2a = _make_scanner(coordinator, "tv-d", "f2", 0.0, 0.0)
+    sc_f2b = _make_scanner(coordinator, "tv-e", "f2", 6.0, 0.0)
+    sc_f2c = _make_scanner(coordinator, "tv-f", "f2", 0.0, 8.0)
+
+    with patch("custom_components.bermuda.coordinator.monotonic_time_coarse", return_value=100.0):
+        device.adverts = {
+            ("dev-transition-veto", sc_f1a.address): _make_advert(sc_f1a, 100.0, -70.0, 5.0),
+            ("dev-transition-veto", sc_f1b.address): _make_advert(sc_f1b, 100.0, -70.0, 5.0),
+            ("dev-transition-veto", sc_f1c.address): _make_advert(sc_f1c, 100.0, -70.0, 5.0),
+        }
+        coordinator._refresh_trilateration_for_device(device)
+
+    state = coordinator._get_trilat_decision_state(device)
+    assert state.floor_id == "f1"
+
+    with patch("custom_components.bermuda.coordinator.monotonic_time_coarse", return_value=126.0):
+        device.adverts = {
+            ("dev-transition-veto", sc_f1a.address): _make_advert(sc_f1a, 126.0, -82.0, 5.0),
+            ("dev-transition-veto", sc_f1b.address): _make_advert(sc_f1b, 126.0, -82.0, 5.0),
+            ("dev-transition-veto", sc_f1c.address): _make_advert(sc_f1c, 126.0, -82.0, 5.0),
+            ("dev-transition-veto", sc_f2a.address): _make_advert(sc_f2a, 126.0, -58.0, 5.0),
+            ("dev-transition-veto", sc_f2b.address): _make_advert(sc_f2b, 126.0, -58.0, 5.0),
+            ("dev-transition-veto", sc_f2c.address): _make_advert(sc_f2c, 126.0, -58.0, 5.0),
+        }
+        state.floor_challenger_id = "f2"
+        state.floor_challenger_since = 101.0
+        state.challenger_fingerprint_hold_total_s = 16.0
+        state.challenger_fingerprint_hold_expired = True
+        coordinator._refresh_trilateration_for_device(device)
+
+    assert state.floor_id == "f1"
+    assert state.floor_challenger_id == "f2"
+    assert device.trilat_floor_diagnostics["transition_support_01"] == 0.0
+    assert device.trilat_floor_diagnostics["transition_switch_veto_active"] is True
+
+
+def test_floor_challenger_can_use_recent_transition_memory_when_room_context_lags():
+    """A recent nearby transition sample should authorize a switch even when room context does not yet match."""
+    coordinator = _make_coordinator()
+    coordinator.room_classifier = SimpleNamespace(
+        fingerprint_global=lambda **_kwargs: GlobalFingerprintResult(
+            area_id="guest_room",
+            floor_id="f1",
+            reason="ok",
+            floor_confidence=0.60,
+            room_confidence=0.48,
+            best_score=0.40,
+            second_score=0.39,
+            floor_scores={"f1": 0.40, "f2": 0.39},
+        )
+    )
+
+    def _transition_diag(**kwargs):
+        room_area_id = kwargs.get("room_area_id")
+        challenger_floor_id = kwargs.get("challenger_floor_id")
+        if room_area_id is None and challenger_floor_id is None:
+            return {
+                "transition_layout_sample_count": 1,
+                "transition_best_name": "stairwell",
+                "transition_best_room_area_id": "entrance_hall",
+                "transition_best_floor_ids": ["f2"],
+                "transition_best_within_radius": True,
+            }
+        return {
+            "transition_layout_sample_count": 1,
+            "transition_support_01": 0.0,
+            "transition_best_name": "stairwell",
+            "transition_best_room_area_id": "entrance_hall",
+            "transition_best_floor_ids": ["f2"],
+            "transition_best_within_radius": False,
+        }
+
+    coordinator.calibration = SimpleNamespace(
+        current_anchor_layout_hash="layout-a",
+        transition_support_diagnostics=_transition_diag,
+    )
+    device = _DummyDevice("dev-transition-memory")
+    device.area_id = "guest_room"
+    device.area_last_seen_id = "guest_room"
+    device.trilat_geometry_quality = 4.0
+
+    sc_f1a = _make_scanner(coordinator, "tm-a", "f1", 0.0, 0.0)
+    sc_f1b = _make_scanner(coordinator, "tm-b", "f1", 6.0, 0.0)
+    sc_f1c = _make_scanner(coordinator, "tm-c", "f1", 0.0, 8.0)
+    sc_f2a = _make_scanner(coordinator, "tm-d", "f2", 0.0, 0.0)
+    sc_f2b = _make_scanner(coordinator, "tm-e", "f2", 6.0, 0.0)
+    sc_f2c = _make_scanner(coordinator, "tm-f", "f2", 0.0, 8.0)
+
+    with patch("custom_components.bermuda.coordinator.monotonic_time_coarse", return_value=100.0):
+        device.adverts = {
+            ("dev-transition-memory", sc_f1a.address): _make_advert(sc_f1a, 100.0, -70.0, 5.0),
+            ("dev-transition-memory", sc_f1b.address): _make_advert(sc_f1b, 100.0, -70.0, 5.0),
+            ("dev-transition-memory", sc_f1c.address): _make_advert(sc_f1c, 100.0, -70.0, 5.0),
+        }
+        coordinator._refresh_trilateration_for_device(device)
+
+    state = coordinator._get_trilat_decision_state(device)
+    assert state.floor_id == "f1"
+    assert state.recent_transition_name == "stairwell"
+    assert state.recent_transition_floor_ids == ("f2",)
+
+    with patch("custom_components.bermuda.coordinator.monotonic_time_coarse", return_value=126.0):
+        device.adverts = {
+            ("dev-transition-memory", sc_f1a.address): _make_advert(sc_f1a, 126.0, -82.0, 5.0),
+            ("dev-transition-memory", sc_f1b.address): _make_advert(sc_f1b, 126.0, -82.0, 5.0),
+            ("dev-transition-memory", sc_f1c.address): _make_advert(sc_f1c, 126.0, -82.0, 5.0),
+            ("dev-transition-memory", sc_f2a.address): _make_advert(sc_f2a, 126.0, -58.0, 5.0),
+            ("dev-transition-memory", sc_f2b.address): _make_advert(sc_f2b, 126.0, -58.0, 5.0),
+            ("dev-transition-memory", sc_f2c.address): _make_advert(sc_f2c, 126.0, -58.0, 5.0),
+        }
+        state.floor_challenger_id = "f2"
+        state.floor_challenger_since = 101.0
+        state.challenger_fingerprint_hold_total_s = 16.0
+        state.challenger_fingerprint_hold_expired = True
+        coordinator._refresh_trilateration_for_device(device)
+
+    assert state.floor_id == "f2"
+    assert device.trilat_floor_diagnostics["transition_support_01"] == 1.0
+    assert device.trilat_floor_diagnostics["transition_recent_support_01"] == 1.0
+    assert device.trilat_floor_diagnostics["transition_switch_veto_active"] is False
+
+
 def test_phase2_keeps_mean_sigma_and_z_bounds_same_floor_only():
     """Phase-2 should exclude other-floor anchors from confidence sigma and z bounds."""
     coordinator = _make_coordinator()
