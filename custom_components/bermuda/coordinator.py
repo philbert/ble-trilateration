@@ -1630,6 +1630,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
     _TRILAT_MAX_RESIDUAL_M: float = 5.0
     _TRILAT_MAX_ANCHOR_SIGMA_M: float = 6.0
     _TRILAT_DEFAULT_ANCHOR_SIGMA_M: float = 8.0
+    _TRILAT_DIAGNOSTIC_OTHER_FLOOR_SIGMA_MULTIPLIER: float = 4.0
     _TRILAT_FLOOR_AMBIGUITY_RATIO: float = 0.2
     _TRILAT_RANGE_DELTA_EPSILON_M: float = 0.2
     _TRILAT_MAX_POSITION_SPEED_MPS: float = 5.0
@@ -1804,9 +1805,22 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
     def _format_anchor_status_entry(entry: dict[str, object]) -> str:
         """Render one scanner advert-status line for HA attributes."""
         line = f"{entry['scanner_name']}: {entry['status']}"
+        details: list[str] = []
         sync_state = entry.get("sync_state")
         if sync_state not in (None, "synchronized", "local", "not_scanner"):
-            line += f" (sync={sync_state})"
+            details.append(f"sync={sync_state}")
+        if entry.get("status") == "rejected_wrong_floor":
+            selected_floor_id = entry.get("selected_floor_id")
+            scanner_floor_id = entry.get("scanner_floor_id")
+            if selected_floor_id is not None:
+                details.append(f"selected={selected_floor_id}")
+            if scanner_floor_id is not None:
+                details.append(f"scanner={scanner_floor_id}")
+        soft_sigma_m = entry.get("soft_include_sigma_m")
+        if soft_sigma_m is not None:
+            details.append(f"soft_sigma={float(soft_sigma_m):.2f}m")
+        if details:
+            line += f" ({', '.join(details)})"
         return line
 
     @staticmethod
@@ -2176,12 +2190,107 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             device.name_bt_local_name,
             device.name_bt_serviceinfo,
         )
+        device.trilat_floor_evidence = {}
+        device.trilat_floor_evidence_names = {}
+        device.trilat_floor_diagnostics = {}
+        device.trilat_cross_floor_anchor_count = 0
+        device.trilat_cross_floor_anchor_diagnostics = []
+        prev_floor_id = state.floor_id
+
+        def _anchor_effective_sigma_m(
+            advert: BermudaAdvert,
+            *,
+            other_floor: bool = False,
+        ) -> float | None:
+            if advert.rssi_distance_raw is None or advert.rssi_distance is None:
+                return None
+            sigma_m = getattr(advert, "rssi_distance_sigma_m", None)
+            effective_sigma_m = float(sigma_m) if sigma_m is not None else self._TRILAT_DEFAULT_ANCHOR_SIGMA_M
+            advert_age_s = max(0.0, nowstamp - advert.stamp)
+            effective_sigma_m *= self._trilat_age_sigma_multiplier(advert_age_s)
+            if other_floor:
+                effective_sigma_m *= self._TRILAT_DIAGNOSTIC_OTHER_FLOOR_SIGMA_MULTIPLIER
+            return effective_sigma_m
+
+        def _apply_floor_diagnostics(
+            *,
+            reason: str,
+            selected_floor_id: str | None,
+            floor_evidence: dict[str, float] | None = None,
+            best_floor_id: str | None = None,
+            best_floor_score: float | None = None,
+            second_floor_score: float | None = None,
+            total_floor_score: float | None = None,
+            current_floor_score: float | None = None,
+            floor_ambiguity: bool = False,
+            floor_ambiguous_persisted: bool = False,
+            challenger_margin: float | None = None,
+        ) -> None:
+            floor_evidence = floor_evidence or {}
+            device.trilat_floor_evidence = dict(floor_evidence)
+            device.trilat_floor_evidence_names = {
+                floor_id: self._resolve_floor_name(floor_id)
+                for floor_id in floor_evidence
+            }
+            challenger_dwell_s = None
+            if state.floor_challenger_id is not None and state.floor_challenger_since > 0.0:
+                challenger_dwell_s = max(0.0, nowstamp - state.floor_challenger_since)
+            ambiguity_ratio = None
+            if total_floor_score is not None and total_floor_score > 0.0 and best_floor_score is not None:
+                ambiguity_ratio = (best_floor_score - (second_floor_score or 0.0)) / total_floor_score
+            device.trilat_floor_diagnostics = {
+                "reason": reason,
+                "selected_floor_id": selected_floor_id,
+                "selected_floor_name": self._resolve_floor_name(selected_floor_id),
+                "previous_floor_id": prev_floor_id,
+                "previous_floor_name": self._resolve_floor_name(prev_floor_id),
+                "best_floor_id": best_floor_id,
+                "best_floor_name": self._resolve_floor_name(best_floor_id),
+                "challenger_floor_id": state.floor_challenger_id,
+                "challenger_floor_name": self._resolve_floor_name(state.floor_challenger_id),
+                "best_floor_score": best_floor_score,
+                "current_floor_score": current_floor_score,
+                "second_floor_score": second_floor_score,
+                "total_floor_score": total_floor_score,
+                "ambiguity_ratio": ambiguity_ratio,
+                "floor_ambiguity": floor_ambiguity,
+                "floor_ambiguous_persisted": floor_ambiguous_persisted,
+                "challenger_margin": challenger_margin,
+                "required_margin": policy.floor_switch_margin,
+                "challenger_dwell_s": challenger_dwell_s,
+                "required_dwell_s": policy.floor_dwell_seconds,
+                "cross_floor_anchor_count": device.trilat_cross_floor_anchor_count,
+                "floor_switch_reset_count": getattr(device, "trilat_floor_switch_reset_count", 0),
+                "floor_switch_reset_last_at": getattr(device, "trilat_floor_switch_reset_last_at", None),
+                "floor_switch_reset_last_from_floor_id": getattr(
+                    device,
+                    "trilat_floor_switch_reset_last_from_floor_id",
+                    None,
+                ),
+                "floor_switch_reset_last_to_floor_id": getattr(
+                    device,
+                    "trilat_floor_switch_reset_last_to_floor_id",
+                    None,
+                ),
+                "floor_switch_reset_last_from_name": getattr(
+                    device,
+                    "trilat_floor_switch_reset_last_from_name",
+                    None,
+                ),
+                "floor_switch_reset_last_to_name": getattr(
+                    device,
+                    "trilat_floor_switch_reset_last_to_name",
+                    None,
+                ),
+            }
 
         def _anchor_status_entries(selected_floor_id: str | None = None) -> list[dict[str, object]]:
             entries: list[dict[str, object]] = []
             for scanner in sorted(self._scanners, key=lambda sc: (sc.name, sc.address)):
                 advert = latest.get(scanner.address)
                 scanner_name = getattr(scanner, "name", scanner.address)
+                anchor_x = self.get_scanner_anchor_x(scanner.address)
+                anchor_y = self.get_scanner_anchor_y(scanner.address)
                 sync_state = (
                     scanner.timestamp_sync_diagnostics().get("state")
                     if getattr(scanner, "is_scanner", False)
@@ -2194,21 +2303,35 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 elif selected_floor_id is not None and scanner.floor_id != selected_floor_id:
                     status = "rejected_wrong_floor"
                 elif (
-                    self.get_scanner_anchor_x(scanner.address) is None
-                    or self.get_scanner_anchor_y(scanner.address) is None
+                    anchor_x is None
+                    or anchor_y is None
                 ):
                     status = "rejected_missing_anchor"
                 elif advert.rssi_distance_raw is None or advert.rssi_distance is None:
                     status = "rejected_no_range"
                 else:
                     status = "valid"
+                soft_include_sigma_m = None
+                soft_include_eligible = False
+                if (
+                    status == "rejected_wrong_floor"
+                    and advert is not None
+                    and anchor_x is not None
+                    and anchor_y is not None
+                ):
+                    soft_include_sigma_m = _anchor_effective_sigma_m(advert, other_floor=True)
+                    soft_include_eligible = soft_include_sigma_m is not None
                 entries.append(
                     {
                         "scanner_address": scanner.address,
                         "scanner_name": scanner_name,
+                        "scanner_floor_id": scanner.floor_id,
+                        "selected_floor_id": selected_floor_id,
                         "status": status,
                         "sync_state": sync_state,
                         "affects_position": status == "valid",
+                        "soft_include_sigma_m": soft_include_sigma_m,
+                        "soft_include_eligible": soft_include_eligible,
                     }
                 )
             return entries
@@ -2220,10 +2343,20 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 for entry in entries
             }
             device.trilat_anchor_diagnostics = [self._format_anchor_status_entry(entry) for entry in entries]
+            cross_floor_entries = [entry for entry in entries if entry.get("soft_include_eligible")]
+            device.trilat_cross_floor_anchor_count = len(cross_floor_entries)
+            device.trilat_cross_floor_anchor_diagnostics = [
+                self._format_anchor_status_entry(entry)
+                for entry in cross_floor_entries
+            ]
 
         fresh_any = any(advert.stamp >= nowstamp - DISTANCE_TIMEOUT for advert in latest.values())
         if not fresh_any:
             _apply_anchor_status_entries()
+            _apply_floor_diagnostics(
+                reason="stale_inputs",
+                selected_floor_id=state.floor_id,
+            )
             device.set_trilat_unknown(
                 "stale_inputs",
                 floor_id=state.floor_id,
@@ -2266,6 +2399,10 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
 
         if not evidence_inputs:
             _apply_anchor_status_entries()
+            _apply_floor_diagnostics(
+                reason="ambiguous_floor",
+                selected_floor_id=state.floor_id,
+            )
             device.set_trilat_unknown("ambiguous_floor", floor_id=state.floor_id, floor_name=self._resolve_floor_name(state.floor_id))
             state.last_status = "unknown"
             state.last_geometry_quality_01 = 0.0
@@ -2320,7 +2457,8 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         else:
             state.floor_ambiguous_since = 0.0
 
-        prev_floor_id = state.floor_id
+        current_floor_score: float | None = None
+        floor_margin: float | None = None
         if state.floor_id is None:
             state.floor_id = best_floor_id
             state.floor_challenger_id = None
@@ -2343,14 +2481,35 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 state.floor_challenger_id = None
                 state.floor_challenger_since = 0.0
         else:
+            current_floor_score = floor_evidence.get(state.floor_id, 0.0)
+            floor_margin = 0.0
             state.floor_challenger_id = None
             state.floor_challenger_since = 0.0
 
         selected_floor_id = state.floor_id or best_floor_id
         selected_floor_name = self._resolve_floor_name(selected_floor_id)
         _apply_anchor_status_entries(selected_floor_id)
+        _apply_floor_diagnostics(
+            reason="ok",
+            selected_floor_id=selected_floor_id,
+            floor_evidence=floor_evidence,
+            best_floor_id=best_floor_id,
+            best_floor_score=best_floor_score,
+            second_floor_score=second_floor_score,
+            total_floor_score=total_floor_score,
+            current_floor_score=current_floor_score,
+            floor_ambiguity=floor_ambiguity,
+            floor_ambiguous_persisted=floor_ambiguous_persisted,
+            challenger_margin=floor_margin,
+        )
 
         if prev_floor_id is not None and selected_floor_id != prev_floor_id:
+            device.trilat_floor_switch_reset_count = getattr(device, "trilat_floor_switch_reset_count", 0) + 1
+            device.trilat_floor_switch_reset_last_at = nowstamp
+            device.trilat_floor_switch_reset_last_from_floor_id = prev_floor_id
+            device.trilat_floor_switch_reset_last_to_floor_id = selected_floor_id
+            device.trilat_floor_switch_reset_last_from_name = self._resolve_floor_name(prev_floor_id)
+            device.trilat_floor_switch_reset_last_to_name = selected_floor_name
             for advert in latest.values():
                 advert.trilat_range_ewma_m = None
             state.last_anchor_ids = ()
@@ -2370,6 +2529,43 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             state.last_geometry_gdop = None
             state.last_geometry_condition = None
             state.last_normalized_residual_rms = None
+            _apply_floor_diagnostics(
+                reason="floor_switch_cold_reset",
+                selected_floor_id=selected_floor_id,
+                floor_evidence=floor_evidence,
+                best_floor_id=best_floor_id,
+                best_floor_score=best_floor_score,
+                second_floor_score=second_floor_score,
+                total_floor_score=total_floor_score,
+                current_floor_score=current_floor_score,
+                floor_ambiguity=floor_ambiguity,
+                floor_ambiguous_persisted=floor_ambiguous_persisted,
+                challenger_margin=floor_margin,
+            )
+
+        if _debug_this_device:
+            evidence_str = ", ".join(
+                f"{floor_id}={score:.3f}"
+                for floor_id, score in sorted(
+                    device.trilat_floor_evidence.items(),
+                    key=lambda row: row[1],
+                    reverse=True,
+                )
+            ) or "none"
+            _LOGGER_TARGET_SPAM_LESS.debug(
+                f"trilat_floor_diag:{device.address}",
+                (
+                    "Trilat floor diag: %s selected=%s challenger=%s margin=%s "
+                    "cross_floor=%d resets=%d evidence=[%s]"
+                ),
+                device.name,
+                selected_floor_id,
+                state.floor_challenger_id,
+                f"{floor_margin:.3f}" if floor_margin is not None else "n/a",
+                device.trilat_cross_floor_anchor_count,
+                getattr(device, "trilat_floor_switch_reset_count", 0),
+                evidence_str,
+            )
 
         anchors: list[AnchorMeasurement] = []
         anchor_sigmas_m: list[float] = []
@@ -2388,10 +2584,9 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 continue
             if advert.rssi_distance is None:
                 continue
-            sigma_m = getattr(advert, "rssi_distance_sigma_m", None)
-            effective_sigma_m = float(sigma_m) if sigma_m is not None else self._TRILAT_DEFAULT_ANCHOR_SIGMA_M
-            advert_age_s = max(0.0, nowstamp - advert.stamp)
-            effective_sigma_m *= self._trilat_age_sigma_multiplier(advert_age_s)
+            effective_sigma_m = _anchor_effective_sigma_m(advert)
+            if effective_sigma_m is None:
+                continue
 
             if advert.trilat_range_ewma_m is None:
                 advert.trilat_range_ewma_m = advert.rssi_distance_raw

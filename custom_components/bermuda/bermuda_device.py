@@ -175,6 +175,17 @@ class BermudaDevice(dict):
         self.trilat_vertical_speed_mps: float | None = None
         self.trilat_anchor_diagnostics: list[str] = []
         self.trilat_anchor_statuses: dict[str, dict[str, object]] = {}
+        self.trilat_floor_evidence: dict[str, float] = {}
+        self.trilat_floor_evidence_names: dict[str, str | None] = {}
+        self.trilat_floor_diagnostics: dict[str, object] = {}
+        self.trilat_cross_floor_anchor_count: int = 0
+        self.trilat_cross_floor_anchor_diagnostics: list[str] = []
+        self.trilat_floor_switch_reset_count: int = 0
+        self.trilat_floor_switch_reset_last_at: float | None = None
+        self.trilat_floor_switch_reset_last_from_floor_id: str | None = None
+        self.trilat_floor_switch_reset_last_to_floor_id: str | None = None
+        self.trilat_floor_switch_reset_last_from_name: str | None = None
+        self.trilat_floor_switch_reset_last_to_name: str | None = None
         self.scanner_timestamp_regression_count: int = 0
         self.scanner_timestamp_regression_max_s: float = 0.0
         self.scanner_timestamp_regression_last_s: float | None = None

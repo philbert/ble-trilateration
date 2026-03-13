@@ -474,6 +474,26 @@ class BermudaSensorTrilatFloor(BermudaSensor):
     def native_value(self):
         return getattr(self._device, "trilat_floor_name", None)
 
+    @property
+    def extra_state_attributes(self) -> Mapping[str, Any] | None:
+        attrs = dict(getattr(self._device, "trilat_floor_diagnostics", {}))
+        floor_evidence = getattr(self._device, "trilat_floor_evidence", {})
+        floor_evidence_names = getattr(self._device, "trilat_floor_evidence_names", {})
+        if floor_evidence:
+            attrs["floor_evidence"] = [
+                {
+                    "floor_id": floor_id,
+                    "floor_name": floor_evidence_names.get(floor_id),
+                    "score": round(score, 3),
+                }
+                for floor_id, score in sorted(
+                    floor_evidence.items(),
+                    key=lambda row: row[1],
+                    reverse=True,
+                )
+            ]
+        return attrs
+
 
 class BermudaSensorTrilatAnchorCount(BermudaSensor):
     """Diagnostic sensor for active trilat anchor count."""
@@ -499,7 +519,11 @@ class BermudaSensorTrilatAnchorCount(BermudaSensor):
         anchor_lines = list(getattr(self._device, "trilat_anchor_diagnostics", []))
         attrs: dict[str, Any] = {
             "used_anchors": getattr(self._device, "trilat_anchor_count", 0),
+            "cross_floor_candidate_count": getattr(self._device, "trilat_cross_floor_anchor_count", 0),
         }
+        cross_floor_lines = list(getattr(self._device, "trilat_cross_floor_anchor_diagnostics", []))
+        if cross_floor_lines:
+            attrs["cross_floor_candidates"] = cross_floor_lines
         for index, line in enumerate(anchor_lines, start=1):
             attrs[str(index)] = line
         return attrs

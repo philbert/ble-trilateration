@@ -167,6 +167,53 @@ async def test_promoted_trilat_sensors_are_normal_sensors(hass) -> None:
     assert trilat_z.native_unit_of_measurement == UnitOfLength.METERS
 
 
+async def test_trilat_floor_sensor_exposes_phase0_diagnostics(hass) -> None:
+    """Trilat Floor should expose floor evidence and floor-switch diagnostics."""
+    entry = await setup_integration(hass)
+    coordinator = entry.runtime_data.coordinator
+
+    device = BermudaDevice("AA:BB:CC:DD:EE:6A", coordinator)
+    device.create_sensor = True
+    device.trilat_floor_name = "Ground floor"
+    device.trilat_floor_diagnostics = {
+        "reason": "floor_switch_cold_reset",
+        "selected_floor_id": "ground_floor",
+        "selected_floor_name": "Ground floor",
+        "best_floor_id": "ground_floor",
+        "best_floor_name": "Ground floor",
+        "challenger_floor_id": "street_level",
+        "challenger_floor_name": "Street level",
+        "floor_switch_reset_count": 2,
+    }
+    device.trilat_floor_evidence = {
+        "ground_floor": 10.1234,
+        "street_level": 8.4321,
+    }
+    device.trilat_floor_evidence_names = {
+        "ground_floor": "Ground floor",
+        "street_level": "Street level",
+    }
+    coordinator.devices[device.address] = device
+
+    sensor = BermudaSensorTrilatFloor(coordinator, entry, device.address)
+
+    assert sensor.native_value == "Ground floor"
+    assert sensor.extra_state_attributes == {
+        "reason": "floor_switch_cold_reset",
+        "selected_floor_id": "ground_floor",
+        "selected_floor_name": "Ground floor",
+        "best_floor_id": "ground_floor",
+        "best_floor_name": "Ground floor",
+        "challenger_floor_id": "street_level",
+        "challenger_floor_name": "Street level",
+        "floor_switch_reset_count": 2,
+        "floor_evidence": [
+            {"floor_id": "ground_floor", "floor_name": "Ground floor", "score": 10.123},
+            {"floor_id": "street_level", "floor_name": "Street level", "score": 8.432},
+        ],
+    }
+
+
 async def test_retired_legacy_sensor_entities_are_pruned(hass) -> None:
     """Retired legacy sensor entities should be removed from the entity registry."""
     entry = await setup_integration(hass)
@@ -253,9 +300,13 @@ async def test_trilat_anchor_count_sensor_exposes_anchor_status_lines(hass) -> N
     device = BermudaDevice("AA:BB:CC:DD:EE:77", coordinator)
     device.create_sensor = True
     device.trilat_anchor_count = 2
+    device.trilat_cross_floor_anchor_count = 1
     device.trilat_anchor_diagnostics = [
         "Living room light switch 1: valid",
         "Oven: rejected_no_range (sync=drifting)",
+    ]
+    device.trilat_cross_floor_anchor_diagnostics = [
+        "Garage proxy: rejected_wrong_floor (selected=ground_floor, scanner=street_level, soft_sigma=6.40m)",
     ]
     coordinator.devices[device.address] = device
 
@@ -264,6 +315,10 @@ async def test_trilat_anchor_count_sensor_exposes_anchor_status_lines(hass) -> N
     assert sensor.native_value == 2
     assert sensor.extra_state_attributes == {
         "used_anchors": 2,
+        "cross_floor_candidate_count": 1,
+        "cross_floor_candidates": [
+            "Garage proxy: rejected_wrong_floor (selected=ground_floor, scanner=street_level, soft_sigma=6.40m)",
+        ],
         "1": "Living room light switch 1: valid",
         "2": "Oven: rejected_no_range (sync=drifting)",
     }

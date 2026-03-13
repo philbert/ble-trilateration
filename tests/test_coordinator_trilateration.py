@@ -48,6 +48,17 @@ class _DummyDevice:
         self.trilat_normalized_residual_rms = None
         self.trilat_horizontal_speed_mps = None
         self.trilat_vertical_speed_mps = None
+        self.trilat_floor_evidence = {}
+        self.trilat_floor_evidence_names = {}
+        self.trilat_floor_diagnostics = {}
+        self.trilat_cross_floor_anchor_count = 0
+        self.trilat_cross_floor_anchor_diagnostics = []
+        self.trilat_floor_switch_reset_count = 0
+        self.trilat_floor_switch_reset_last_at = None
+        self.trilat_floor_switch_reset_last_from_floor_id = None
+        self.trilat_floor_switch_reset_last_to_floor_id = None
+        self.trilat_floor_switch_reset_last_from_name = None
+        self.trilat_floor_switch_reset_last_to_name = None
         self.area_id = None
         self.area_name = None
         self.area_last_seen_id = None
@@ -228,6 +239,37 @@ def test_floor_evidence_cross_floor_penalty_selects_correct_floor():
     assert state.floor_id == "f1"
     # With valid triangle geometry the solver should succeed.
     assert device.trilat_status == "ok"
+
+
+def test_floor_diagnostics_capture_evidence_and_cross_floor_candidates():
+    """Phase-0 diagnostics should expose floor evidence and soft-inclusion candidates."""
+    coordinator = _make_coordinator()
+    device = _DummyDevice("dev-floor-diag")
+
+    sc_a = _make_scanner(coordinator, "fd-a", "f1", 0.0, 0.0)
+    sc_b = _make_scanner(coordinator, "fd-b", "f1", 6.0, 0.0)
+    sc_c = _make_scanner(coordinator, "fd-c", "f1", 0.0, 8.0)
+    sc_f2 = _make_scanner(coordinator, "fd-d", "f2", 5.0, 5.0)
+
+    fresh = time.monotonic()
+    device.adverts = {
+        ("dev-floor-diag", sc_a.address): _make_advert(sc_a, fresh, -70.0, 5.0),
+        ("dev-floor-diag", sc_b.address): _make_advert(sc_b, fresh, -70.0, 5.0),
+        ("dev-floor-diag", sc_c.address): _make_advert(sc_c, fresh, -70.0, 5.0),
+        ("dev-floor-diag", sc_f2.address): _make_advert(sc_f2, fresh, -69.0, 5.0),
+    }
+
+    coordinator._refresh_trilateration_for_device(device)
+
+    assert device.trilat_floor_diagnostics["selected_floor_id"] == "f1"
+    assert device.trilat_floor_diagnostics["best_floor_id"] == "f1"
+    assert device.trilat_floor_evidence["f1"] > device.trilat_floor_evidence["f2"]
+    assert device.trilat_cross_floor_anchor_count == 1
+    status_entry = device.trilat_anchor_statuses["fd-d"]
+    assert status_entry["status"] == "rejected_wrong_floor"
+    assert status_entry["soft_include_eligible"] is True
+    assert status_entry["soft_include_sigma_m"] > 0.0
+    assert any("soft_sigma=" in line for line in device.trilat_cross_floor_anchor_diagnostics)
 
 
 def test_anchor_qualification_requires_valid_coordinates():
@@ -488,6 +530,11 @@ def test_trilat_ewma_resets_on_floor_change():
     # New floor's scanners get freshly initialized to rssi_distance_raw in the same call.
     assert adv_b1.trilat_range_ewma_m == adv_b1.rssi_distance_raw
     assert adv_b2.trilat_range_ewma_m == adv_b2.rssi_distance_raw
+    assert device.trilat_floor_switch_reset_count == 1
+    assert device.trilat_floor_switch_reset_last_from_floor_id == "f1"
+    assert device.trilat_floor_switch_reset_last_to_floor_id == "f2"
+    assert device.trilat_floor_diagnostics["reason"] == "floor_switch_cold_reset"
+
 
 def test_solve_skips_when_inputs_unchanged():
     """Second call with identical ranges should reuse the cached solution."""
