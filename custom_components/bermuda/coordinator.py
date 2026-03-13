@@ -1690,6 +1690,8 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
     _TRILAT_DIAGNOSTIC_OTHER_FLOOR_SIGMA_MULTIPLIER: float = 4.0
     _TRILAT_FLOOR_AMBIGUITY_RATIO: float = 0.2
     _TRILAT_FINGERPRINT_FLOOR_CONFIDENCE_HIGH: float = 0.70
+    _TRILAT_FINGERPRINT_FLOOR_CONFIDENCE_MODERATE: float = 0.55
+    _TRILAT_FINGERPRINT_FLOOR_SCORE_RATIO_HOLD: float = 1.25
     _TRILAT_FLOOR_SWITCH_PRIOR_WINDOW_S: float = 12.0
     _TRILAT_FLOOR_SWITCH_PRIOR_SIGMA_MULTIPLIER: float = 2.5
     _TRILAT_RANGE_DELTA_EPSILON_M: float = 0.2
@@ -2379,6 +2381,14 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 "fingerprint_best_score": fingerprint_result.best_score,
                 "fingerprint_second_score": fingerprint_result.second_score,
                 "fingerprint_floor_scores": dict(fingerprint_result.floor_scores),
+                "fingerprint_current_floor_score": (
+                    fingerprint_result.floor_scores.get(selected_floor_id, 0.0) if selected_floor_id else 0.0
+                ),
+                "fingerprint_challenger_floor_score": (
+                    fingerprint_result.floor_scores.get(state.floor_challenger_id, 0.0)
+                    if state.floor_challenger_id
+                    else 0.0
+                ),
                 "fingerprint_hold_active": fingerprint_hold_active,
                 "fingerprint_hold_elapsed_s": fingerprint_hold_elapsed_s,
                 "fingerprint_hold_ceiling_s": fingerprint_hold_ceiling_s,
@@ -2655,15 +2665,44 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                     state.challenger_fingerprint_hold_total_s = 0.0
                     state.challenger_fingerprint_hold_expired = False
 
+                current_floor_fp_score = fingerprint_result.floor_scores.get(state.floor_id, 0.0) if state.floor_id else 0.0
+                challenger_floor_fp_score = (
+                    fingerprint_result.floor_scores.get(state.floor_challenger_id, 0.0)
+                    if state.floor_challenger_id
+                    else 0.0
+                )
+                fingerprint_has_floor_signal = fingerprint_result.reason in {"ok", "room_ambiguity"}
+                current_floor_fp_ratio = (
+                    current_floor_fp_score / max(challenger_floor_fp_score, 1e-9)
+                    if current_floor_fp_score > 0.0
+                    else 0.0
+                )
+                challenger_floor_fp_ratio = (
+                    challenger_floor_fp_score / max(current_floor_fp_score, 1e-9)
+                    if challenger_floor_fp_score > 0.0
+                    else 0.0
+                )
                 fingerprint_supports_current_floor = (
-                    fingerprint_result.reason == "ok"
+                    fingerprint_has_floor_signal
                     and fingerprint_result.floor_id == state.floor_id
-                    and fingerprint_result.floor_confidence >= self._TRILAT_FINGERPRINT_FLOOR_CONFIDENCE_HIGH
+                    and (
+                        fingerprint_result.floor_confidence >= self._TRILAT_FINGERPRINT_FLOOR_CONFIDENCE_HIGH
+                        or (
+                            fingerprint_result.floor_confidence >= self._TRILAT_FINGERPRINT_FLOOR_CONFIDENCE_MODERATE
+                            and current_floor_fp_ratio >= self._TRILAT_FINGERPRINT_FLOOR_SCORE_RATIO_HOLD
+                        )
+                    )
                 )
                 fingerprint_supports_challenger = (
-                    fingerprint_result.reason == "ok"
+                    fingerprint_has_floor_signal
                     and fingerprint_result.floor_id == state.floor_challenger_id
-                    and fingerprint_result.floor_confidence >= self._TRILAT_FINGERPRINT_FLOOR_CONFIDENCE_HIGH
+                    and (
+                        fingerprint_result.floor_confidence >= self._TRILAT_FINGERPRINT_FLOOR_CONFIDENCE_HIGH
+                        or (
+                            fingerprint_result.floor_confidence >= self._TRILAT_FINGERPRINT_FLOOR_CONFIDENCE_MODERATE
+                            and challenger_floor_fp_ratio >= self._TRILAT_FINGERPRINT_FLOOR_SCORE_RATIO_HOLD
+                        )
+                    )
                 )
 
                 if fingerprint_supports_current_floor and not state.challenger_fingerprint_hold_expired:
