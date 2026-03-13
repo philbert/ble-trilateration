@@ -14,6 +14,7 @@ The key correction from that review is important:
 - current floor evidence scoring is already soft,
 - the most damaging hard gate is anchor exclusion after floor selection,
 - the second major instability source is full state reset on floor switch,
+- Home Assistant has no native transition-point model, so split-level movement priors need to be Bermuda-native,
 - a full "global 3D first" rewrite is not yet justified by data.
 
 This document now reflects that narrower, safer, and more testable direction.
@@ -25,6 +26,7 @@ Evolve Bermuda from a floor-gated localization pipeline into a softer, more phys
 - stops hard-discarding useful cross-floor anchors,
 - preserves solver continuity across floor changes,
 - uses cross-floor fingerprint evidence to resolve split-level ambiguity,
+- adds soft Bermuda-native transition priors for split-level movement points,
 - treats full global 3D trilateration as a later experiment rather than the first implementation step.
 
 For the current split-level failure mode, the primary target is:
@@ -97,6 +99,12 @@ In this environment, the main bug is not that floor evidence happens first. The 
 7. **Anchor count is not a quality metric.**
    - Geometry quality and residual consistency must explicitly gate how much Bermuda trusts the geometric solve.
 
+8. **Transition knowledge is house metadata, not room evidence.**
+   - Transition points should be stored separately from ordinary room calibration samples.
+
+9. **Transition priors must stay soft.**
+   - Missing a short stairwell dwell must not hard-lock Bermuda onto the wrong floor.
+
 ## Revised Target Architecture
 
 The revised target architecture is:
@@ -105,6 +113,7 @@ The revised target architecture is:
 - remove hard anchor exclusion from the solve path,
 - preserve solve continuity across floor changes,
 - add cross-floor fingerprint scoring as a parallel floor/room signal,
+- add Bermuda-native transition samples as soft floor-switch priors,
 - promote global 3D solving only if range bias and `z` observability are validated.
 
 ### Stage 1: Keep floor evidence scoring, improve diagnostics
@@ -183,25 +192,71 @@ In this stage, geometry should be treated as a consistency check and tie-breaker
 - geometry is used to reject impossible candidates and disambiguate near-boundary rooms,
 - low geometry quality should reduce the influence of the trilat point instead of forcing a wrong room.
 
-### Stage 5: Hybrid floor inference
+### Stage 5: Add Bermuda-native transition samples
+
+Add a separate transition-sample model for floor-transition points that exist inside normal Home Assistant areas.
+
+This is explicitly **not** an HA area model extension and **not** a normal room sample.
+
+Proposed MVP capture shape:
+
+```yaml
+action: bermuda.record_transition_sample
+data:
+  device_id: ...
+  room_area_id: entrance
+  transition_name: stairwell
+  x_y_z_m: 1.2,1.5,3.7
+  sample_radius_m: 1.0
+  duration_s: 60
+  transition_floor_ids:
+    - basement
+    - top_floor
+```
+
+Semantics:
+
+- the transition point belongs to `room_area_id`,
+- `transition_name` is user-facing text,
+- Bermuda derives an internal stable key from `(room_area_id, transition_name)` and does not expose that key,
+- multiple captures for the same pair should merge into one transition-point model,
+- transition samples are stored separately from room samples and must not feed ordinary room kernels or fingerprints.
+
+Runtime behavior:
+
+- if the current solved position or fingerprint candidate is near a transition sample whose `transition_floor_ids` includes the challenger floor, reduce floor-switch penalty / dwell,
+- if the challenger floor has no nearby supporting transition sample, increase penalty or preserve ambiguity,
+- transition support is advisory only and must never hard-block a switch.
+
+Why this is the right scope:
+
+- Home Assistant only models floors and areas,
+- split-level houses often need multiple distinct transition points inside the same area,
+- this adds house-specific movement knowledge without forcing a full room-adjacency graph into the first implementation.
+
+### Stage 6: Hybrid floor inference
 
 After diagnostics prove useful, floor inference should become a posterior built from:
 
 - current RSSI floor evidence,
 - cross-floor fingerprint output, with fingerprint-primary arbitration in split-level ambiguity,
+- transition-sample support for the challenger floor,
 - continuity from the previous stable room/floor,
 - solved `z` only where `z` observability is validated,
-- optional topology priors for connector groups.
+- geometry quality and residual consistency as gating signals.
 
 This is still "floor first enough" for operational stability, but no longer relies on a single floor vote.
 
 Recommended arbitration rule:
 
 - when fingerprint produces a strong global `(room, floor)` candidate and geometry quality is weak or ambiguous, let fingerprint dominate floor selection,
+- when fingerprint and previous stable room/floor agree on the challenger floor, allow that pair to overrule RSSI-only floor evidence unless geometry quality is both strong and contradictory,
+- when a challenger floor is supported by a nearby matching transition sample, lower the required switch penalty or dwell but do not bypass ambiguity checks,
+- when fingerprint is weak and RSSI floor evidence is weak, hold the previous stable room/floor instead of letting transition support force a switch by itself,
 - when fingerprint is ambiguous and geometry quality is strong, let geometry constrain the room within the current coarse floor posterior,
 - when both are weak, hold the previous stable room/floor instead of forcing a switch.
 
-### Stage 6: Optional global 3D-first solve
+### Stage 7: Optional global 3D-first solve
 
 This remains a later research track, not the first implementation slice.
 
@@ -223,8 +278,14 @@ Per-anchor effective uncertainty should include:
 - advert age multiplier,
 - live dispersion / packet health where available,
 - floor mismatch multiplier,
-- optional topology multiplier for non-adjacent floors,
 - robust residual downweighting from the solver.
+
+Transition support does **not** belong in per-anchor solve weighting.
+
+It should instead act later as a floor-challenger prior:
+
+- lower switch penalty / dwell when a nearby transition sample supports the challenger floor,
+- preserve ambiguity or increase switch penalty when no nearby transition sample supports the challenger floor.
 
 Important constraint:
 
@@ -275,8 +336,8 @@ Use a hybrid floor posterior composed of:
 
 - existing RSSI floor evidence,
 - fingerprint-inferred floor from global room scoring as the primary discriminator for split-level ambiguity,
+- nearby transition-sample support for challenger floors,
 - previous stable room/floor,
-- optional connector topology priors,
 - geometry quality and residual consistency as gating signals on how much trilat can influence the result.
 
 ### Later approach
@@ -299,12 +360,15 @@ Required first changes:
 
 - replace hard same-floor anchor skip with soft cross-floor sigma inflation,
 - stop clearing solve state on floor switch,
+- keep `_apply_soft_vertical_prior` floor-scoped or disable it while early cross-floor anchor inclusion is enabled,
+- decide whether inflated cross-floor sigmas should be excluded from `mean_sigma_m` so fallback anchors do not depress confidence disproportionately,
 - add side-by-side diagnostics for:
   - floor evidence,
   - included vs penalized anchors,
   - would-have-been-rejected anchors,
   - previous-state continuity,
-  - fingerprint-global candidate output.
+  - fingerprint-global candidate output,
+  - nearby matching transition-sample support.
 
 Follow-on changes:
 
@@ -363,6 +427,14 @@ Near-term additions:
 - replay utilities for known-location sessions,
 - optional reporting on whether a room has enough fingerprint support to participate in cross-floor scoring.
 
+Add a separate transition-sample path:
+
+- new Bermuda-native service such as `bermuda.record_transition_sample`,
+- separate persistence from normal room calibration samples,
+- internal transition-point key derived from `(room_area_id, transition_name)`,
+- support multiple transition points inside the same HA area,
+- runtime proximity/support checks that can be surfaced in diagnostics before they influence assignment logic.
+
 Longer-term additions:
 
 - sample-derived floor `z` clusters,
@@ -378,9 +450,11 @@ Longer-term additions:
 - log:
   - `floor_evidence`,
   - challenger state,
+  - whether floor-switch cold reset fired and how many times per session,
   - rejected cross-floor anchors and their hypothetical inflated sigma,
   - current room result,
   - global fingerprint candidate result,
+  - nearby transition-sample matches for challenger floors when transition samples exist,
   - solver quality metrics.
 
 This phase should produce the data needed to decide whether broader changes are justified.
@@ -414,32 +488,61 @@ Expected payoff:
 
 - run global fingerprint scoring in parallel,
 - do not use it for assignment yet,
+- this phase can run in parallel with Phase 2 because it only depends on RSSI vectors, not solver output,
 - compare its inferred floor against the current pipeline on replay traces.
 
 Expected payoff:
 
 - evidence on whether fingerprint can resolve split-level ambiguity better than geometry.
+- if Experiment 3 fails, do not proceed to production hybrid floor arbitration until the fingerprint model is reworked.
 
-### Phase 4: Hybrid floor arbitration
+### Phase 4: Transition-sample storage and diagnostics
+
+- add `bermuda.record_transition_sample`,
+- store transition samples separately from room samples,
+- derive an internal transition-point key from `(room_area_id, transition_name)`,
+- compute transition proximity/support diagnostics in parallel with the existing pipeline,
+- do not let transition samples affect assignment yet.
+
+Expected payoff:
+
+- Bermuda can represent split-level movement points that Home Assistant cannot model directly,
+- known stair / entry transitions become measurable without creating hard gates.
+
+### Phase 5: Hybrid floor arbitration
 
 - if diagnostics validate fingerprint usefulness, feed fingerprint floor evidence into the floor posterior,
+- feed transition-sample support into floor challenger arbitration as a soft prior,
 - require an explicit replay threshold before promoting it:
   - target `>85%` floor-correct top-room on known traces,
   - target score gap or confidence margin large enough to avoid frequent ambiguity,
 - allow it to overrule ambiguous RSSI-only floor outcomes in limited conditions,
 - keep explicit ambiguity states where signals disagree strongly.
 
-### Phase 5: Optional room-classifier expansion
+### Phase 6: Optional room-classifier expansion
 
 - if replay shows the global fingerprint signal is consistently good,
 - expand room inference from floor-gated to floor-soft,
 - keep strong hysteresis and ambiguity handling.
 
-### Phase 6: Optional global 3D-first evaluation
+### Phase 7: Optional global 3D-first evaluation
 
-- only after Experiments 2 and 4 below pass,
+- only after the Vertical observability and Cross-floor range bias experiments pass,
 - gated behind a separate feature flag,
 - compare against the softer hybrid pipeline rather than replacing it blindly.
+
+### Phase decision gates
+
+- After Phase 1:
+  Measure whether cold-reset elimination alone removes most catastrophic `Guest Room -> Garage front` collapses. If yes, defer later phases unless there is still a clear split-level accuracy gap.
+- After Phase 2:
+  Compare replay continuity and residual quality with and without adjacent-floor soft inclusion. If continuity improves but residual quality degrades materially, keep the feature diagnostic-only.
+- After Phase 3:
+  Treat Experiment 3 as a go/no-go gate. If global fingerprint scoring cannot reliably discriminate split-level rooms, do not promote fingerprint into production floor arbitration.
+- After Phase 4:
+  Confirm transition samples improve diagnostics without increasing "stuck on previous floor" failures. If not, keep them diagnostic-only and do not feed them into arbitration.
+- After Phase 5:
+  Promote hybrid floor arbitration only if replay traces show lower false floor flips without creating longer lock-in on the wrong floor.
 
 ## Testing Plan
 
@@ -451,6 +554,9 @@ Expected payoff:
 - non-adjacent-floor anchors remain diagnostic-only in the first rollout,
 - downgraded 3D-to-2D paths preserve `z` prior and reduce confidence,
 - global fingerprint scoring can produce a room/floor candidate outside the current selected floor,
+- transition samples are stored separately from room samples and do not affect room kernels directly,
+- a challenger floor with nearby matching transition support gets reduced switch penalty / dwell,
+- a challenger floor without nearby matching transition support does not get forced through,
 - hybrid floor arbitration can hold ambiguity instead of forcing a wrong room,
 - geometry quality and residual consistency reduce the influence of weak solves.
 
@@ -463,6 +569,7 @@ Required scenarios:
 - stable `Guest Room` occupancy near `street_level` scanners,
 - `Guest Room -> Garage front` failure replay,
 - split-level stair traversal between basement, street, and ground,
+- split-level traversal where Bermuda misses an explicit stairwell dwell but should still recover through soft evidence,
 - outdoor transition into `garage_front`,
 - sparse-anchor periods where 3D temporarily drops to 2D.
 
@@ -471,6 +578,7 @@ Required scenarios:
 - no immediate collapse from `Guest Room` to `Garage front` caused solely by a floor challenger,
 - no full solver cold restart after a brief floor flip,
 - same-floor anchors are not lost merely because floor evidence briefly favored another level,
+- supported floor changes are easier near declared transition points without becoming mandatory checkpoints,
 - floor confidence degrades before room assignment becomes physically implausible,
 - fingerprint-global diagnostics are measurable against the current assignment logic.
 
@@ -488,7 +596,8 @@ Per update, log:
 - anchor count,
 - solve result,
 - room result,
-- fingerprint-global candidate.
+- fingerprint-global candidate,
+- nearby transition-sample support for the challenger floor when present.
 
 Goal:
 
@@ -533,7 +642,27 @@ Suggested success threshold:
 - `>85%` floor-correct top candidate on known traces,
 - usable score gap or confidence margin on the majority of replayed samples.
 
-### Experiment 4: Cross-floor range bias characterization
+### Experiment 4: Transition-sample utility
+
+For known stair / entry / landing traversals:
+
+- compare floor-switch latency with and without transition-sample priors,
+- measure whether supported transitions reduce false ambiguity,
+- measure whether unsupported floor jumps become less frequent,
+- include replays where the device was not explicitly solved inside the transition point for long enough.
+
+Goal:
+
+- confirm that transition samples help floor arbitration without becoming hard gates,
+- validate that a missed transition dwell does not trap the device on the previous floor.
+
+Suggested success threshold:
+
+- lower false floor-switch rate on split-level traces,
+- no increase in "stuck on previous floor" failures when transition occupancy is brief or missed,
+- improved stability on `Guest Room -> Garage front` style replays.
+
+### Experiment 5: Cross-floor range bias characterization
 
 For cross-floor scanners in known locations:
 
@@ -556,7 +685,7 @@ Suggested thresholds:
 - if mean bias exceeds `2 m` or variance exceeds `3 m` on adjacent-floor traces, even adjacent inclusion may need to stay diagnostic-only,
 - if non-adjacent-floor bias exceeds those thresholds, keep non-adjacent floors out of the production solve path.
 
-### Experiment 5: State reset elimination
+### Experiment 6: State reset elimination
 
 Before broader algorithmic changes:
 
@@ -573,6 +702,8 @@ Goal:
 - Cross-floor RSSI may be so biased that even inflated-sigma inclusion still hurts some layouts.
 - Adjacent-floor inclusion may be beneficial while non-adjacent-floor inclusion is harmful, which would require floor-distance-specific behavior.
 - Global fingerprint scoring may overfit rooms with sparse calibration coverage.
+- Transition samples may be sparse, misplaced, or incomplete enough to help some routes while leaving others ambiguous.
+- Overweighting transition priors could make Bermuda too reluctant to switch floors away from declared movement points.
 - Hybrid floor arbitration may become harder to debug unless diagnostics are explicit.
 - `street_level` may overlap vertically with both basement and ground-floor regions, making pure `z` classification inherently ambiguous.
 - The safest short-term solution may improve split-level stability without ever justifying a full global 3D-first rewrite.
@@ -588,6 +719,9 @@ Goal:
 7. Should non-adjacent floor anchors be softly included, or should the first rollout limit soft inclusion to adjacent floors only?
 8. Is there enough calibration coverage per room and per floor to support global fingerprint ranking?
 9. What geometry-quality or residual-consistency thresholds should suppress geometry-led room changes?
+10. How close must a solve or fingerprint candidate be to a transition sample before it should reduce floor-switch penalty / dwell?
+11. Should transition support be computed from solved position only, fingerprint-global room/floor candidate only, or the stronger of the two?
+12. What is the right merge strategy for multiple captures of the same `(room_area_id, transition_name)` point?
 
 ## Recommended First Implementation Slice
 
@@ -597,7 +731,8 @@ The first slice should be intentionally narrow and directly driven by the review
 2. Remove floor-switch cold reset and preserve priors through a challenger.
 3. Add adjacent-floor soft anchor inclusion behind a feature flag.
 4. Add cross-floor fingerprint diagnostics behind a feature flag.
-5. Replay the `Guest Room` and `Garage front` traces before changing final room assignment behavior.
+5. Add transition-sample storage plus diagnostic-only proximity/support checks.
+6. Replay the `Guest Room` and `Garage front` traces before changing final room assignment behavior.
 
 This is the minimum change set that tests the central hypotheses without committing to a full global 3D-first rewrite.
 
@@ -607,10 +742,15 @@ This is the minimum change set that tests the central hypotheses without committ
 - Split-level replay traces stop producing catastrophic room jumps caused by anchor-count collapse.
 - Cross-floor fingerprint diagnostics provide useful floor/room evidence on known traces.
 - Adjacent-floor soft anchor inclusion improves continuity without materially worsening residual quality.
+- Transition samples remain a soft prior and do not dilute ordinary room classification.
 - Geometry quality and residual consistency are used to suppress low-trust geometry from forcing room/floor changes.
 - A decision on true global 3D-first solving is deferred until replay data demonstrates that it is both observable and beneficial.
 
 ---
+
+## Historical Review Notes
+
+These review notes are retained for traceability. Some stage and phase numbers below refer to the earlier revision and should be read as historical context, not the current stage numbering above.
 
 ## Engineer Review — 2026-03-13 (revision)
 
@@ -687,7 +827,7 @@ Experiment 3 (cross-floor fingerprint accuracy) can be run right now against exi
 
 ### Each phase needs an exit criterion before the next phase starts
 
-The plan describes what each phase does but never says when to stop. After Phase 1 (cold reset fix), someone needs to evaluate: did this alone resolve most of the `Guest Room → Garage front` failures? If yes, Phases 2–5 may not be worth building. After Phase 2, someone needs to evaluate: did soft anchor inclusion improve continuity, or did inflated-sigma cross-floor anchors just add noise?
+The plan describes what each phase does but never says when to stop. After Phase 1 (cold reset fix), someone needs to evaluate: did this alone resolve most of the `Guest Room -> Garage front` failures? If yes, Phases 2–5 may not be worth building. After Phase 2, someone needs to evaluate: did soft anchor inclusion improve continuity, or did inflated-sigma cross-floor anchors just add noise?
 
 Without explicit go/no-go criteria per phase, the plan risks building all six phases sequentially regardless of whether earlier phases already solved the problem. Add a one-paragraph decision gate to each phase: what metric to measure, what threshold constitutes success, and what happens if the threshold is not met.
 
