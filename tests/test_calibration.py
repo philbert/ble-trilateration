@@ -12,6 +12,7 @@ from homeassistant import data_entry_flow
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import area_registry as ar
 from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import floor_registry as fr
 from homeassistant.helpers import issue_registry as ir
 
 from custom_components.bermuda.bermuda_device import BermudaDevice
@@ -261,6 +262,161 @@ async def test_record_calibration_sample_service_accepts_split_xyz(hass: HomeAss
 
     sample = coordinator.calibration.samples()[0]
     assert sample["position"] == {"x_m": 4.2, "y_m": 1.8, "z_m": 1.1}
+
+
+async def test_record_transition_sample_service_merges_repeated_captures(
+    hass: HomeAssistant, setup_bermuda_entry
+):
+    """Transition samples should be stored separately and merged by internal key."""
+    coordinator = setup_bermuda_entry.runtime_data.coordinator
+
+    floor_registry = fr.async_get(hass)
+    ground_floor = floor_registry.async_create("Ground floor", level=0)
+    basement = floor_registry.async_create("Basement", level=-1)
+    top_floor = floor_registry.async_create("Top floor", level=1)
+    area = ar.async_get(hass).async_create("Entrance", floor_id=ground_floor.floor_id)
+
+    devreg = dr.async_get(hass)
+    device_entry = devreg.async_get_or_create(
+        config_entry_id=setup_bermuda_entry.entry_id,
+        connections={(dr.CONNECTION_BLUETOOTH, "AA:BB:CC:DD:EE:21")},
+        name="Phil Phone",
+    )
+
+    target = BermudaDevice("aa:bb:cc:dd:ee:21", coordinator)
+    target.name = "Phil Phone"
+    coordinator.devices[target.address] = target
+
+    response = await hass.services.async_call(
+        DOMAIN,
+        "record_transition_sample",
+        {
+            "device_id": device_entry.id,
+            "room_area_id": area.id,
+            "transition_name": "stairwell",
+            "x_y_z_m": "1.0, 2.0, 3.0",
+            "sample_radius_m": 1.0,
+            "capture_duration_s": 60,
+            "transition_floor_ids": [basement.floor_id],
+        },
+        blocking=True,
+        return_response=True,
+    )
+
+    assert response["merged"] is False
+    assert response["transition_name"] == "stairwell"
+    assert response["transition_floor_ids"] == [basement.floor_id]
+    assert response["capture_count"] == 1
+
+    response = await hass.services.async_call(
+        DOMAIN,
+        "record_transition_sample",
+        {
+            "device_id": device_entry.id,
+            "room_area_id": area.id,
+            "transition_name": "stairwell",
+            "x_m": 3.0,
+            "y_m": 4.0,
+            "z_m": 5.0,
+            "sample_radius_m": 1.5,
+            "capture_duration_s": 45,
+            "transition_floor_ids": [basement.floor_id, top_floor.floor_id],
+        },
+        blocking=True,
+        return_response=True,
+    )
+
+    assert response["merged"] is True
+    assert response["capture_count"] == 2
+    assert response["x_m"] == 2.0
+    assert response["y_m"] == 3.0
+    assert response["z_m"] == 4.0
+    assert response["sample_radius_m"] == 1.5
+    assert response["transition_floor_ids"] == sorted([basement.floor_id, top_floor.floor_id])
+    assert "transition_key" not in response
+
+    transition_samples = coordinator.calibration.transition_samples()
+    assert len(transition_samples) == 1
+    stored = transition_samples[0]
+    assert stored["room_area_id"] == area.id
+    assert stored["room_floor_id"] == ground_floor.floor_id
+    assert stored["transition_name"] == "stairwell"
+    assert stored["position"] == {"x_m": 2.0, "y_m": 3.0, "z_m": 4.0}
+    assert stored["sample_radius_m"] == 1.5
+    assert stored["capture_count"] == 2
+    assert stored["last_capture_duration_s"] == 45
+    assert stored["total_capture_duration_s"] == 105
+    assert stored["transition_floor_ids"] == sorted([basement.floor_id, top_floor.floor_id])
+    assert stored["anchor_layout_hash"] == coordinator.calibration.current_anchor_layout_hash
+    assert "transition_key" in stored
+
+
+async def test_transition_sample_diagnostics_are_exposed_without_affecting_assignment(
+    hass: HomeAssistant, setup_bermuda_entry
+):
+    """Stored transition samples should surface proximity diagnostics in Trilat Floor attrs."""
+    coordinator = setup_bermuda_entry.runtime_data.coordinator
+
+    floor_registry = fr.async_get(hass)
+    ground_floor = floor_registry.async_create("Ground floor", level=0)
+    street_level = floor_registry.async_create("Street level", level=1)
+    area = ar.async_get(hass).async_create("Entrance", floor_id=ground_floor.floor_id)
+
+    devreg = dr.async_get(hass)
+    device_entry = devreg.async_get_or_create(
+        config_entry_id=setup_bermuda_entry.entry_id,
+        connections={(dr.CONNECTION_BLUETOOTH, "AA:BB:CC:DD:EE:22")},
+        name="Phil Phone",
+    )
+
+    target = BermudaDevice("aa:bb:cc:dd:ee:22", coordinator)
+    target.name = "Phil Phone"
+    target.area_id = area.id
+    target.area_name = area.name
+    target.area_last_seen_id = area.id
+    target.trilat_x_m = 1.1
+    target.trilat_y_m = 2.0
+    target.trilat_z_m = 3.0
+    target.trilat_geometry_quality = 6.0
+    target.trilat_floor_diagnostics = {"selected_floor_id": ground_floor.floor_id}
+    coordinator.devices[target.address] = target
+
+    await hass.services.async_call(
+        DOMAIN,
+        "record_transition_sample",
+        {
+            "device_id": device_entry.id,
+            "room_area_id": area.id,
+            "transition_name": "front_stairs",
+            "x_y_z_m": "1.0, 2.0, 3.0",
+            "sample_radius_m": 1.0,
+            "capture_duration_s": 30,
+            "transition_floor_ids": [street_level.floor_id],
+        },
+        blocking=True,
+        return_response=True,
+    )
+
+    state = coordinator._get_trilat_decision_state(target)
+    state.floor_challenger_id = street_level.floor_id
+    coordinator._refresh_transition_sample_diagnostics(target, coordinator.current_anchor_layout_hash())
+
+    diagnostics = target.trilat_floor_diagnostics
+    assert diagnostics["transition_sample_count"] == 1
+    assert diagnostics["transition_layout_sample_count"] == 1
+    assert diagnostics["transition_support_01"] == 1.0
+    assert diagnostics["transition_room_context_area_id"] == area.id
+    assert diagnostics["transition_challenger_floor_id"] == street_level.floor_id
+    assert diagnostics["transition_challenger_floor_name"] == "Street level"
+    assert diagnostics["transition_best_name"] == "front_stairs"
+    assert diagnostics["transition_best_room_area_id"] == area.id
+    assert diagnostics["transition_best_room_name"] == "Entrance"
+    assert diagnostics["transition_best_floor_ids"] == [street_level.floor_id]
+    assert diagnostics["transition_best_floor_names"] == ["Street level"]
+    assert diagnostics["transition_best_distance_mode"] == "3d"
+    assert diagnostics["transition_best_within_radius"] is True
+    assert diagnostics["transition_best_room_context_match"] is True
+    assert diagnostics["transition_best_supports_challenger"] is True
 
 
 async def test_calibration_store_management(hass: HomeAssistant, setup_bermuda_entry):

@@ -46,3 +46,40 @@ record_calibration_sample:
       required: false
       example: "Near sofa"
       default: ""
+record_transition_sample:
+  name: Record transition sample
+  fields:
+    device_id:
+      required: true
+      example: "abc123def456"
+    room_area_id:
+      required: true
+      example: "entrance"
+    transition_name:
+      required: true
+      example: "stairwell"
+    transition_floor_ids:
+      required: true
+      example:
+        - "basement"
+        - "top_floor"
+    x_y_z_m:
+      required: false
+      example: "12.5,0.5,3.7"
+    x_m:
+      required: false
+      example: "4.2"
+    y_m:
+      required: false
+      example: "1.8"
+    z_m:
+      required: false
+      example: "1.1"
+    sample_radius_m:
+      required: false
+      example: "1.0"
+      default: 1.0
+    capture_duration_s:
+      required: false
+      example: "60"
+      default: 60

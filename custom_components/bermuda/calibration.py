@@ -8,6 +8,7 @@ import hashlib
 import inspect
 import json
 import math
+import re
 import statistics
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -127,6 +128,10 @@ class BermudaCalibrationManager:
         """Return stored samples."""
         return self._store.samples
 
+    def transition_samples(self) -> list[dict[str, Any]]:
+        """Return stored transition samples."""
+        return self._store.transition_samples
+
     def get_summary(self) -> dict[str, Any]:
         """Return a small in-memory summary for config flow."""
         samples = self.samples()
@@ -154,6 +159,27 @@ class BermudaCalibrationManager:
             "current_layout_count": current_layout_count,
             "recent": recent,
             "warn_threshold": CALIBRATION_SAMPLE_WARN_THRESHOLD,
+        }
+
+    def get_transition_summary(self) -> dict[str, Any]:
+        """Return a small in-memory summary for stored transition samples."""
+        samples = self.transition_samples()
+        by_room: dict[str, int] = {}
+        by_name: dict[str, int] = {}
+        by_layout: dict[str, int] = {}
+        for sample in samples:
+            room_name = str(sample.get("room_name") or sample.get("room_area_id") or "Unknown")
+            by_room[room_name] = by_room.get(room_name, 0) + 1
+            transition_name = str(sample.get("transition_name") or "Unknown")
+            by_name[transition_name] = by_name.get(transition_name, 0) + 1
+            layout_hash = str(sample.get("anchor_layout_hash") or "unknown")
+            by_layout[layout_hash] = by_layout.get(layout_hash, 0) + 1
+        return {
+            "transition_sample_count": len(samples),
+            "by_room": by_room,
+            "by_name": by_name,
+            "by_layout": by_layout,
+            "current_layout_hash": self.current_anchor_layout_hash,
         }
 
     def current_anchor_geometry(self) -> dict[str, dict[str, float | None]]:
@@ -317,6 +343,126 @@ class BermudaCalibrationManager:
         if removed:
             await self._async_notify_changed()
         return removed
+
+    async def async_record_transition_sample(
+        self,
+        *,
+        device_id: str,
+        room_area_id: str,
+        transition_name: str,
+        x_m: float,
+        y_m: float,
+        z_m: float,
+        sample_radius_m: float = DEFAULT_SAMPLE_RADIUS_M,
+        capture_duration_s: int = 60,
+        transition_floor_ids: list[str],
+    ) -> dict[str, Any]:
+        """Store or merge a Bermuda-native transition sample."""
+        await self._store.async_ensure_loaded()
+        if sample_radius_m <= 0:
+            raise HomeAssistantError("Transition sample radius must be greater than 0 metres.")
+        if capture_duration_s < 1:
+            raise HomeAssistantError("Transition capture duration must be at least 1 second.")
+
+        device = self._resolve_device_from_registry_id(device_id)
+        if device is None:
+            raise HomeAssistantError("Selected device is not currently available in Bermuda.")
+
+        area = self._coordinator.ar.async_get_area(room_area_id)
+        if area is None:
+            raise HomeAssistantError("Selected room area does not exist.")
+        if area.floor_id is None:
+            raise HomeAssistantError("Transition samples require the room area to belong to a floor.")
+
+        cleaned_name = str(transition_name).strip()
+        if not cleaned_name:
+            raise HomeAssistantError("transition_name must not be empty.")
+
+        cleaned_floor_ids = self._normalize_transition_floor_ids(
+            transition_floor_ids=transition_floor_ids,
+            room_floor_id=area.floor_id,
+        )
+        if not cleaned_floor_ids:
+            raise HomeAssistantError("transition_floor_ids must include at least one floor other than the room floor.")
+
+        created_at = now().isoformat()
+        layout_hash = self.current_anchor_layout_hash
+        transition_key = self._derive_transition_key(
+            room_area_id=room_area_id,
+            transition_name=cleaned_name,
+            anchor_layout_hash=layout_hash,
+        )
+        transition_samples = self.transition_samples()
+        existing = next((sample for sample in transition_samples if sample.get("transition_key") == transition_key), None)
+        merged = existing is not None
+
+        if existing is None:
+            stored = {
+                "transition_key": transition_key,
+                "created_at": created_at,
+                "updated_at": created_at,
+                "device_id": device_id,
+                "device_name": device.name,
+                "device_address": device.address,
+                "room_area_id": room_area_id,
+                "room_name": area.name,
+                "room_floor_id": area.floor_id,
+                "transition_name": cleaned_name,
+                "position": {"x_m": float(x_m), "y_m": float(y_m), "z_m": float(z_m)},
+                "sample_radius_m": float(sample_radius_m),
+                "transition_floor_ids": cleaned_floor_ids,
+                "anchor_layout_hash": layout_hash,
+                "capture_count": 1,
+                "last_capture_duration_s": int(capture_duration_s),
+                "total_capture_duration_s": int(capture_duration_s),
+            }
+            transition_samples.append(stored)
+        else:
+            capture_count = max(int(existing.get("capture_count", 1)), 1)
+            new_capture_count = capture_count + 1
+            position = existing.get("position") or {}
+            existing["position"] = {
+                "x_m": round(((float(position.get("x_m", x_m)) * capture_count) + float(x_m)) / new_capture_count, 6),
+                "y_m": round(((float(position.get("y_m", y_m)) * capture_count) + float(y_m)) / new_capture_count, 6),
+                "z_m": round(((float(position.get("z_m", z_m)) * capture_count) + float(z_m)) / new_capture_count, 6),
+            }
+            existing["updated_at"] = created_at
+            existing["device_id"] = device_id
+            existing["device_name"] = device.name
+            existing["device_address"] = device.address
+            existing["room_name"] = area.name
+            existing["room_floor_id"] = area.floor_id
+            existing["sample_radius_m"] = max(float(existing.get("sample_radius_m", 0.0)), float(sample_radius_m))
+            existing["transition_floor_ids"] = sorted(
+                {*(existing.get("transition_floor_ids") or []), *cleaned_floor_ids}
+            )
+            existing["capture_count"] = new_capture_count
+            existing["last_capture_duration_s"] = int(capture_duration_s)
+            existing["total_capture_duration_s"] = int(existing.get("total_capture_duration_s", 0)) + int(
+                capture_duration_s
+            )
+            stored = existing
+
+        await self._store.async_replace_transition_samples(transition_samples)
+
+        return {
+            "created_at": stored["created_at"],
+            "updated_at": stored["updated_at"],
+            "merged": merged,
+            "device_id": device_id,
+            "room_area_id": room_area_id,
+            "room_name": area.name,
+            "room_floor_id": area.floor_id,
+            "transition_name": cleaned_name,
+            "x_m": float(stored["position"]["x_m"]),
+            "y_m": float(stored["position"]["y_m"]),
+            "z_m": float(stored["position"]["z_m"]),
+            "sample_radius_m": float(stored["sample_radius_m"]),
+            "capture_duration_s": int(capture_duration_s),
+            "capture_count": int(stored["capture_count"]),
+            "transition_floor_ids": list(stored["transition_floor_ids"]),
+            "anchor_layout_hash": layout_hash,
+        }
 
     async def async_start_session(
         self,
@@ -716,6 +862,137 @@ class BermudaCalibrationManager:
         if device_address is None:
             return None
         return self._coordinator.devices.get(str(device_address).lower())
+
+    def transition_support_diagnostics(
+        self,
+        *,
+        layout_hash: str,
+        x_m: float | None,
+        y_m: float | None,
+        z_m: float | None,
+        room_area_id: str | None,
+        challenger_floor_id: str | None,
+        geometry_quality_01: float,
+    ) -> dict[str, Any]:
+        """Return transition-proximity diagnostics for the current solve."""
+        all_samples = self.transition_samples()
+        layout_samples = [sample for sample in all_samples if sample.get("anchor_layout_hash") == layout_hash]
+        diagnostics: dict[str, Any] = {
+            "transition_sample_count": len(all_samples),
+            "transition_layout_sample_count": len(layout_samples),
+            "transition_room_context_area_id": room_area_id,
+            "transition_challenger_floor_id": challenger_floor_id,
+            "transition_support_01": 0.0,
+            "transition_matching_room_count": 0,
+            "transition_supporting_floor_count": 0,
+            "transition_nearby_match_count": 0,
+            "transition_best_name": None,
+            "transition_best_room_area_id": None,
+            "transition_best_floor_ids": [],
+            "transition_best_distance_m": None,
+            "transition_best_distance_mode": None,
+            "transition_best_within_radius": False,
+            "transition_best_room_context_match": False,
+            "transition_best_supports_challenger": False,
+        }
+        if not layout_samples:
+            return diagnostics
+
+        best_sample: dict[str, Any] | None = None
+        best_distance_m: float | None = None
+        best_distance_mode: str | None = None
+        best_support_01 = 0.0
+        room_quality_ok = geometry_quality_01 >= 0.30
+
+        for sample in layout_samples:
+            sample_room_area_id = str(sample.get("room_area_id") or "")
+            transition_floor_ids = [str(floor_id) for floor_id in (sample.get("transition_floor_ids") or []) if floor_id]
+            room_context_match = room_area_id == sample_room_area_id if room_area_id is not None else False
+            supports_challenger = (
+                challenger_floor_id in transition_floor_ids if challenger_floor_id is not None else False
+            )
+            if room_context_match:
+                diagnostics["transition_matching_room_count"] = int(diagnostics["transition_matching_room_count"]) + 1
+            if supports_challenger:
+                diagnostics["transition_supporting_floor_count"] = int(
+                    diagnostics["transition_supporting_floor_count"]
+                ) + 1
+
+            position = sample.get("position") or {}
+            distance_m: float | None = None
+            distance_mode: str | None = None
+            if x_m is not None and y_m is not None:
+                dx = float(x_m) - float(position.get("x_m", x_m))
+                dy = float(y_m) - float(position.get("y_m", y_m))
+                if z_m is not None and position.get("z_m") is not None:
+                    dz = float(z_m) - float(position.get("z_m", z_m))
+                    distance_m = math.sqrt((dx * dx) + (dy * dy) + (dz * dz))
+                    distance_mode = "3d"
+                else:
+                    distance_m = math.hypot(dx, dy)
+                    distance_mode = "xy"
+            within_radius = distance_m is not None and distance_m <= float(sample.get("sample_radius_m", 0.0))
+            if within_radius:
+                diagnostics["transition_nearby_match_count"] = int(diagnostics["transition_nearby_match_count"]) + 1
+
+            support_01 = 0.0
+            if room_context_match and supports_challenger:
+                if within_radius and room_quality_ok:
+                    support_01 = 1.0
+                elif not room_quality_ok:
+                    support_01 = 0.5
+
+            if (
+                support_01 > best_support_01
+                or (
+                    math.isclose(support_01, best_support_01)
+                    and distance_m is not None
+                    and (best_distance_m is None or distance_m < best_distance_m)
+                )
+            ):
+                best_support_01 = support_01
+                best_sample = sample
+                best_distance_m = distance_m
+                best_distance_mode = distance_mode
+                diagnostics["transition_support_01"] = support_01
+                diagnostics["transition_best_within_radius"] = bool(within_radius)
+                diagnostics["transition_best_room_context_match"] = room_context_match
+                diagnostics["transition_best_supports_challenger"] = supports_challenger
+
+        if best_sample is not None:
+            diagnostics["transition_best_name"] = best_sample.get("transition_name")
+            diagnostics["transition_best_room_area_id"] = best_sample.get("room_area_id")
+            diagnostics["transition_best_floor_ids"] = list(best_sample.get("transition_floor_ids") or [])
+            diagnostics["transition_best_distance_m"] = (
+                round(float(best_distance_m), 3) if best_distance_m is not None else None
+            )
+            diagnostics["transition_best_distance_mode"] = best_distance_mode
+
+        return diagnostics
+
+    @staticmethod
+    def _derive_transition_key(*, room_area_id: str, transition_name: str, anchor_layout_hash: str) -> str:
+        """Return the internal stable key for a transition point."""
+        normalized_name = re.sub(r"[^a-z0-9]+", "_", transition_name.strip().lower()).strip("_")
+        raw_key = f"{room_area_id}\x1f{normalized_name}\x1f{anchor_layout_hash}"
+        return f"transition_{hashlib.sha256(raw_key.encode('utf-8')).hexdigest()[:16]}"
+
+    def _normalize_transition_floor_ids(
+        self,
+        *,
+        transition_floor_ids: list[str],
+        room_floor_id: str,
+    ) -> list[str]:
+        """Validate and normalize transition floor ids from service input."""
+        cleaned: list[str] = []
+        for floor_id in transition_floor_ids:
+            candidate = str(floor_id).strip()
+            if not candidate or candidate == room_floor_id or candidate in cleaned:
+                continue
+            if self._coordinator.fr.async_get_floor(candidate) is None:
+                raise HomeAssistantError(f"Transition floor '{candidate}' does not exist.")
+            cleaned.append(candidate)
+        return cleaned
 
     @staticmethod
     def _median_abs_deviation(values: list[float]) -> float:

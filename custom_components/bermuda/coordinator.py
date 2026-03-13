@@ -356,6 +356,28 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         )
         self.config_entry.async_on_unload(lambda: hass.services.async_remove(DOMAIN, "record_calibration_sample"))
 
+        hass.services.async_register(
+            DOMAIN,
+            "record_transition_sample",
+            self.service_record_transition_sample,
+            vol.Schema(
+                {
+                    vol.Required("device_id"): cv.string,
+                    vol.Required("room_area_id"): cv.string,
+                    vol.Required("transition_name"): cv.string,
+                    vol.Required("transition_floor_ids"): vol.All(cv.ensure_list, [cv.string]),
+                    vol.Optional("x_y_z_m"): cv.string,
+                    vol.Optional("x_m"): vol.Coerce(float),
+                    vol.Optional("y_m"): vol.Coerce(float),
+                    vol.Optional("z_m"): vol.Coerce(float),
+                    vol.Optional("sample_radius_m", default=DEFAULT_SAMPLE_RADIUS_M): vol.Coerce(float),
+                    vol.Optional("capture_duration_s", default=60): vol.All(vol.Coerce(int), vol.Range(min=1)),
+                }
+            ),
+            SupportsResponse.OPTIONAL,
+        )
+        self.config_entry.async_on_unload(lambda: hass.services.async_remove(DOMAIN, "record_transition_sample"))
+
         # Register for newly discovered / changed BLE devices
         if self.config_entry is not None:
             self.config_entry.async_on_unload(
@@ -1436,6 +1458,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             if not device.create_sensor:
                 continue
             self._refresh_area_from_trilat(device, layout_hash)
+            self._refresh_transition_sample_diagnostics(device, layout_hash)
 
     def _refresh_area_from_trilat(self, device: BermudaDevice, layout_hash: str) -> None:
         """Resolve one device room from trilat position and trained samples."""
@@ -2229,6 +2252,34 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         if device.area_id is not None and not device.area_is_unknown:
             return device.area_id
         return device.area_last_seen_id
+
+    def _refresh_transition_sample_diagnostics(self, device: BermudaDevice, layout_hash: str) -> None:
+        """Attach transition-sample proximity diagnostics to the current floor state."""
+        if not hasattr(self.calibration, "transition_support_diagnostics"):
+            return
+        stable_area_id = self._stable_area_id(device)
+        state = self._get_trilat_decision_state(device)
+        transition_diag = self.calibration.transition_support_diagnostics(
+            layout_hash=layout_hash,
+            x_m=device.trilat_x_m,
+            y_m=device.trilat_y_m,
+            z_m=device.trilat_z_m,
+            room_area_id=stable_area_id,
+            challenger_floor_id=state.floor_challenger_id,
+            geometry_quality_01=max(0.0, min(1.0, float(device.trilat_geometry_quality or 0.0) / 10.0)),
+        )
+        transition_diag["transition_room_context_name"] = self.resolve_area_name(stable_area_id)
+        challenger_floor_id = transition_diag.get("transition_challenger_floor_id")
+        transition_diag["transition_challenger_floor_name"] = self._resolve_floor_name(
+            str(challenger_floor_id) if challenger_floor_id else None
+        )
+        best_room_area_id = transition_diag.get("transition_best_room_area_id")
+        transition_diag["transition_best_room_name"] = self.resolve_area_name(best_room_area_id)
+        transition_diag["transition_best_floor_names"] = [
+            self._resolve_floor_name(str(floor_id))
+            for floor_id in transition_diag.get("transition_best_floor_ids", [])
+        ]
+        device.trilat_floor_diagnostics.update(transition_diag)
 
     def _async_manage_repair_trilat_without_anchors(self, scannerlist: list[str]):
         """Raise/clear repair when trilat is enabled but no anchors are configured."""
@@ -3546,6 +3597,25 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 sample_radius_m=sample_radius_m,
                 duration_s=call.data.get("duration_s", 60),
                 notes=call.data.get("notes") or None,
+            )
+        except HomeAssistantError as err:
+            raise vol.Invalid(str(err)) from err
+        return response
+
+    async def service_record_transition_sample(self, call: ServiceCall) -> ServiceResponse:
+        """Store or merge a Bermuda-native transition sample."""
+        x_m, y_m, z_m = self._parse_calibration_position(call.data)
+        try:
+            response = await self.calibration.async_record_transition_sample(
+                device_id=call.data["device_id"],
+                room_area_id=call.data["room_area_id"],
+                transition_name=call.data["transition_name"],
+                x_m=x_m,
+                y_m=y_m,
+                z_m=z_m,
+                sample_radius_m=call.data.get("sample_radius_m", DEFAULT_SAMPLE_RADIUS_M),
+                capture_duration_s=call.data.get("capture_duration_s", 60),
+                transition_floor_ids=list(call.data["transition_floor_ids"]),
             )
         except HomeAssistantError as err:
             raise vol.Invalid(str(err)) from err

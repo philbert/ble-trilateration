@@ -21,6 +21,7 @@ class BermudaCalibrationStore:
         self._store = Store[dict[str, Any]](hass, STORAGE_VERSION, STORAGE_KEY)
         self._data: dict[str, Any] = {
             "samples": [],
+            "transition_samples": [],
             "acknowledged_layout_hashes": [],
         }
         self._loaded = False
@@ -33,6 +34,7 @@ class BermudaCalibrationStore:
         if isinstance(loaded, dict) and isinstance(loaded.get("samples"), list):
             self._data = {
                 "samples": loaded.get("samples", []),
+                "transition_samples": loaded.get("transition_samples", []),
                 "acknowledged_layout_hashes": loaded.get("acknowledged_layout_hashes", []),
             }
         self._loaded = True
@@ -52,6 +54,16 @@ class BermudaCalibrationStore:
         return len(self._data["samples"])
 
     @property
+    def transition_samples(self) -> list[dict[str, Any]]:
+        """Return a defensive copy of stored transition samples."""
+        return deepcopy(self._data.get("transition_samples", []))
+
+    @property
+    def transition_sample_count(self) -> int:
+        """Return total stored transition-sample count."""
+        return len(self._data.get("transition_samples", []))
+
+    @property
     def acknowledged_layout_hashes(self) -> list[str]:
         """Return acknowledged layout hashes."""
         raw_hashes = self._data.get("acknowledged_layout_hashes", [])
@@ -69,6 +81,12 @@ class BermudaCalibrationStore:
         """Replace all stored samples."""
         await self.async_ensure_loaded()
         self._data["samples"] = deepcopy(samples)
+        await self._store.async_save(self._data)
+
+    async def async_replace_transition_samples(self, transition_samples: list[dict[str, Any]]) -> None:
+        """Replace all stored transition samples."""
+        await self.async_ensure_loaded()
+        self._data["transition_samples"] = deepcopy(transition_samples)
         await self._store.async_save(self._data)
 
     async def async_delete_sample(self, sample_id: str) -> bool:

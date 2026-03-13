@@ -197,6 +197,52 @@
           "description": "Optional note stored with the sample."
         }
       }
+    },
+    "record_transition_sample": {
+      "name": "Record Transition Sample",
+      "description": "Store or merge a Bermuda-native floor-transition point for one tracked device.",
+      "fields": {
+        "device_id": {
+          "name": "Device",
+          "description": "Home Assistant device registry id for the tracked device associated with this transition point."
+        },
+        "room_area_id": {
+          "name": "Room Area",
+          "description": "Area id for the room containing this transition point."
+        },
+        "transition_name": {
+          "name": "Transition Name",
+          "description": "User-facing name for the transition point, such as `stairwell`."
+        },
+        "transition_floor_ids": {
+          "name": "Transition Floors",
+          "description": "List of floor ids reachable from this transition point, excluding the room's own floor."
+        },
+        "x_y_z_m": {
+          "name": "X, Y, Z Coordinates",
+          "description": "Declared coordinates in metres as `x,y,z`, for example `12.5,0.5,3.7`."
+        },
+        "x_m": {
+          "name": "X Coordinate",
+          "description": "Declared X coordinate in metres. Optional if `x_y_z_m` is provided."
+        },
+        "y_m": {
+          "name": "Y Coordinate",
+          "description": "Declared Y coordinate in metres. Optional if `x_y_z_m` is provided."
+        },
+        "z_m": {
+          "name": "Z Coordinate",
+          "description": "Declared Z coordinate in metres. Optional if `x_y_z_m` is provided."
+        },
+        "sample_radius_m": {
+          "name": "Sample Radius",
+          "description": "Declared support radius in metres for this transition point."
+        },
+        "capture_duration_s": {
+          "name": "Capture Duration",
+          "description": "Capture metadata in seconds. This does not change the transition identity."
+        }
+      }
     }
   },
   "issues": {

@@ -145,7 +145,10 @@ def _make_coordinator():
     coordinator.devices = {}
     coordinator._scanners = set()
     coordinator._trilat_decision_state = {}
-    coordinator.calibration = SimpleNamespace(current_anchor_layout_hash="layout-a")
+    coordinator.calibration = SimpleNamespace(
+        current_anchor_layout_hash="layout-a",
+        transition_support_diagnostics=lambda **_kwargs: {},
+    )
     coordinator.fr = SimpleNamespace(async_get_floor=lambda floor_id: SimpleNamespace(name=f"Floor {floor_id}"))
     coordinator.ar = SimpleNamespace(async_get_area=lambda _area_id: None)
     coordinator.get_scanner_anchor_x = lambda scanner_addr: getattr(coordinator.devices.get(scanner_addr), "anchor_x_m", None)
