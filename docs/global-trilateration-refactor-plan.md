@@ -128,7 +128,7 @@ Instead:
 
 - same-floor anchors keep their normal `sigma_m`,
 - adjacent-floor anchors are included with inflated `sigma_m`,
-- non-adjacent-floor anchors may use a larger inflation factor,
+- non-adjacent-floor anchors are deferred for later evaluation and would require a larger inflation factor if enabled,
 - stale or invalid anchors remain excluded.
 
 This is the core refactor.
@@ -510,6 +510,12 @@ Goal:
 
 - determine whether current anchors make `z` observable enough to justify global 3D-first work.
 
+Suggested thresholds:
+
+- success target: GDOP `< 5` at representative known positions,
+- warning zone: GDOP `5-10` or unstable condition numbers,
+- failure threshold: GDOP `> 10` or condition number `> 1e4`.
+
 ### Experiment 3: Cross-floor fingerprint accuracy
 
 Using current calibration samples:
@@ -544,6 +550,11 @@ Suggested decision rule:
 
 - if adjacent-floor bias is moderate, keep adjacent soft inclusion,
 - if non-adjacent-floor bias is large, continue excluding non-adjacent floors from the solve path in production.
+
+Suggested thresholds:
+
+- if mean bias exceeds `2 m` or variance exceeds `3 m` on adjacent-floor traces, even adjacent inclusion may need to stay diagnostic-only,
+- if non-adjacent-floor bias exceeds those thresholds, keep non-adjacent floors out of the production solve path.
 
 ### Experiment 5: State reset elimination
 
