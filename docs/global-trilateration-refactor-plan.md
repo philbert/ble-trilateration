@@ -934,95 +934,43 @@ Stage 5 builds a floor posterior from RSSI evidence, fingerprint output, continu
 
 ---
 
-## Engineer Review — 2026-03-13 (third pass, post-incorporation review)
+## Engineer Review — 2026-03-13 (final pass)
 
-*All findings from the second-pass review have been incorporated into the main plan body. This review starts from the current state of the plan and identifies new issues only.*
-
----
-
-### Executive Verdict
-
-The plan is substantially better. The previous blocking issues are gone: `_apply_soft_vertical_prior` is committed to Option A, `mean_sigma_m` exclusion is decided, EWMA role-change clearing is in scope, `fingerprint_global()` is named, `anchor_layout_hash` is in the transition-sample shape, `capture_duration_s` is demoted to metadata, the adjacency problem is dissolved by using a single other-floor multiplier, and the arbitration procedure has concrete rules with thresholds.
-
-Four new issues remain. Two are correctness problems in the arbitration procedure. Two are interface specification gaps that will cause friction at implementation time.
+*All previous findings have been incorporated. Three issues remain that are worth fixing before implementation. One piece of Stage 5 prose directly contradicts a design principle and should be deleted.*
 
 ---
 
-### Finding 1: Rule 2 of the arbitration procedure can cause indefinite floor lock
+### Finding 1: `challenger_fingerprint_hold_since` is not cleared when the challenger identity changes
 
-Rule 2 says: if `fingerprint_floor_confidence > 0.70` and fingerprint agrees with current floor, clear the challenger and hold.
+Rule 2 initialises `challenger_fingerprint_hold_since = now` on first entry and clears it to `0` in the `else` branch — but only when fingerprint stops agreeing with the current floor. It is never cleared when `floor_challenger_id` itself changes.
 
-The problem is that "clear challenger" resets `floor_challenger_since` to zero. If fingerprint consistently shows high confidence for the current floor — which it will if the device has moved toward a new floor but is still in a corridor with mixed RSSI — Rule 2 fires every update cycle, resetting the challenger timer each time. The dwell timer never advances. The floor switch never happens, regardless of how long the RSSI floor evidence has been pointing at the challenger.
+Scenario: RSSI evidence initially challenges with `street_level`. Rule 2 fires and sets `challenger_fingerprint_hold_since = T1`. RSSI evidence then shifts and `basement` becomes the new challenger. Fingerprint still agrees with `ground_floor`, so Rule 2's `else` branch does not fire. `challenger_fingerprint_hold_since` stays at `T1`. The `basement` challenge is now measured against a hold clock that started during the `street_level` challenge — it inherits a partially-consumed veto budget from a different challenge cycle.
 
-The existing dwell mechanism gives the challenger a finite time window: it accumulates `floor_challenger_since` and switches after `required_dwell`. Rule 2 breaks that guarantee by continuously resetting the timer.
-
-Fix: Rule 2 should suppress challenger advancement for a maximum of `base_required_dwell * 2` seconds. After that ceiling, fingerprint evidence loses its veto right and the challenger timer is allowed to proceed normally. Alternatively, Rule 2 should not clear the challenger but should instead pause timer advancement (keep `floor_challenger_since` frozen at its current value rather than resetting it to zero). The latter is cleaner: the challenger is still alive, just not accumulating time while fingerprint disagrees.
+In the primary failure mode (a single persistent `street_level` challenger against `ground_floor`) this does not trigger because the challenger identity is stable. But it is a latent state machine bug. Fix: clear `challenger_fingerprint_hold_since = 0` whenever `floor_challenger_id` is assigned a new identity. That assignment already happens in the existing coordinator code at the start of the floor evidence block — add the clear there.
 
 ---
 
-### Finding 2: `fingerprint_floor_confidence` measures room-level ambiguity, not floor-level ambiguity
+### Finding 2: `floor_confidence` formula is unspecified — the thresholds in Rules 2, 3, 5 are untunable without it
 
-The arbitration procedure defines:
+The `room_classifier.py` spec says "compute `floor_confidence` from aggregate room scores by floor, not from best-room vs second-room ambiguity." This is correct in principle but does not define the formula.
 
-```
-fingerprint_floor_confidence = best_score / max(best_score + second_score, 1e-9)
-```
+`_fingerprint_room_scores` returns un-normalised Gaussian kernel values. Two implementers can compute `floor_confidence` differently:
 
-`second_score` is the second-best room score across all floors. If the two best rooms are on the same floor — for example, Kitchen and Living Room are both on `ground_floor` and are close in RSSI space — then `fingerprint_floor_confidence` will be low even though floor is unambiguous. The device is clearly on `ground_floor`, but Rules 2 and 5 would not fire correctly because the confidence calculation reflects intra-floor room ambiguity, not inter-floor floor ambiguity.
+- `max-room-per-floor / sum(max-rooms-per-floor across all floors)` — gives the dominant-room fraction
+- `sum-of-all-room-scores-per-floor / total` — inflates floors with more calibrated rooms
 
-The rules need a `fingerprint_floor_confidence` that compares the best floor's aggregate score against the second-best floor's aggregate score, not the best room against the second-best room.
+The second formula will systematically boost whichever floor has more calibration samples, which is probably `ground_floor`. This would make `floor_confidence` for `ground_floor` persistently high even when the device is on another floor, causing Rule 2 to veto legitimate floor switches.
 
-Fix: `fingerprint_global()` should return both a `floor_confidence` and a `room_confidence`. `floor_confidence` is computed as: sum of scores for all rooms on the best floor divided by the sum of all room scores across all floors. This gives a well-behaved floor discrimination signal regardless of how many rooms are on each floor. The arbitration rules use `floor_confidence` for Rules 2, 3, and 5.
-
-This also affects the unit test spec (line 626): the test for `fingerprint_global()` producing a candidate outside the current floor should verify `floor_confidence`, not just that `area_id` differs.
+The correct formula is the first one: `floor_confidence = best_room_score_on_best_floor / sum(best_room_score_per_floor across all floors)`. This gives a ratio in `[0, 1]` that is insensitive to the number of rooms per floor. Add this formula explicitly to the `fingerprint_global()` spec.
 
 ---
 
-### Finding 3: `RoomClassification` has no `floor_id` field — `fingerprint_global()` needs a new return type
+### Finding 3: Stage 5 prose contradicts the soft-prior design principle
 
-`RoomClassification` (room_classifier.py:34-44) stores `area_id`, `reason`, `best_area_id`, `best_score`, `second_score`, `topk_used`, `geometry_score`, `fingerprint_score`. It does not store `floor_id`.
+Stage 5 Runtime behavior currently says:
 
-The arbitration procedure uses `fingerprint_global.floor_id` directly (Rules 2 and 3). If `fingerprint_global()` returns a `RoomClassification`, the caller has to do a separate area-registry lookup to get `floor_id` from `area_id`, which means the coordinator has to import or receive an area-registry reference and do an `async_get_area()` call in the middle of the decision procedure.
+> if the challenger floor has no nearby or matching supporting transition sample, increase penalty or preserve ambiguity
 
-Either `fingerprint_global()` returns a new dataclass — something like `GlobalFingerprintResult(area_id, floor_id, floor_confidence, room_confidence, best_score, second_score)` — or it returns a `RoomClassification` extended with `floor_id` and `floor_confidence` fields.
+This directly contradicts the principle two lines later: "transition support is advisory only and must never hard-block a switch." And it has no corresponding rule in the arbitration procedure — Rules 1–6 only reduce dwell (Rule 4), never increase it based on absence of transition support.
 
-This is a small design decision but it must be made before the interface is implemented, otherwise the coordinator and the classifier will end up with a coupling that was not planned.
-
----
-
-### Finding 4: Stage 5's `transition_support_01` fallback is room-area granularity when position is weak
-
-The three-state model is:
-
-- `1.0`: position quality acceptable, solved position within `sample_radius_m`, room matches, challenger in `transition_floor_ids`
-- `0.5`: position quality low, but room matches and challenger in `transition_floor_ids`
-- `0.0`: otherwise
-
-When position quality is poor, the fallback to `0.5` is based only on room-area match. A room like "entrance" could span 20 m² or more. A device anywhere in that room gets `transition_support_01 = 0.5` regardless of whether it is physically near the transition point or at the opposite end of the room. Combined with Rule 4 (`transition_support_01 > 0.60` required to reduce dwell), the `0.5` fallback never triggers Rule 4 anyway — so this is not an active correctness problem. But the plan should note this explicitly: the `0.5` fallback exists for diagnostic completeness and future use, not to influence the current arbitration dwell. If that intent is correct, add a comment in the Stage 5 runtime behavior section. If the `0.5` case is intended to influence arbitration, the Rule 4 threshold needs to be lowered to `> 0.4` and the room-granularity risk should be called out.
-
----
-
-### Finding 5: EWMA interaction between Stage 2 and Stage 3 is undocumented
-
-Stage 3 says "retain EWMA range state where safe." Stage 2 says "clear EWMA when an anchor changes role between same-floor and non-selected-floor participation." When both stages are active, the behavior is:
-
-- Floor switch does not clear EWMAs (Stage 3).
-- An anchor that was same-floor and becomes other-floor on the next update has its EWMA cleared (Stage 2).
-- An anchor that was other-floor and becomes same-floor on the next update has its EWMA cleared (Stage 2).
-- An anchor that was same-floor and remains same-floor through a floor switch keeps its EWMA (Stage 3 + Stage 2 together).
-
-This is correct behavior but the interaction is implicit. An implementer reading Stage 3 in isolation ("retain EWMA range state where safe") will ask what "safe" means and may not immediately connect it to the Stage 2 role-change rule. The "where safe" qualifier should be replaced with an explicit cross-reference: "retain EWMA range state; the Stage 2 role-change rule (clear on same-floor ↔ other-floor transition) applies independently of floor switch."
-
----
-
-### What to fix before implementation
-
-1. **Rule 2: Replace "clear challenger" with "pause challenger timer advancement"** and add a maximum hold ceiling of `base_required_dwell * 2` seconds. After that ceiling, fingerprint evidence loses its veto and the timer runs normally.
-
-2. **`fingerprint_global()` return type: Specify a new `GlobalFingerprintResult` dataclass** with `area_id`, `floor_id`, `floor_confidence`, `room_confidence`, `best_score`, `second_score`. Compute `floor_confidence` as the best-floor aggregate score fraction, not room best-vs-second. Update the arbitration rules to reference `floor_confidence` explicitly.
-
-3. **`transition_support_01 = 0.5` fallback: Add a note in Stage 5** clarifying that the fallback value is below the Rule 4 trigger threshold (0.60) by design, meaning it influences diagnostics but not current arbitration dwell. If that intent changes, the Rule 4 threshold needs a corresponding adjustment.
-
-4. **Stage 3 "where safe": Replace with a cross-reference to the Stage 2 role-change rule.** State explicitly: "safe = the anchor's floor role did not change. An anchor that changes between same-floor and other-floor status has its EWMA cleared by the Stage 2 rule regardless of whether a floor switch occurred."
-
-5. **Recommended first implementation slice (line 803)**: Move "Implement `fingerprint_global()` as an offline test script" to step 1b (concurrent with Phase 0 logging), not step 3. It requires no coordinator changes, only a standalone script exercising the classifier. Running it before Phase 1 means Experiment 3 results are available when evaluating whether Phase 1 alone solved the problem.
+The sentence should be deleted. The correct behavior is: absent transition support means no dwell reduction. The base dwell applies unchanged. There is no case where absence of a transition sample should make a floor switch harder than it would be without transition samples at all.
