@@ -2328,6 +2328,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             fingerprint_hold_active: bool = False,
             fingerprint_hold_elapsed_s: float | None = None,
             fingerprint_hold_ceiling_s: float | None = None,
+            fingerprint_switch_veto_active: bool = False,
         ) -> None:
             floor_evidence = floor_evidence or {}
             fingerprint_result = fingerprint_result or GlobalFingerprintResult(
@@ -2393,6 +2394,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 "fingerprint_hold_elapsed_s": fingerprint_hold_elapsed_s,
                 "fingerprint_hold_ceiling_s": fingerprint_hold_ceiling_s,
                 "fingerprint_hold_expired": state.challenger_fingerprint_hold_expired,
+                "fingerprint_switch_veto_active": fingerprint_switch_veto_active,
                 "soft_include_other_floor_anchors_enabled": soft_include_other_floor_anchors,
                 "cross_floor_anchor_count": device.trilat_cross_floor_anchor_count,
                 "floor_switch_count": getattr(device, "trilat_floor_switch_count", 0),
@@ -2644,6 +2646,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         fingerprint_hold_active = False
         fingerprint_hold_elapsed_s = 0.0
         fingerprint_hold_ceiling_s = float(policy.floor_dwell_seconds) * 2.0
+        fingerprint_switch_veto_active = False
         if state.floor_id is None:
             state.floor_id = best_floor_id
             state.floor_challenger_id = None
@@ -2735,12 +2738,15 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                     (nowstamp - state.floor_challenger_since) - fingerprint_hold_elapsed_s,
                 )
                 if not fingerprint_hold_active and challenger_effective_dwell_s >= effective_required_dwell_s:
-                    state.floor_id = best_floor_id
-                    state.floor_challenger_id = None
-                    state.floor_challenger_since = 0.0
-                    state.challenger_fingerprint_hold_since = 0.0
-                    state.challenger_fingerprint_hold_total_s = 0.0
-                    state.challenger_fingerprint_hold_expired = False
+                    if fingerprint_supports_current_floor:
+                        fingerprint_switch_veto_active = True
+                    else:
+                        state.floor_id = best_floor_id
+                        state.floor_challenger_id = None
+                        state.floor_challenger_since = 0.0
+                        state.challenger_fingerprint_hold_since = 0.0
+                        state.challenger_fingerprint_hold_total_s = 0.0
+                        state.challenger_fingerprint_hold_expired = False
             else:
                 state.floor_challenger_id = None
                 state.floor_challenger_since = 0.0
@@ -2777,6 +2783,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             fingerprint_hold_active=fingerprint_hold_active,
             fingerprint_hold_elapsed_s=fingerprint_hold_elapsed_s,
             fingerprint_hold_ceiling_s=fingerprint_hold_ceiling_s,
+            fingerprint_switch_veto_active=fingerprint_switch_veto_active,
         )
 
         if prev_floor_id is not None and selected_floor_id != prev_floor_id:
@@ -2806,6 +2813,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 fingerprint_hold_active=fingerprint_hold_active,
                 fingerprint_hold_elapsed_s=fingerprint_hold_elapsed_s,
                 fingerprint_hold_ceiling_s=fingerprint_hold_ceiling_s,
+                fingerprint_switch_veto_active=fingerprint_switch_veto_active,
             )
 
         if _debug_this_device:
@@ -2822,7 +2830,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 (
                     "Trilat floor diag: %s selected=%s challenger=%s margin=%s "
                     "cross_floor=%d switches=%d resets=%d fp_floor=%s fp_conf=%s "
-                    "fp_reason=%s fp_hold=%s/%s effective_dwell=%s/%s evidence=[%s]"
+                    "fp_reason=%s fp_hold=%s/%s fp_veto=%s effective_dwell=%s/%s evidence=[%s]"
                 ),
                 device.name,
                 selected_floor_id,
@@ -2836,6 +2844,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 fingerprint_result.reason,
                 f"{fingerprint_hold_elapsed_s:.3f}" if fingerprint_hold_elapsed_s is not None else "n/a",
                 f"{fingerprint_hold_ceiling_s:.3f}" if fingerprint_hold_ceiling_s is not None else "n/a",
+                fingerprint_switch_veto_active,
                 f"{challenger_effective_dwell_s:.3f}" if challenger_effective_dwell_s is not None else "n/a",
                 f"{effective_required_dwell_s:.3f}" if effective_required_dwell_s is not None else "n/a",
                 evidence_str,

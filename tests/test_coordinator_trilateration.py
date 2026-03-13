@@ -456,6 +456,61 @@ def test_floor_challenger_pauses_on_moderate_confidence_when_current_floor_score
     assert device.trilat_floor_diagnostics["fingerprint_hold_active"] is True
 
 
+def test_floor_challenger_does_not_switch_after_hold_ceiling_if_fingerprint_still_prefers_current_floor():
+    """A challenger should still be vetoed at switch time when fingerprint keeps backing the current floor."""
+    coordinator = _make_coordinator()
+    coordinator.room_classifier = SimpleNamespace(
+        fingerprint_global=lambda **_kwargs: GlobalFingerprintResult(
+            area_id="guest_room",
+            floor_id="f1",
+            reason="ok",
+            floor_confidence=0.64,
+            room_confidence=0.52,
+            best_score=0.43,
+            second_score=0.29,
+            floor_scores={"f1": 0.43, "f2": 0.26, "f3": 0.18},
+        )
+    )
+    device = _DummyDevice("dev-phase3-veto")
+
+    sc_f1a = _make_scanner(coordinator, "p3v-a", "f1", 0.0, 0.0)
+    sc_f1b = _make_scanner(coordinator, "p3v-b", "f1", 6.0, 0.0)
+    sc_f1c = _make_scanner(coordinator, "p3v-c", "f1", 0.0, 8.0)
+    sc_f2a = _make_scanner(coordinator, "p3v-d", "f2", 0.0, 0.0)
+    sc_f2b = _make_scanner(coordinator, "p3v-e", "f2", 6.0, 0.0)
+    sc_f2c = _make_scanner(coordinator, "p3v-f", "f2", 0.0, 8.0)
+
+    with patch("custom_components.bermuda.coordinator.monotonic_time_coarse", return_value=100.0):
+        device.adverts = {
+            ("dev-phase3-veto", sc_f1a.address): _make_advert(sc_f1a, 100.0, -70.0, 5.0),
+            ("dev-phase3-veto", sc_f1b.address): _make_advert(sc_f1b, 100.0, -70.0, 5.0),
+            ("dev-phase3-veto", sc_f1c.address): _make_advert(sc_f1c, 100.0, -70.0, 5.0),
+        }
+        coordinator._refresh_trilateration_for_device(device)
+
+    state = coordinator._get_trilat_decision_state(device)
+    assert state.floor_id == "f1"
+
+    with patch("custom_components.bermuda.coordinator.monotonic_time_coarse", return_value=126.0):
+        device.adverts = {
+            ("dev-phase3-veto", sc_f1a.address): _make_advert(sc_f1a, 126.0, -82.0, 5.0),
+            ("dev-phase3-veto", sc_f1b.address): _make_advert(sc_f1b, 126.0, -82.0, 5.0),
+            ("dev-phase3-veto", sc_f1c.address): _make_advert(sc_f1c, 126.0, -82.0, 5.0),
+            ("dev-phase3-veto", sc_f2a.address): _make_advert(sc_f2a, 126.0, -58.0, 5.0),
+            ("dev-phase3-veto", sc_f2b.address): _make_advert(sc_f2b, 126.0, -58.0, 5.0),
+            ("dev-phase3-veto", sc_f2c.address): _make_advert(sc_f2c, 126.0, -58.0, 5.0),
+        }
+        state.floor_challenger_id = "f2"
+        state.floor_challenger_since = 101.0
+        state.challenger_fingerprint_hold_total_s = 16.0
+        state.challenger_fingerprint_hold_expired = True
+        coordinator._refresh_trilateration_for_device(device)
+
+    assert state.floor_id == "f1"
+    assert state.floor_challenger_id == "f2"
+    assert device.trilat_floor_diagnostics["fingerprint_switch_veto_active"] is True
+
+
 def test_floor_challenger_switches_earlier_when_fingerprint_supports_challenger():
     """Strong challenger-floor fingerprints should reduce floor-switch dwell."""
     coordinator = _make_coordinator()
