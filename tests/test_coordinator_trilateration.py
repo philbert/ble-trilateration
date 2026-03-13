@@ -6,6 +6,8 @@ import time
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
+
 from custom_components.bermuda.const import (
     CONF_TRILAT_SOFT_INCLUDE_OTHER_FLOOR_ANCHORS,
     DISTANCE_TIMEOUT,
@@ -565,6 +567,98 @@ def test_floor_challenger_switches_earlier_when_fingerprint_supports_challenger(
     assert state.floor_id == "f2"
     assert device.trilat_floor_diagnostics["fingerprint_floor_id"] == "f2"
     assert device.trilat_floor_diagnostics["effective_required_dwell_s"] == 4.0
+
+
+def test_floor_challenger_switches_earlier_when_transition_supports_challenger():
+    """Strong transition support should reduce floor-switch dwell even without fingerprint support."""
+    coordinator = _make_coordinator()
+    coordinator.calibration = SimpleNamespace(
+        current_anchor_layout_hash="layout-a",
+        transition_support_diagnostics=lambda **_kwargs: {"transition_support_01": 0.8},
+    )
+    device = _DummyDevice("dev-phase5-transition-switch")
+
+    sc_f1a = _make_scanner(coordinator, "p5s-a", "f1", 0.0, 0.0)
+    sc_f1b = _make_scanner(coordinator, "p5s-b", "f1", 6.0, 0.0)
+    sc_f1c = _make_scanner(coordinator, "p5s-c", "f1", 0.0, 8.0)
+    sc_f2a = _make_scanner(coordinator, "p5s-d", "f2", 0.0, 0.0)
+    sc_f2b = _make_scanner(coordinator, "p5s-e", "f2", 6.0, 0.0)
+    sc_f2c = _make_scanner(coordinator, "p5s-f", "f2", 0.0, 8.0)
+
+    with patch("custom_components.bermuda.coordinator.monotonic_time_coarse", return_value=100.0):
+        device.adverts = {
+            ("dev-phase5-transition-switch", sc_f1a.address): _make_advert(sc_f1a, 100.0, -70.0, 5.0),
+            ("dev-phase5-transition-switch", sc_f1b.address): _make_advert(sc_f1b, 100.0, -70.0, 5.0),
+            ("dev-phase5-transition-switch", sc_f1c.address): _make_advert(sc_f1c, 100.0, -70.0, 5.0),
+        }
+        coordinator._refresh_trilateration_for_device(device)
+
+    state = coordinator._get_trilat_decision_state(device)
+    assert state.floor_id == "f1"
+
+    with patch("custom_components.bermuda.coordinator.monotonic_time_coarse", return_value=107.0):
+        device.adverts = {
+            ("dev-phase5-transition-switch", sc_f1a.address): _make_advert(sc_f1a, 107.0, -82.0, 5.0),
+            ("dev-phase5-transition-switch", sc_f1b.address): _make_advert(sc_f1b, 107.0, -82.0, 5.0),
+            ("dev-phase5-transition-switch", sc_f1c.address): _make_advert(sc_f1c, 107.0, -82.0, 5.0),
+            ("dev-phase5-transition-switch", sc_f2a.address): _make_advert(sc_f2a, 107.0, -58.0, 5.0),
+            ("dev-phase5-transition-switch", sc_f2b.address): _make_advert(sc_f2b, 107.0, -58.0, 5.0),
+            ("dev-phase5-transition-switch", sc_f2c.address): _make_advert(sc_f2c, 107.0, -58.0, 5.0),
+        }
+        state.floor_challenger_id = "f2"
+        state.floor_challenger_since = 101.0
+        coordinator._refresh_trilateration_for_device(device)
+
+    assert state.floor_id == "f2"
+    assert device.trilat_floor_diagnostics["transition_support_01"] == 0.8
+    assert device.trilat_floor_diagnostics["transition_dwell_reduction_applied"] is True
+    assert device.trilat_floor_diagnostics["effective_required_dwell_s"] == pytest.approx(5.44, rel=1e-6)
+
+
+def test_floor_challenger_does_not_reduce_dwell_on_weak_transition_support():
+    """Weak transition support should remain diagnostic-only and leave dwell unchanged."""
+    coordinator = _make_coordinator()
+    coordinator.calibration = SimpleNamespace(
+        current_anchor_layout_hash="layout-a",
+        transition_support_diagnostics=lambda **_kwargs: {"transition_support_01": 0.5},
+    )
+    device = _DummyDevice("dev-phase5-transition-weak")
+
+    sc_f1a = _make_scanner(coordinator, "p5w-a", "f1", 0.0, 0.0)
+    sc_f1b = _make_scanner(coordinator, "p5w-b", "f1", 6.0, 0.0)
+    sc_f1c = _make_scanner(coordinator, "p5w-c", "f1", 0.0, 8.0)
+    sc_f2a = _make_scanner(coordinator, "p5w-d", "f2", 0.0, 0.0)
+    sc_f2b = _make_scanner(coordinator, "p5w-e", "f2", 6.0, 0.0)
+    sc_f2c = _make_scanner(coordinator, "p5w-f", "f2", 0.0, 8.0)
+
+    with patch("custom_components.bermuda.coordinator.monotonic_time_coarse", return_value=100.0):
+        device.adverts = {
+            ("dev-phase5-transition-weak", sc_f1a.address): _make_advert(sc_f1a, 100.0, -70.0, 5.0),
+            ("dev-phase5-transition-weak", sc_f1b.address): _make_advert(sc_f1b, 100.0, -70.0, 5.0),
+            ("dev-phase5-transition-weak", sc_f1c.address): _make_advert(sc_f1c, 100.0, -70.0, 5.0),
+        }
+        coordinator._refresh_trilateration_for_device(device)
+
+    state = coordinator._get_trilat_decision_state(device)
+    assert state.floor_id == "f1"
+
+    with patch("custom_components.bermuda.coordinator.monotonic_time_coarse", return_value=107.0):
+        device.adverts = {
+            ("dev-phase5-transition-weak", sc_f1a.address): _make_advert(sc_f1a, 107.0, -82.0, 5.0),
+            ("dev-phase5-transition-weak", sc_f1b.address): _make_advert(sc_f1b, 107.0, -82.0, 5.0),
+            ("dev-phase5-transition-weak", sc_f1c.address): _make_advert(sc_f1c, 107.0, -82.0, 5.0),
+            ("dev-phase5-transition-weak", sc_f2a.address): _make_advert(sc_f2a, 107.0, -58.0, 5.0),
+            ("dev-phase5-transition-weak", sc_f2b.address): _make_advert(sc_f2b, 107.0, -58.0, 5.0),
+            ("dev-phase5-transition-weak", sc_f2c.address): _make_advert(sc_f2c, 107.0, -58.0, 5.0),
+        }
+        state.floor_challenger_id = "f2"
+        state.floor_challenger_since = 101.0
+        coordinator._refresh_trilateration_for_device(device)
+
+    assert state.floor_id == "f1"
+    assert device.trilat_floor_diagnostics["transition_support_01"] == 0.5
+    assert device.trilat_floor_diagnostics["transition_dwell_reduction_applied"] is False
+    assert device.trilat_floor_diagnostics["effective_required_dwell_s"] == 8.0
 
 
 def test_phase2_keeps_mean_sigma_and_z_bounds_same_floor_only():

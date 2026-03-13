@@ -2380,6 +2380,8 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             fingerprint_hold_elapsed_s: float | None = None,
             fingerprint_hold_ceiling_s: float | None = None,
             fingerprint_switch_veto_active: bool = False,
+            transition_support_01: float = 0.0,
+            transition_dwell_reduction_applied: bool = False,
         ) -> None:
             floor_evidence = floor_evidence or {}
             fingerprint_result = fingerprint_result or GlobalFingerprintResult(
@@ -2446,6 +2448,8 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 "fingerprint_hold_ceiling_s": fingerprint_hold_ceiling_s,
                 "fingerprint_hold_expired": state.challenger_fingerprint_hold_expired,
                 "fingerprint_switch_veto_active": fingerprint_switch_veto_active,
+                "transition_support_01": transition_support_01,
+                "transition_dwell_reduction_applied": transition_dwell_reduction_applied,
                 "soft_include_other_floor_anchors_enabled": soft_include_other_floor_anchors,
                 "cross_floor_anchor_count": device.trilat_cross_floor_anchor_count,
                 "floor_switch_count": getattr(device, "trilat_floor_switch_count", 0),
@@ -2629,6 +2633,24 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 live_rssi_by_scanner=global_live_rssi_by_scanner,
             )
 
+        def _transition_support_for_challenger(challenger_floor_id: str | None) -> float:
+            if (
+                not layout_hash
+                or challenger_floor_id is None
+                or not hasattr(self.calibration, "transition_support_diagnostics")
+            ):
+                return 0.0
+            transition_diag = self.calibration.transition_support_diagnostics(
+                layout_hash=layout_hash,
+                x_m=device.trilat_x_m,
+                y_m=device.trilat_y_m,
+                z_m=device.trilat_z_m,
+                room_area_id=self._stable_area_id(device),
+                challenger_floor_id=challenger_floor_id,
+                geometry_quality_01=max(0.0, min(1.0, float(device.trilat_geometry_quality or 0.0) / 10.0)),
+            )
+            return float(transition_diag.get("transition_support_01", 0.0) or 0.0)
+
         if not evidence_inputs:
             _apply_anchor_status_entries()
             _apply_floor_diagnostics(
@@ -2698,6 +2720,8 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         fingerprint_hold_elapsed_s = 0.0
         fingerprint_hold_ceiling_s = float(policy.floor_dwell_seconds) * 2.0
         fingerprint_switch_veto_active = False
+        transition_support_01 = 0.0
+        transition_dwell_reduction_applied = False
         if state.floor_id is None:
             state.floor_id = best_floor_id
             state.floor_challenger_id = None
@@ -2784,6 +2808,11 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 if fingerprint_supports_challenger:
                     effective_required_dwell_s *= 0.5
 
+                transition_support_01 = _transition_support_for_challenger(state.floor_challenger_id)
+                if transition_support_01 > 0.60:
+                    effective_required_dwell_s *= (1.0 - (0.4 * transition_support_01))
+                    transition_dwell_reduction_applied = True
+
                 challenger_effective_dwell_s = max(
                     0.0,
                     (nowstamp - state.floor_challenger_since) - fingerprint_hold_elapsed_s,
@@ -2835,6 +2864,8 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             fingerprint_hold_elapsed_s=fingerprint_hold_elapsed_s,
             fingerprint_hold_ceiling_s=fingerprint_hold_ceiling_s,
             fingerprint_switch_veto_active=fingerprint_switch_veto_active,
+            transition_support_01=transition_support_01,
+            transition_dwell_reduction_applied=transition_dwell_reduction_applied,
         )
 
         if prev_floor_id is not None and selected_floor_id != prev_floor_id:
@@ -2865,6 +2896,8 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 fingerprint_hold_elapsed_s=fingerprint_hold_elapsed_s,
                 fingerprint_hold_ceiling_s=fingerprint_hold_ceiling_s,
                 fingerprint_switch_veto_active=fingerprint_switch_veto_active,
+                transition_support_01=transition_support_01,
+                transition_dwell_reduction_applied=transition_dwell_reduction_applied,
             )
 
         if _debug_this_device:
@@ -2881,7 +2914,8 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 (
                     "Trilat floor diag: %s selected=%s challenger=%s margin=%s "
                     "cross_floor=%d switches=%d resets=%d fp_floor=%s fp_conf=%s "
-                    "fp_reason=%s fp_hold=%s/%s fp_veto=%s effective_dwell=%s/%s evidence=[%s]"
+                    "fp_reason=%s fp_hold=%s/%s fp_veto=%s effective_dwell=%s/%s "
+                    "transition_support=%s transition_dwell=%s evidence=[%s]"
                 ),
                 device.name,
                 selected_floor_id,
@@ -2898,6 +2932,8 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 fingerprint_switch_veto_active,
                 f"{challenger_effective_dwell_s:.3f}" if challenger_effective_dwell_s is not None else "n/a",
                 f"{effective_required_dwell_s:.3f}" if effective_required_dwell_s is not None else "n/a",
+                f"{transition_support_01:.3f}",
+                transition_dwell_reduction_applied,
                 evidence_str,
             )
 
