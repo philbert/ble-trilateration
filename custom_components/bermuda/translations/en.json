@@ -137,7 +137,7 @@
         "title": "Delete Transition Sample",
         "description": "{summary}",
         "data": {
-          "transition_key": "Saved transition sample"
+          "sample_id": "Saved transition sample"
         }
       }
     }
@@ -215,7 +215,7 @@
     },
     "record_transition_sample": {
       "name": "Record Transition Sample",
-      "description": "Store or merge a Bermuda-native floor-transition point for one tracked device.",
+      "description": "Store one Bermuda-native floor-transition point for one tracked device. Each capture is saved as a separate sample.",
       "fields": {
         "device_id": {
           "name": "Device",

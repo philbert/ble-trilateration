@@ -281,7 +281,7 @@ async def test_transition_samples_options_flow_summary_and_delete_one(
     await coordinator.calibration_store.async_replace_transition_samples(
         [
             {
-                "transition_key": "transition_entrance",
+                "id": "transition_sample_entrance",
                 "created_at": "2026-03-12T10:44:40+01:00",
                 "updated_at": "2026-03-12T10:46:05+01:00",
                 "room_area_id": entrance.id,
@@ -290,10 +290,9 @@ async def test_transition_samples_options_flow_summary_and_delete_one(
                 "position": {"x_m": 1.2, "y_m": 1.5, "z_m": 3.7},
                 "transition_floor_ids": ["street_level"],
                 "anchor_layout_hash": coordinator.calibration.current_anchor_layout_hash,
-                "capture_count": 2,
             },
             {
-                "transition_key": "transition_living",
+                "id": "transition_sample_living",
                 "created_at": "2026-03-12T10:44:50+01:00",
                 "updated_at": "2026-03-12T10:45:00+01:00",
                 "room_area_id": living.id,
@@ -302,7 +301,6 @@ async def test_transition_samples_options_flow_summary_and_delete_one(
                 "position": {"x_m": 4.2, "y_m": 2.5, "z_m": 3.7},
                 "transition_floor_ids": ["basement", "top_floor"],
                 "anchor_layout_hash": coordinator.calibration.current_anchor_layout_hash,
-                "capture_count": 1,
             },
         ]
     )
@@ -327,8 +325,8 @@ async def test_transition_samples_options_flow_summary_and_delete_one(
     flow.coordinator = coordinator
     labels = [flow._format_transition_sample_label(sample) for sample in flow._get_transition_samples_for_selection()]
     assert labels == [
-        "Entrance | front_door | street_level | 1.2,1.5,3.7 | captures=2 | 2026-03-12 10:46:05",
-        "Living Room | stairs | basement, top_floor | 4.2,2.5,3.7 | captures=1 | 2026-03-12 10:45:00",
+        "Entrance | front_door | street_level | 1.2,1.5,3.7 | 2026-03-12 10:46:05",
+        "Living Room | stairs | basement, top_floor | 4.2,2.5,3.7 | 2026-03-12 10:45:00",
     ]
 
     result = await hass.config_entries.options.async_init(setup_bermuda_entry.entry_id)
@@ -342,10 +340,10 @@ async def test_transition_samples_options_flow_summary_and_delete_one(
     assert result["step_id"] == "transition_samples_delete_one"
 
     result = await hass.config_entries.options.async_configure(
-        result["flow_id"], user_input={"transition_key": "transition_entrance"}
+        result["flow_id"], user_input={"sample_id": "transition_sample_entrance"}
     )
     assert result["type"] == FlowResultType.MENU
     assert result["step_id"] == "transition_samples"
     assert "Deleted transition sample." in result["description_placeholders"]["summary"]
-    remaining_keys = [sample["transition_key"] for sample in coordinator.calibration.transition_samples()]
-    assert remaining_keys == ["transition_living"]
+    remaining_ids = [sample["id"] for sample in coordinator.calibration.transition_samples()]
+    assert remaining_ids == ["transition_sample_living"]

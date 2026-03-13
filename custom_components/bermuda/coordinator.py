@@ -3603,7 +3603,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         return response
 
     async def service_record_transition_sample(self, call: ServiceCall) -> ServiceResponse:
-        """Store or merge a Bermuda-native transition sample."""
+        """Store one Bermuda-native transition sample."""
         x_m, y_m, z_m = self._parse_calibration_position(call.data)
         try:
             response = await self.calibration.async_record_transition_sample(

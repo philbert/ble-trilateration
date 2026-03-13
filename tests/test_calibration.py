@@ -264,10 +264,10 @@ async def test_record_calibration_sample_service_accepts_split_xyz(hass: HomeAss
     assert sample["position"] == {"x_m": 4.2, "y_m": 1.8, "z_m": 1.1}
 
 
-async def test_record_transition_sample_service_merges_repeated_captures(
+async def test_record_transition_sample_service_keeps_repeated_captures_separate(
     hass: HomeAssistant, setup_bermuda_entry
 ):
-    """Transition samples should be stored separately and merged by internal key."""
+    """Transition samples should remain separate even with the same room and name."""
     coordinator = setup_bermuda_entry.runtime_data.coordinator
 
     floor_registry = fr.async_get(hass)
@@ -306,7 +306,7 @@ async def test_record_transition_sample_service_merges_repeated_captures(
     assert response["merged"] is False
     assert response["transition_name"] == "stairwell"
     assert response["transition_floor_ids"] == [basement.floor_id]
-    assert response["capture_count"] == 1
+    assert response["id"].startswith("transition_sample_")
 
     response = await hass.services.async_call(
         DOMAIN,
@@ -326,29 +326,29 @@ async def test_record_transition_sample_service_merges_repeated_captures(
         return_response=True,
     )
 
-    assert response["merged"] is True
-    assert response["capture_count"] == 2
-    assert response["x_m"] == 2.0
-    assert response["y_m"] == 3.0
-    assert response["z_m"] == 4.0
+    assert response["merged"] is False
+    assert response["id"].startswith("transition_sample_")
+    assert response["id"] != ""
+    assert response["x_m"] == 3.0
+    assert response["y_m"] == 4.0
+    assert response["z_m"] == 5.0
     assert response["sample_radius_m"] == 1.5
     assert response["transition_floor_ids"] == sorted([basement.floor_id, top_floor.floor_id])
-    assert "transition_key" not in response
 
     transition_samples = coordinator.calibration.transition_samples()
-    assert len(transition_samples) == 1
-    stored = transition_samples[0]
-    assert stored["room_area_id"] == area.id
-    assert stored["room_floor_id"] == ground_floor.floor_id
-    assert stored["transition_name"] == "stairwell"
-    assert stored["position"] == {"x_m": 2.0, "y_m": 3.0, "z_m": 4.0}
-    assert stored["sample_radius_m"] == 1.5
-    assert stored["capture_count"] == 2
-    assert stored["last_capture_duration_s"] == 45
-    assert stored["total_capture_duration_s"] == 105
-    assert stored["transition_floor_ids"] == sorted([basement.floor_id, top_floor.floor_id])
-    assert stored["anchor_layout_hash"] == coordinator.calibration.current_anchor_layout_hash
-    assert "transition_key" in stored
+    assert len(transition_samples) == 2
+    stored_positions = {tuple(sample["position"].values()) for sample in transition_samples}
+    assert stored_positions == {(1.0, 2.0, 3.0), (3.0, 4.0, 5.0)}
+    for stored in transition_samples:
+        assert stored["id"].startswith("transition_sample_")
+        assert stored["room_area_id"] == area.id
+        assert stored["room_floor_id"] == ground_floor.floor_id
+        assert stored["transition_name"] == "stairwell"
+        assert stored["anchor_layout_hash"] == coordinator.calibration.current_anchor_layout_hash
+        assert "transition_key" not in stored
+        assert "capture_count" not in stored
+        assert "last_capture_duration_s" not in stored
+        assert "total_capture_duration_s" not in stored
 
 
 async def test_record_transition_sample_service_updates_persistent_notification(
@@ -414,7 +414,7 @@ async def test_record_transition_sample_service_updates_persistent_notification(
         assert "Capture duration: 60 s" in finish_message
         assert "Transition floors: Basement" in finish_message
         assert "Status: stored" in finish_message
-        assert "Capture count: 1" in finish_message
+        assert "Capture count:" not in finish_message
 
 
 async def test_transition_sample_diagnostics_are_exposed_without_affecting_assignment(

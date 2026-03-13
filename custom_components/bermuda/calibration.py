@@ -8,7 +8,6 @@ import hashlib
 import inspect
 import json
 import math
-import re
 import statistics
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -361,9 +360,9 @@ class BermudaCalibrationManager:
             await self._async_notify_changed()
         return removed
 
-    async def async_delete_transition_sample(self, transition_key: str) -> bool:
+    async def async_delete_transition_sample(self, sample_id: str) -> bool:
         """Delete one persisted transition sample."""
-        return await self._store.async_delete_transition_sample(transition_key)
+        return await self._store.async_delete_transition_sample(sample_id)
 
     async def async_record_transition_sample(
         self,
@@ -378,7 +377,7 @@ class BermudaCalibrationManager:
         capture_duration_s: int = 60,
         transition_floor_ids: list[str],
     ) -> dict[str, Any]:
-        """Store or merge a Bermuda-native transition sample."""
+        """Store one Bermuda-native transition sample."""
         await self._store.async_ensure_loaded()
         if sample_radius_m <= 0:
             raise HomeAssistantError("Transition sample radius must be greater than 0 metres.")
@@ -425,74 +424,25 @@ class BermudaCalibrationManager:
         try:
             created_at = now().isoformat()
             layout_hash = self.current_anchor_layout_hash
-            transition_key = self._derive_transition_key(
-                room_area_id=room_area_id,
-                transition_name=cleaned_name,
-                anchor_layout_hash=layout_hash,
-            )
             transition_samples = self.transition_samples()
-            existing = next(
-                (sample for sample in transition_samples if sample.get("transition_key") == transition_key),
-                None,
-            )
-            merged = existing is not None
-
-            if existing is None:
-                stored = {
-                    "transition_key": transition_key,
-                    "created_at": created_at,
-                    "updated_at": created_at,
-                    "device_id": device_id,
-                    "device_name": device.name,
-                    "device_address": device.address,
-                    "room_area_id": room_area_id,
-                    "room_name": area.name,
-                    "room_floor_id": area.floor_id,
-                    "transition_name": cleaned_name,
-                    "position": {"x_m": float(x_m), "y_m": float(y_m), "z_m": float(z_m)},
-                    "sample_radius_m": float(sample_radius_m),
-                    "transition_floor_ids": cleaned_floor_ids,
-                    "anchor_layout_hash": layout_hash,
-                    "capture_count": 1,
-                    "last_capture_duration_s": int(capture_duration_s),
-                    "total_capture_duration_s": int(capture_duration_s),
-                }
-                transition_samples.append(stored)
-            else:
-                capture_count = max(int(existing.get("capture_count", 1)), 1)
-                new_capture_count = capture_count + 1
-                position = existing.get("position") or {}
-                existing["position"] = {
-                    "x_m": round(
-                        ((float(position.get("x_m", x_m)) * capture_count) + float(x_m)) / new_capture_count,
-                        6,
-                    ),
-                    "y_m": round(
-                        ((float(position.get("y_m", y_m)) * capture_count) + float(y_m)) / new_capture_count,
-                        6,
-                    ),
-                    "z_m": round(
-                        ((float(position.get("z_m", z_m)) * capture_count) + float(z_m)) / new_capture_count,
-                        6,
-                    ),
-                }
-                existing["updated_at"] = created_at
-                existing["device_id"] = device_id
-                existing["device_name"] = device.name
-                existing["device_address"] = device.address
-                existing["room_name"] = area.name
-                existing["room_floor_id"] = area.floor_id
-                existing["sample_radius_m"] = max(float(existing.get("sample_radius_m", 0.0)), float(sample_radius_m))
-                existing["transition_floor_ids"] = sorted(
-                    {*(existing.get("transition_floor_ids") or []), *cleaned_floor_ids}
-                )
-                existing["capture_count"] = new_capture_count
-                existing["last_capture_duration_s"] = int(capture_duration_s)
-                existing["total_capture_duration_s"] = int(existing.get("total_capture_duration_s", 0)) + int(
-                    capture_duration_s
-                )
-                stored = existing
-
+            stored = {
+                "id": f"transition_sample_{uuid4().hex[:12]}",
+                "created_at": created_at,
+                "updated_at": created_at,
+                "device_id": device_id,
+                "device_name": device.name,
+                "device_address": device.address,
+                "room_area_id": room_area_id,
+                "room_name": area.name,
+                "room_floor_id": area.floor_id,
+                "transition_name": cleaned_name,
+                "position": {"x_m": float(x_m), "y_m": float(y_m), "z_m": float(z_m)},
+                "sample_radius_m": float(sample_radius_m),
+                "transition_floor_ids": cleaned_floor_ids,
+                "anchor_layout_hash": layout_hash,
+                "capture_duration_s": int(capture_duration_s),
+            }
+            transition_samples.append(stored)
             await self._store.async_replace_transition_samples(transition_samples)
         except Exception as err:
             self._update_transition_notification(
@@ -524,14 +474,14 @@ class BermudaCalibrationManager:
             sample_radius_m=float(stored["sample_radius_m"]),
             capture_duration_s=int(capture_duration_s),
             transition_floor_ids=list(stored["transition_floor_ids"]),
-            status="merged" if merged else "stored",
-            capture_count=int(stored["capture_count"]),
+            status="stored",
         )
 
         return {
+            "id": stored["id"],
             "created_at": stored["created_at"],
             "updated_at": stored["updated_at"],
-            "merged": merged,
+            "merged": False,
             "device_id": device_id,
             "room_area_id": room_area_id,
             "room_name": area.name,
@@ -542,7 +492,6 @@ class BermudaCalibrationManager:
             "z_m": float(stored["position"]["z_m"]),
             "sample_radius_m": float(stored["sample_radius_m"]),
             "capture_duration_s": int(capture_duration_s),
-            "capture_count": int(stored["capture_count"]),
             "transition_floor_ids": list(stored["transition_floor_ids"]),
             "anchor_layout_hash": layout_hash,
         }
@@ -1053,13 +1002,6 @@ class BermudaCalibrationManager:
 
         return diagnostics
 
-    @staticmethod
-    def _derive_transition_key(*, room_area_id: str, transition_name: str, anchor_layout_hash: str) -> str:
-        """Return the internal stable key for a transition point."""
-        normalized_name = re.sub(r"[^a-z0-9]+", "_", transition_name.strip().lower()).strip("_")
-        raw_key = f"{room_area_id}\x1f{normalized_name}\x1f{anchor_layout_hash}"
-        return f"transition_{hashlib.sha256(raw_key.encode('utf-8')).hexdigest()[:16]}"
-
     def _normalize_transition_floor_ids(
         self,
         *,
@@ -1180,7 +1122,6 @@ class BermudaCalibrationManager:
         capture_duration_s: int,
         transition_floor_ids: list[str],
         status: str,
-        capture_count: int | None = None,
         failure_reason: str | None = None,
     ) -> None:
         """Create or update the persistent notification for one transition sample capture."""
@@ -1197,8 +1138,6 @@ class BermudaCalibrationManager:
             f"Transition floors: {transition_floor_names or 'none'}\n"
             f"Status: {status}"
         )
-        if capture_count is not None:
-            message += f"\nCapture count: {capture_count}"
         if failure_reason is not None:
             message += f"\nReason: {failure_reason}"
         persistent_notification.async_create(

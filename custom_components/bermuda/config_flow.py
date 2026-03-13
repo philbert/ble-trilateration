@@ -385,13 +385,13 @@ class BermudaOptionsFlowHandler(OptionsFlowWithConfigEntry):
         samples = self._get_transition_samples_for_selection()
         options = [
             SelectOptionDict(
-                value=str(sample["transition_key"]),
+                value=str(sample.get("id") or sample.get("transition_key")),
                 label=self._format_transition_sample_label(sample),
             )
             for sample in samples
         ]
         if user_input is not None:
-            deleted = await self.coordinator.calibration.async_delete_transition_sample(user_input["transition_key"])
+            deleted = await self.coordinator.calibration.async_delete_transition_sample(user_input["sample_id"])
             self._last_transition_status = (
                 "Deleted transition sample." if deleted else "Transition sample was not found."
             )
@@ -401,7 +401,7 @@ class BermudaOptionsFlowHandler(OptionsFlowWithConfigEntry):
             step_id="transition_samples_delete_one",
             data_schema=vol.Schema(
                 {
-                    vol.Required("transition_key"): SelectSelector(
+                    vol.Required("sample_id"): SelectSelector(
                         SelectSelectorConfig(options=options, multiple=False, mode=SelectSelectorMode.DROPDOWN)
                     )
                 }
@@ -549,16 +549,18 @@ class BermudaOptionsFlowHandler(OptionsFlowWithConfigEntry):
         position = sample.get("position") or {}
         room_name = sample.get("room_name", sample.get("room_area_id", "Unknown"))
         transition_name = sample.get("transition_name", "Unknown")
-        capture_count = int(sample.get("capture_count", 1) or 1)
         updated_at = self._format_sample_timestamp(str(sample.get("updated_at") or sample.get("created_at") or ""))
         floor_names = self._format_transition_floor_names(sample.get("transition_floor_ids") or [])
-        return (
+        label = (
             f"{room_name} | {transition_name} | {floor_names} | "
             f"{float(position.get('x_m', 0.0) or 0.0):.1f},"
             f"{float(position.get('y_m', 0.0) or 0.0):.1f},"
-            f"{float(position.get('z_m', 0.0) or 0.0):.1f} | "
-            f"captures={capture_count} | {updated_at}"
+            f"{float(position.get('z_m', 0.0) or 0.0):.1f} | {updated_at}"
         )
+        capture_count = int(sample.get("capture_count", 1) or 1)
+        if capture_count > 1:
+            label += f" | legacy-captures={capture_count}"
+        return label
 
     def _format_calibration_summary(self, summary: dict, include_recent: bool = False) -> str:
         """Build markdown summary for calibration samples."""

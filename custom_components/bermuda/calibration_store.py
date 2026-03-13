@@ -89,14 +89,14 @@ class BermudaCalibrationStore:
         self._data["transition_samples"] = deepcopy(transition_samples)
         await self._store.async_save(self._data)
 
-    async def async_delete_transition_sample(self, transition_key: str) -> bool:
-        """Delete one transition sample by internal key."""
+    async def async_delete_transition_sample(self, sample_id: str) -> bool:
+        """Delete one transition sample by sample id."""
         await self.async_ensure_loaded()
         original_len = len(self._data.get("transition_samples", []))
         self._data["transition_samples"] = [
             sample
             for sample in self._data.get("transition_samples", [])
-            if sample.get("transition_key") != transition_key
+            if (sample.get("id") or sample.get("transition_key")) != sample_id
         ]
         changed = len(self._data["transition_samples"]) != original_len
         if changed:
