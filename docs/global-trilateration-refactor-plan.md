@@ -240,7 +240,6 @@ Runtime behavior:
   - `0.0` otherwise,
 - the `0.5` fallback is intentionally below the current Rule 4 trigger threshold (`> 0.60`), so it informs diagnostics in the first rollout without reducing dwell,
 - reduce floor-switch penalty / dwell only from this soft support score,
-- if the challenger floor has no nearby or matching supporting transition sample, increase penalty or preserve ambiguity,
 - transition support is advisory only and must never hard-block a switch.
 
 Why this is the right scope:
@@ -282,6 +281,8 @@ Inputs each update:
   geometry_support_01 = min(geometry_quality_01, residual_consistency_01)
 
 Rule 1:
+  If floor_challenger_id changed identity this update:
+    challenger_fingerprint_hold_since = 0
   If there is no active challenger, hold current_floor_id.
 
 Rule 2:
@@ -444,6 +445,7 @@ Follow-on changes:
 
 - add a hybrid floor posterior stage,
 - track `challenger_fingerprint_hold_since` so Rule 2 can pause challenger advancement without resetting it,
+- clear `challenger_fingerprint_hold_since` whenever `floor_challenger_id` is assigned a new challenger identity,
 - retain a distinct floor-confidence signal,
 - wire geometry quality / residual consistency into confidence and arbitration,
 - keep `rejected_wrong_floor` only as a diagnostic concept if needed for compatibility.
@@ -478,7 +480,10 @@ Initial changes:
   - `room_confidence`
   - `best_score`
   - `second_score`
-- compute `floor_confidence` from aggregate room scores by floor, not from best-room vs second-room ambiguity,
+- compute `floor_confidence` from one representative room score per floor:
+  - for each floor, take the single best room score on that floor
+  - `floor_confidence = best_room_score_on_best_floor / sum(best_room_score_per_floor across all floors)`
+  - this avoids biasing floors that simply have more calibrated rooms,
 - keep geometry scoring floor-scoped in the first step if needed for safety,
 - add diagnostics comparing:
   - current floor-gated outcome,
@@ -650,6 +655,7 @@ Expected payoff:
 - downgraded 3D-to-2D paths preserve `z` prior and reduce confidence,
 - `fingerprint_global()` returns `floor_confidence` independently of room-level ambiguity and can produce a room/floor candidate outside the current selected floor,
 - Rule 2 pauses challenger advancement without resetting it and the fingerprint veto expires after the configured hold ceiling,
+- `challenger_fingerprint_hold_since` is cleared when the challenger identity changes,
 - transition samples are stored separately from room samples and do not affect room kernels directly,
 - transition samples persist `anchor_layout_hash`,
 - a challenger floor with nearby matching transition support gets reduced switch penalty / dwell,
