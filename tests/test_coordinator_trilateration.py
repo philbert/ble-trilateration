@@ -498,6 +498,57 @@ def test_area_switch_requires_extra_dwell_for_weak_transition():
         assert device.area_id == "living_room"
 
 
+def test_area_switch_emits_target_room_diag_logging():
+    """Targeted debug devices should log the room-classifier decision summary."""
+    coordinator = _make_coordinator()
+    device = _DummyDevice("dev-room-log")
+    device.name = "Phil's iPhone"
+    device.prefname = "Phil's iPhone"
+    device.trilat_status = "ok"
+    device.trilat_x_m = 10.0
+    device.trilat_y_m = 2.0
+    device.trilat_z_m = 3.0
+    device.trilat_floor_id = "f1"
+    device.trilat_floor_name = "Floor f1"
+    device.area_id = "kitchen"
+    device.area_name = "kitchen"
+    device.area_last_seen_id = "kitchen"
+    coordinator.room_classifier = SimpleNamespace(
+        has_trained_rooms=lambda _layout_hash, _floor_id: True,
+        classify=lambda **_kwargs: RoomClassification(
+            area_id="living_room",
+            reason="ok",
+            best_area_id="living_room",
+            best_score=0.62,
+            second_score=0.12,
+            topk_used=3,
+            geometry_score=0.41,
+            fingerprint_score=0.73,
+        ),
+    )
+
+    with (
+        patch("custom_components.bermuda.coordinator.debug_device_match", return_value=True),
+        patch("custom_components.bermuda.coordinator._LOGGER_TARGET_SPAM_LESS.debug") as log_debug,
+        patch("custom_components.bermuda.coordinator.monotonic_time_coarse", return_value=100.0),
+    ):
+        coordinator._refresh_area_from_trilat(device, "layout-a")
+
+    log_debug.assert_called_once()
+    args = log_debug.call_args.args
+    assert args[0] == "trilat_room_diag:dev-room-log"
+    assert "Trilat room diag:" in args[1]
+    assert args[2] == "Phil's iPhone"
+    assert args[3] == "f1"
+    assert args[4] == "kitchen"
+    assert args[5] == "living_room"
+    assert args[6] == "living_room"
+    assert args[7] == "kitchen"
+    assert "hold=room_switch_dwell" in args[8]
+    assert "geom=0.41" in args[8]
+    assert "fp=0.73" in args[8]
+
+
 def test_trilat_floor_switch_preserves_state_and_ewma():
     """Switching floors should preserve continuity state and existing EWMA values."""
     coordinator = _make_coordinator()

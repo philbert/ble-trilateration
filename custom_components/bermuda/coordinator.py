@@ -1428,6 +1428,28 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         """Resolve one device room from trilat position and trained samples."""
         state = self._get_trilat_decision_state(device)
         nowstamp = monotonic_time_coarse()
+        debug_this_device = debug_device_match(
+            device.name,
+            device.address,
+            getattr(device, "prefname", None),
+        )
+
+        def _log_target_room_diag(*, stable_area_id: str | None, candidate_area_id: str | None) -> None:
+            """Emit targeted room-classifier diagnostics for selected devices."""
+            if not debug_this_device or device.diag_area_switch is None:
+                return
+            _LOGGER_TARGET_SPAM_LESS.debug(
+                f"trilat_room_diag:{device.address}",
+                "Trilat room diag: %s floor=%s stable=%s challenger=%s candidate=%s resolved=%s %s",
+                device.name,
+                device.trilat_floor_id,
+                stable_area_id,
+                state.room_challenger_id,
+                candidate_area_id,
+                device.area_id,
+                device.diag_area_switch,
+            )
+
         if (
             device.trilat_status not in {"ok", "low_confidence"}
             or device.trilat_x_m is None
@@ -1442,6 +1464,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 floor_name=device.trilat_floor_name,
                 force_unknown=True,
             )
+            _log_target_room_diag(stable_area_id=self._stable_area_id(device), candidate_area_id=None)
             return
 
         if not self.room_classifier.has_trained_rooms(layout_hash, device.trilat_floor_id):
@@ -1454,6 +1477,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 floor_name=device.trilat_floor_name,
                 force_unknown=True,
             )
+            _log_target_room_diag(stable_area_id=self._stable_area_id(device), candidate_area_id=None)
             return
 
         live_rssi_by_scanner: dict[str, float] = {}
@@ -1511,6 +1535,10 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                         floor_id=device.trilat_floor_id,
                         floor_name=device.trilat_floor_name,
                     )
+                    _log_target_room_diag(
+                        stable_area_id=stable_area_id,
+                        candidate_area_id=classification.area_id,
+                    )
                     return
                 if nowstamp - state.room_challenger_since < required_dwell:
                     device.diag_area_switch += f" hold=room_switch_dwell({required_dwell:.1f}s)"
@@ -1519,6 +1547,10 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                         floor_id=device.trilat_floor_id,
                         floor_name=device.trilat_floor_name,
                     )
+                    _log_target_room_diag(
+                        stable_area_id=stable_area_id,
+                        candidate_area_id=classification.area_id,
+                    )
                     return
             state.room_challenger_id = None
             state.room_challenger_since = 0.0
@@ -1526,6 +1558,10 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 classification.area_id,
                 floor_id=device.trilat_floor_id,
                 floor_name=device.trilat_floor_name,
+            )
+            _log_target_room_diag(
+                stable_area_id=stable_area_id,
+                candidate_area_id=classification.area_id,
             )
             return
 
@@ -1538,6 +1574,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 floor_id=device.trilat_floor_id,
                 floor_name=device.trilat_floor_name,
             )
+            _log_target_room_diag(stable_area_id=stable_area_id, candidate_area_id=classification.best_area_id)
             return
 
         state.room_challenger_id = None
@@ -1548,6 +1585,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             floor_name=device.trilat_floor_name,
             force_unknown=True,
         )
+        _log_target_room_diag(stable_area_id=stable_area_id, candidate_area_id=classification.best_area_id)
 
     @staticmethod
     def _room_switch_dwell_seconds(classification, *, transition_strength: float = 1.0) -> float:
