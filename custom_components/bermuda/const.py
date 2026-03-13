@@ -77,7 +77,7 @@ LOGSPAM_INTERVAL = 22
 # Debug logging for specific devices - edit this list to enable detailed logs.
 # Matching is case-insensitive and supports partial name matches.
 # Example: DEBUG_DEVICES = ["Phil's iPhone", "Melinda's Watch", "AA:BB:CC:DD:EE:FF"]
-DEBUG_DEVICES = ["Brown bin"]
+DEBUG_DEVICES = ["Phil's iPhone"]
 
 SECRET_HEX32_RE: Final = re.compile(r"(?<![0-9a-fA-F])[0-9a-fA-F]{32}(?![0-9a-fA-F])")
 
