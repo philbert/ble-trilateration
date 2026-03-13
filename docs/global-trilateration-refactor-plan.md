@@ -166,7 +166,7 @@ Replace hard reset with soft continuity management:
 - retain last `x/y`,
 - retain last `z` as a prior when available,
 - retain velocity state,
-- retain EWMA range state where safe,
+- retain EWMA range state by default; the Stage 2 role-change rule still clears any anchor whose same-floor vs other-floor role changes,
 - inflate prior uncertainty when floor changes,
 - lower confidence during the transition instead of restarting cold.
 
@@ -179,7 +179,7 @@ Fingerprint classification should run across all floors as a parallel signal.
 Initial behavior:
 
 - keep current geometry-driven room scoring behavior unchanged,
-- add a dedicated `fingerprint_global()` entrypoint that returns the best `(room, floor)` candidate globally,
+- add a dedicated `fingerprint_global()` entrypoint that returns a floor-aware global fingerprint result,
 - expose it in diagnostics first,
 - compare it against the current floor-gated classifier on replay traces.
 
@@ -238,6 +238,7 @@ Runtime behavior:
   - `1.0` when solved position quality is acceptable, the current room context matches `room_area_id`, the solved position is within `sample_radius_m`, and `transition_floor_ids` includes the challenger floor,
   - `0.5` when solved position quality is low but the room context still matches `room_area_id` and the challenger floor is listed,
   - `0.0` otherwise,
+- the `0.5` fallback is intentionally below the current Rule 4 trigger threshold (`> 0.60`), so it informs diagnostics in the first rollout without reducing dwell,
 - reduce floor-switch penalty / dwell only from this soft support score,
 - if the challenger floor has no nearby or matching supporting transition sample, increase penalty or preserve ambiguity,
 - transition support is advisory only and must never hard-block a switch.
@@ -267,9 +268,16 @@ Concrete decision procedure:
 Inputs each update:
   current_floor_id
   floor_challenger_id / floor_challenger_since
+  challenger_fingerprint_hold_since
   rssi_floor_evidence[floor_id]
-  fingerprint_global = (floor_id, room_id, best_score, second_score)
-  fingerprint_floor_confidence = best_score / max(best_score + second_score, 1e-9)
+  fingerprint_global = GlobalFingerprintResult(
+    area_id,
+    floor_id,
+    floor_confidence,
+    room_confidence,
+    best_score,
+    second_score
+  )
   transition_support_01
   geometry_support_01 = min(geometry_quality_01, residual_consistency_01)
 
@@ -277,12 +285,21 @@ Rule 1:
   If there is no active challenger, hold current_floor_id.
 
 Rule 2:
-  If fingerprint_floor_confidence > 0.70 and fingerprint_global.floor_id == current_floor_id:
-    clear challenger and hold current_floor_id.
+  If fingerprint_global.floor_confidence > 0.70
+  and fingerprint_global.floor_id == current_floor_id:
+    If challenger_fingerprint_hold_since == 0:
+      challenger_fingerprint_hold_since = now
+    If now - challenger_fingerprint_hold_since < (base_required_dwell * 2):
+      hold current_floor_id and do not advance the challenger timer.
+    Else:
+      fingerprint veto expires for this challenger and timer advancement resumes.
+  Else:
+    challenger_fingerprint_hold_since = 0
 
 Rule 3:
   effective_required_dwell = base_required_dwell
-  If fingerprint_floor_confidence > 0.70 and fingerprint_global.floor_id == floor_challenger_id:
+  If fingerprint_global.floor_confidence > 0.70
+  and fingerprint_global.floor_id == floor_challenger_id:
     effective_required_dwell *= 0.5
 
 Rule 4:
@@ -290,7 +307,7 @@ Rule 4:
     effective_required_dwell *= (1.0 - 0.4 * transition_support_01)
 
 Rule 5:
-  If fingerprint_floor_confidence < 0.40 and geometry_support_01 < 0.30:
+  If fingerprint_global.floor_confidence < 0.40 and geometry_support_01 < 0.30:
     hold current_floor_id, lower confidence, and do not advance the challenger timer.
 
 Rule 6:
@@ -426,6 +443,7 @@ Required first changes:
 Follow-on changes:
 
 - add a hybrid floor posterior stage,
+- track `challenger_fingerprint_hold_since` so Rule 2 can pause challenger advancement without resetting it,
 - retain a distinct floor-confidence signal,
 - wire geometry quality / residual consistency into confidence and arbitration,
 - keep `rejected_wrong_floor` only as a diagnostic concept if needed for compatibility.
@@ -453,7 +471,14 @@ Initial changes:
 
 - keep existing `classify()` unchanged for floor-scoped hybrid room assignment,
 - add a separate `fingerprint_global()` entrypoint that scores all fingerprint samples without floor pre-filtering,
-- return a global `(room, floor)` candidate plus best/second scores for arbitration,
+- return a `GlobalFingerprintResult` with:
+  - `area_id`
+  - `floor_id`
+  - `floor_confidence`
+  - `room_confidence`
+  - `best_score`
+  - `second_score`
+- compute `floor_confidence` from aggregate room scores by floor, not from best-room vs second-room ambiguity,
 - keep geometry scoring floor-scoped in the first step if needed for safety,
 - add diagnostics comparing:
   - current floor-gated outcome,
@@ -623,7 +648,8 @@ Expected payoff:
 - other-floor anchors are excluded from `mean_sigma_m` and counted separately for diagnostics,
 - EWMA range state is cleared when an anchor changes same-floor vs other-floor role,
 - downgraded 3D-to-2D paths preserve `z` prior and reduce confidence,
-- `fingerprint_global()` can produce a room/floor candidate outside the current selected floor,
+- `fingerprint_global()` returns `floor_confidence` independently of room-level ambiguity and can produce a room/floor candidate outside the current selected floor,
+- Rule 2 pauses challenger advancement without resetting it and the fingerprint veto expires after the configured hold ceiling,
 - transition samples are stored separately from room samples and do not affect room kernels directly,
 - transition samples persist `anchor_layout_hash`,
 - a challenger floor with nearby matching transition support gets reduced switch penalty / dwell,
@@ -798,9 +824,9 @@ Goal:
 
 The first slice should be intentionally narrow and directly driven by the review findings:
 
-1. Add diagnostics for floor evidence, would-be-rejected anchors, and floor-switch cold resets.
-2. Remove floor-switch cold reset and preserve priors through a challenger.
-3. Implement `fingerprint_global()` as an offline replay / test-script path and run Experiment 3 on existing calibration data.
+1. Add Phase 0 diagnostics for floor evidence, would-be-rejected anchors, and floor-switch cold resets.
+2. In parallel with Step 1, implement `fingerprint_global()` as an offline replay / test-script path and run Experiment 3 on existing calibration data.
+3. Remove floor-switch cold reset and preserve priors through a challenger.
 4. Replay the `Guest Room` and `Garage front` traces before changing any room assignment behavior.
 5. Only if Phase 1 and Experiment 3 both indicate more work is needed, add Phase 2 other-floor soft inclusion behind a feature flag.
 6. Defer transition-sample capture until `anchor_layout_hash` persistence is implemented and fingerprint viability is confirmed.
