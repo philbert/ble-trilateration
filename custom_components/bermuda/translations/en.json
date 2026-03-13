@@ -124,6 +124,21 @@
         "data": {
           "confirm": "Confirm deletion"
         }
+      },
+      "transition_samples": {
+        "title": "Transition Samples",
+        "description": "{summary}"
+      },
+      "transition_samples_summary": {
+        "title": "Transition Sample Summary",
+        "description": "{summary}"
+      },
+      "transition_samples_delete_one": {
+        "title": "Delete Transition Sample",
+        "description": "{summary}",
+        "data": {
+          "transition_key": "Saved transition sample"
+        }
       }
     }
   },

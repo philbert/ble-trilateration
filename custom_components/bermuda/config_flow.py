@@ -108,6 +108,7 @@ class BermudaOptionsFlowHandler(OptionsFlowWithConfigEntry):
         super().__init__(config_entry)
         self.coordinator: BermudaDataUpdateCoordinator
         self._last_calibration_status: str | None = None
+        self._last_transition_status: str | None = None
 
     async def async_step_init(self, user_input=None):  # pylint: disable=unused-argument
         """Manage the options."""
@@ -164,6 +165,7 @@ class BermudaOptionsFlowHandler(OptionsFlowWithConfigEntry):
                 "selectdevices": "Select Devices",
                 "experimental": "Experimental",
                 "calibration_samples": "Calibration Samples",
+                "transition_samples": "Transition Samples",
             },
             description_placeholders=messages,
         )
@@ -281,6 +283,24 @@ class BermudaOptionsFlowHandler(OptionsFlowWithConfigEntry):
             description_placeholders={"summary": description},
         )
 
+    async def async_step_transition_samples(self, user_input=None):
+        """Manage stored transition samples."""
+        summary = self.coordinator.calibration.get_transition_summary()
+        description = self._format_transition_summary(summary)
+        if self._last_transition_status:
+            description = f"{self._last_transition_status}\n\n{description}"
+            self._last_transition_status = None
+
+        menu_options = {"transition_samples_summary": "Sample Summary"}
+        if summary["transition_sample_count"] > 0:
+            menu_options["transition_samples_delete_one"] = "Delete One Sample"
+
+        return self.async_show_menu(
+            step_id="transition_samples",
+            menu_options=menu_options,
+            description_placeholders={"summary": description},
+        )
+
     async def async_step_experimental(self, user_input=None):
         """Manage experimental trilateration settings."""
         if user_input is not None:
@@ -323,6 +343,17 @@ class BermudaOptionsFlowHandler(OptionsFlowWithConfigEntry):
             description_placeholders={"summary": self._format_calibration_summary(summary, include_recent=True)},
         )
 
+    async def async_step_transition_samples_summary(self, user_input=None):
+        """Show transition sample summary details."""
+        if user_input is not None:
+            return await self.async_step_transition_samples()
+        summary = self.coordinator.calibration.get_transition_summary()
+        return self.async_show_form(
+            step_id="transition_samples_summary",
+            data_schema=vol.Schema({}),
+            description_placeholders={"summary": self._format_transition_summary(summary, include_recent=True)},
+        )
+
     async def async_step_calibration_samples_delete_one(self, user_input=None):
         """Delete one persisted calibration sample."""
         samples = self._get_samples_for_selection()
@@ -347,6 +378,35 @@ class BermudaOptionsFlowHandler(OptionsFlowWithConfigEntry):
                 }
             ),
             description_placeholders={"summary": "Choose one saved calibration sample to delete."},
+        )
+
+    async def async_step_transition_samples_delete_one(self, user_input=None):
+        """Delete one persisted transition sample."""
+        samples = self._get_transition_samples_for_selection()
+        options = [
+            SelectOptionDict(
+                value=str(sample["transition_key"]),
+                label=self._format_transition_sample_label(sample),
+            )
+            for sample in samples
+        ]
+        if user_input is not None:
+            deleted = await self.coordinator.calibration.async_delete_transition_sample(user_input["transition_key"])
+            self._last_transition_status = (
+                "Deleted transition sample." if deleted else "Transition sample was not found."
+            )
+            return await self.async_step_transition_samples()
+
+        return self.async_show_form(
+            step_id="transition_samples_delete_one",
+            data_schema=vol.Schema(
+                {
+                    vol.Required("transition_key"): SelectSelector(
+                        SelectSelectorConfig(options=options, multiple=False, mode=SelectSelectorMode.DROPDOWN)
+                    )
+                }
+            ),
+            description_placeholders={"summary": "Choose one saved transition sample to delete."},
         )
 
     async def async_step_calibration_samples_clear_device(self, user_input=None):
@@ -455,6 +515,20 @@ class BermudaOptionsFlowHandler(OptionsFlowWithConfigEntry):
             ),
         )
 
+    def _get_transition_samples_for_selection(self) -> list[dict]:
+        """Return stored transition samples sorted for human-friendly selection."""
+        return sorted(
+            self.coordinator.calibration.transition_samples(),
+            key=lambda sample: (
+                str(sample.get("room_name") or sample.get("room_area_id") or "Unknown").lower(),
+                str(sample.get("transition_name") or "Unknown").lower(),
+                float((sample.get("position") or {}).get("x_m", 0.0) or 0.0),
+                float((sample.get("position") or {}).get("y_m", 0.0) or 0.0),
+                float((sample.get("position") or {}).get("z_m", 0.0) or 0.0),
+                str(sample.get("updated_at") or sample.get("created_at") or ""),
+            ),
+        )
+
     def _format_sample_label(self, sample: dict) -> str:
         """Create a compact label for one calibration sample."""
         position = sample.get("position") or {}
@@ -468,6 +542,22 @@ class BermudaOptionsFlowHandler(OptionsFlowWithConfigEntry):
             f"{float(position.get('y_m', 0.0) or 0.0):.1f},"
             f"{float(position.get('z_m', 0.0) or 0.0):.1f} | "
             f"{device_name} | {quality_level} | {created_at}"
+        )
+
+    def _format_transition_sample_label(self, sample: dict) -> str:
+        """Create a compact label for one transition sample."""
+        position = sample.get("position") or {}
+        room_name = sample.get("room_name", sample.get("room_area_id", "Unknown"))
+        transition_name = sample.get("transition_name", "Unknown")
+        capture_count = int(sample.get("capture_count", 1) or 1)
+        updated_at = self._format_sample_timestamp(str(sample.get("updated_at") or sample.get("created_at") or ""))
+        floor_names = self._format_transition_floor_names(sample.get("transition_floor_ids") or [])
+        return (
+            f"{room_name} | {transition_name} | {floor_names} | "
+            f"{float(position.get('x_m', 0.0) or 0.0):.1f},"
+            f"{float(position.get('y_m', 0.0) or 0.0):.1f},"
+            f"{float(position.get('z_m', 0.0) or 0.0):.1f} | "
+            f"captures={capture_count} | {updated_at}"
         )
 
     def _format_calibration_summary(self, summary: dict, include_recent: bool = False) -> str:
@@ -505,6 +595,35 @@ class BermudaOptionsFlowHandler(OptionsFlowWithConfigEntry):
                 lines.append(f"- {self._format_sample_label(sample)}")
         return "\n".join(lines)
 
+    def _format_transition_summary(self, summary: dict, include_recent: bool = False) -> str:
+        """Build markdown summary for transition samples."""
+        lines = [
+            f"Total transition samples: `{summary['transition_sample_count']}`",
+            f"Current anchor layout hash: `{summary['current_layout_hash'][:8]}`",
+            f"Transition samples for current anchor layout: `{summary['current_layout_count']}`",
+        ]
+        if summary["by_room"]:
+            lines.append("")
+            lines.append("By room:")
+            for room_name, count in sorted(summary["by_room"].items()):
+                lines.append(f"- {room_name}: `{count}`")
+        if summary["by_name"]:
+            lines.append("")
+            lines.append("By transition:")
+            for transition_name, count in sorted(summary["by_name"].items()):
+                lines.append(f"- {transition_name}: `{count}`")
+        if summary["by_floor"]:
+            lines.append("")
+            lines.append("By supported floor:")
+            for floor_name, count in sorted(summary["by_floor"].items()):
+                lines.append(f"- {floor_name}: `{count}`")
+        if include_recent and summary["recent"]:
+            lines.append("")
+            lines.append("Recent transition samples:")
+            for sample in summary["recent"]:
+                lines.append(f"- {self._format_transition_sample_label(sample)}")
+        return "\n".join(lines)
+
     @staticmethod
     def _sample_quality_level(sample: dict) -> str:
         """Return the persisted user-facing quality level for one sample."""
@@ -533,6 +652,14 @@ class BermudaOptionsFlowHandler(OptionsFlowWithConfigEntry):
             return datetime.fromisoformat(created_at).strftime("%Y-%m-%d %H:%M:%S")
         except ValueError:
             return created_at
+
+    def _format_transition_floor_names(self, floor_ids: list[str]) -> str:
+        """Format supported transition floor ids as a readable label."""
+        names: list[str] = []
+        for floor_id in floor_ids:
+            floor = self.coordinator.fr.async_get_floor(str(floor_id))
+            names.append(floor.name if floor is not None else str(floor_id))
+        return ", ".join(names) or "none"
 
     async def _update_options(self):
         """Update config entry options."""

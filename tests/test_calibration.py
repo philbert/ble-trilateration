@@ -351,6 +351,72 @@ async def test_record_transition_sample_service_merges_repeated_captures(
     assert "transition_key" in stored
 
 
+async def test_record_transition_sample_service_updates_persistent_notification(
+    hass: HomeAssistant, setup_bermuda_entry
+):
+    """Transition sample capture should emit started and stored notifications."""
+    coordinator = setup_bermuda_entry.runtime_data.coordinator
+
+    floor_registry = fr.async_get(hass)
+    ground_floor = floor_registry.async_create("Ground floor", level=0)
+    basement = floor_registry.async_create("Basement", level=-1)
+    area = ar.async_get(hass).async_create("Entrance", floor_id=ground_floor.floor_id)
+
+    devreg = dr.async_get(hass)
+    device_entry = devreg.async_get_or_create(
+        config_entry_id=setup_bermuda_entry.entry_id,
+        connections={(dr.CONNECTION_BLUETOOTH, "AA:BB:CC:DD:EE:23")},
+        name="Phil Phone",
+    )
+
+    target = BermudaDevice("aa:bb:cc:dd:ee:23", coordinator)
+    target.name = "Phil Phone"
+    coordinator.devices[target.address] = target
+
+    with patch("custom_components.bermuda.calibration.persistent_notification.async_create") as notify_mock:
+        response = await hass.services.async_call(
+            DOMAIN,
+            "record_transition_sample",
+            {
+                "device_id": device_entry.id,
+                "room_area_id": area.id,
+                "transition_name": "stairwell",
+                "x_y_z_m": "1.0, 2.0, 3.0",
+                "sample_radius_m": 1.0,
+                "capture_duration_s": 60,
+                "transition_floor_ids": [basement.floor_id],
+            },
+            blocking=True,
+            return_response=True,
+        )
+
+        assert response["merged"] is False
+        assert notify_mock.call_count == 2
+
+        start_call = notify_mock.call_args_list[0]
+        finish_call = notify_mock.call_args_list[1]
+        notification_id = start_call.kwargs["notification_id"]
+        assert notification_id.startswith("bermuda_transition_")
+        assert finish_call.kwargs["notification_id"] == notification_id
+
+        assert start_call.kwargs["title"] == "Bermuda transition sample"
+        start_message = start_call.args[1]
+        assert "Room: Entrance" in start_message
+        assert "Room floor: Ground floor" in start_message
+        assert "Transition: stairwell" in start_message
+        assert "Transition floors: Basement" in start_message
+        assert "Status: started" in start_message
+
+        assert finish_call.kwargs["title"] == "Bermuda transition sample"
+        finish_message = finish_call.args[1]
+        assert "Position: x=1.000, y=2.000, z=3.000" in finish_message
+        assert "Radius: 1.000 m" in finish_message
+        assert "Capture duration: 60 s" in finish_message
+        assert "Transition floors: Basement" in finish_message
+        assert "Status: stored" in finish_message
+        assert "Capture count: 1" in finish_message
+
+
 async def test_transition_sample_diagnostics_are_exposed_without_affecting_assignment(
     hass: HomeAssistant, setup_bermuda_entry
 ):

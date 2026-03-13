@@ -166,20 +166,37 @@ class BermudaCalibrationManager:
         samples = self.transition_samples()
         by_room: dict[str, int] = {}
         by_name: dict[str, int] = {}
+        by_floor: dict[str, int] = {}
         by_layout: dict[str, int] = {}
+        current_layout_hash = self.current_anchor_layout_hash
+        current_layout_count = 0
         for sample in samples:
             room_name = str(sample.get("room_name") or sample.get("room_area_id") or "Unknown")
             by_room[room_name] = by_room.get(room_name, 0) + 1
             transition_name = str(sample.get("transition_name") or "Unknown")
             by_name[transition_name] = by_name.get(transition_name, 0) + 1
+            for floor_id in sample.get("transition_floor_ids") or []:
+                floor = self._coordinator.fr.async_get_floor(str(floor_id))
+                floor_name = floor.name if floor is not None else str(floor_id)
+                by_floor[floor_name] = by_floor.get(floor_name, 0) + 1
             layout_hash = str(sample.get("anchor_layout_hash") or "unknown")
             by_layout[layout_hash] = by_layout.get(layout_hash, 0) + 1
+            if layout_hash == current_layout_hash:
+                current_layout_count += 1
+        recent = sorted(
+            samples,
+            key=lambda sample: str(sample.get("updated_at") or sample.get("created_at") or ""),
+            reverse=True,
+        )[:5]
         return {
             "transition_sample_count": len(samples),
             "by_room": by_room,
             "by_name": by_name,
+            "by_floor": by_floor,
             "by_layout": by_layout,
-            "current_layout_hash": self.current_anchor_layout_hash,
+            "current_layout_hash": current_layout_hash,
+            "current_layout_count": current_layout_count,
+            "recent": recent,
         }
 
     def current_anchor_geometry(self) -> dict[str, dict[str, float | None]]:
@@ -344,6 +361,10 @@ class BermudaCalibrationManager:
             await self._async_notify_changed()
         return removed
 
+    async def async_delete_transition_sample(self, transition_key: str) -> bool:
+        """Delete one persisted transition sample."""
+        return await self._store.async_delete_transition_sample(transition_key)
+
     async def async_record_transition_sample(
         self,
         *,
@@ -385,65 +406,127 @@ class BermudaCalibrationManager:
         if not cleaned_floor_ids:
             raise HomeAssistantError("transition_floor_ids must include at least one floor other than the room floor.")
 
-        created_at = now().isoformat()
-        layout_hash = self.current_anchor_layout_hash
-        transition_key = self._derive_transition_key(
-            room_area_id=room_area_id,
+        notification_id = f"bermuda_transition_{uuid4().hex[:12]}"
+        self._update_transition_notification(
+            notification_id=notification_id,
+            device_name=device.name,
+            room_name=area.name,
+            room_floor_id=area.floor_id,
             transition_name=cleaned_name,
-            anchor_layout_hash=layout_hash,
+            x_m=float(x_m),
+            y_m=float(y_m),
+            z_m=float(z_m),
+            sample_radius_m=float(sample_radius_m),
+            capture_duration_s=int(capture_duration_s),
+            transition_floor_ids=cleaned_floor_ids,
+            status="started",
         )
-        transition_samples = self.transition_samples()
-        existing = next((sample for sample in transition_samples if sample.get("transition_key") == transition_key), None)
-        merged = existing is not None
 
-        if existing is None:
-            stored = {
-                "transition_key": transition_key,
-                "created_at": created_at,
-                "updated_at": created_at,
-                "device_id": device_id,
-                "device_name": device.name,
-                "device_address": device.address,
-                "room_area_id": room_area_id,
-                "room_name": area.name,
-                "room_floor_id": area.floor_id,
-                "transition_name": cleaned_name,
-                "position": {"x_m": float(x_m), "y_m": float(y_m), "z_m": float(z_m)},
-                "sample_radius_m": float(sample_radius_m),
-                "transition_floor_ids": cleaned_floor_ids,
-                "anchor_layout_hash": layout_hash,
-                "capture_count": 1,
-                "last_capture_duration_s": int(capture_duration_s),
-                "total_capture_duration_s": int(capture_duration_s),
-            }
-            transition_samples.append(stored)
-        else:
-            capture_count = max(int(existing.get("capture_count", 1)), 1)
-            new_capture_count = capture_count + 1
-            position = existing.get("position") or {}
-            existing["position"] = {
-                "x_m": round(((float(position.get("x_m", x_m)) * capture_count) + float(x_m)) / new_capture_count, 6),
-                "y_m": round(((float(position.get("y_m", y_m)) * capture_count) + float(y_m)) / new_capture_count, 6),
-                "z_m": round(((float(position.get("z_m", z_m)) * capture_count) + float(z_m)) / new_capture_count, 6),
-            }
-            existing["updated_at"] = created_at
-            existing["device_id"] = device_id
-            existing["device_name"] = device.name
-            existing["device_address"] = device.address
-            existing["room_name"] = area.name
-            existing["room_floor_id"] = area.floor_id
-            existing["sample_radius_m"] = max(float(existing.get("sample_radius_m", 0.0)), float(sample_radius_m))
-            existing["transition_floor_ids"] = sorted(
-                {*(existing.get("transition_floor_ids") or []), *cleaned_floor_ids}
+        try:
+            created_at = now().isoformat()
+            layout_hash = self.current_anchor_layout_hash
+            transition_key = self._derive_transition_key(
+                room_area_id=room_area_id,
+                transition_name=cleaned_name,
+                anchor_layout_hash=layout_hash,
             )
-            existing["capture_count"] = new_capture_count
-            existing["last_capture_duration_s"] = int(capture_duration_s)
-            existing["total_capture_duration_s"] = int(existing.get("total_capture_duration_s", 0)) + int(
-                capture_duration_s
+            transition_samples = self.transition_samples()
+            existing = next(
+                (sample for sample in transition_samples if sample.get("transition_key") == transition_key),
+                None,
             )
-            stored = existing
+            merged = existing is not None
 
-        await self._store.async_replace_transition_samples(transition_samples)
+            if existing is None:
+                stored = {
+                    "transition_key": transition_key,
+                    "created_at": created_at,
+                    "updated_at": created_at,
+                    "device_id": device_id,
+                    "device_name": device.name,
+                    "device_address": device.address,
+                    "room_area_id": room_area_id,
+                    "room_name": area.name,
+                    "room_floor_id": area.floor_id,
+                    "transition_name": cleaned_name,
+                    "position": {"x_m": float(x_m), "y_m": float(y_m), "z_m": float(z_m)},
+                    "sample_radius_m": float(sample_radius_m),
+                    "transition_floor_ids": cleaned_floor_ids,
+                    "anchor_layout_hash": layout_hash,
+                    "capture_count": 1,
+                    "last_capture_duration_s": int(capture_duration_s),
+                    "total_capture_duration_s": int(capture_duration_s),
+                }
+                transition_samples.append(stored)
+            else:
+                capture_count = max(int(existing.get("capture_count", 1)), 1)
+                new_capture_count = capture_count + 1
+                position = existing.get("position") or {}
+                existing["position"] = {
+                    "x_m": round(
+                        ((float(position.get("x_m", x_m)) * capture_count) + float(x_m)) / new_capture_count,
+                        6,
+                    ),
+                    "y_m": round(
+                        ((float(position.get("y_m", y_m)) * capture_count) + float(y_m)) / new_capture_count,
+                        6,
+                    ),
+                    "z_m": round(
+                        ((float(position.get("z_m", z_m)) * capture_count) + float(z_m)) / new_capture_count,
+                        6,
+                    ),
+                }
+                existing["updated_at"] = created_at
+                existing["device_id"] = device_id
+                existing["device_name"] = device.name
+                existing["device_address"] = device.address
+                existing["room_name"] = area.name
+                existing["room_floor_id"] = area.floor_id
+                existing["sample_radius_m"] = max(float(existing.get("sample_radius_m", 0.0)), float(sample_radius_m))
+                existing["transition_floor_ids"] = sorted(
+                    {*(existing.get("transition_floor_ids") or []), *cleaned_floor_ids}
+                )
+                existing["capture_count"] = new_capture_count
+                existing["last_capture_duration_s"] = int(capture_duration_s)
+                existing["total_capture_duration_s"] = int(existing.get("total_capture_duration_s", 0)) + int(
+                    capture_duration_s
+                )
+                stored = existing
+
+            await self._store.async_replace_transition_samples(transition_samples)
+        except Exception as err:
+            self._update_transition_notification(
+                notification_id=notification_id,
+                device_name=device.name,
+                room_name=area.name,
+                room_floor_id=area.floor_id,
+                transition_name=cleaned_name,
+                x_m=float(x_m),
+                y_m=float(y_m),
+                z_m=float(z_m),
+                sample_radius_m=float(sample_radius_m),
+                capture_duration_s=int(capture_duration_s),
+                transition_floor_ids=cleaned_floor_ids,
+                status="failed",
+                failure_reason=str(err),
+            )
+            raise
+
+        self._update_transition_notification(
+            notification_id=notification_id,
+            device_name=device.name,
+            room_name=area.name,
+            room_floor_id=area.floor_id,
+            transition_name=cleaned_name,
+            x_m=float(stored["position"]["x_m"]),
+            y_m=float(stored["position"]["y_m"]),
+            z_m=float(stored["position"]["z_m"]),
+            sample_radius_m=float(stored["sample_radius_m"]),
+            capture_duration_s=int(capture_duration_s),
+            transition_floor_ids=list(stored["transition_floor_ids"]),
+            status="merged" if merged else "stored",
+            capture_count=int(stored["capture_count"]),
+        )
 
         return {
             "created_at": stored["created_at"],
@@ -1081,3 +1164,53 @@ class BermudaCalibrationManager:
             title=title,
             notification_id=f"bermuda_calibration_{session.session_id}",
         )
+
+    def _update_transition_notification(
+        self,
+        *,
+        notification_id: str,
+        device_name: str,
+        room_name: str,
+        room_floor_id: str | None,
+        transition_name: str,
+        x_m: float,
+        y_m: float,
+        z_m: float,
+        sample_radius_m: float,
+        capture_duration_s: int,
+        transition_floor_ids: list[str],
+        status: str,
+        capture_count: int | None = None,
+        failure_reason: str | None = None,
+    ) -> None:
+        """Create or update the persistent notification for one transition sample capture."""
+        room_floor_name = self._floor_name_for_id(room_floor_id)
+        transition_floor_names = ", ".join(self._floor_name_for_id(floor_id) for floor_id in transition_floor_ids)
+        message = (
+            f"Device: {device_name}\n"
+            f"Room: {room_name}\n"
+            f"Room floor: {room_floor_name}\n"
+            f"Transition: {transition_name}\n"
+            f"Position: x={x_m:.3f}, y={y_m:.3f}, z={z_m:.3f}\n"
+            f"Radius: {sample_radius_m:.3f} m\n"
+            f"Capture duration: {capture_duration_s} s\n"
+            f"Transition floors: {transition_floor_names or 'none'}\n"
+            f"Status: {status}"
+        )
+        if capture_count is not None:
+            message += f"\nCapture count: {capture_count}"
+        if failure_reason is not None:
+            message += f"\nReason: {failure_reason}"
+        persistent_notification.async_create(
+            self.hass,
+            message,
+            title="Bermuda transition sample",
+            notification_id=notification_id,
+        )
+
+    def _floor_name_for_id(self, floor_id: str | None) -> str:
+        """Return a human-friendly floor name for one floor id."""
+        if not floor_id:
+            return "unknown"
+        floor = self._coordinator.fr.async_get_floor(floor_id)
+        return floor.name if floor is not None else str(floor_id)
