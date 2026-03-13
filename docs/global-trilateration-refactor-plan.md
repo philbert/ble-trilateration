@@ -94,6 +94,9 @@ In this environment, the main bug is not that floor evidence happens first. The 
 6. **Use experiments to earn the right to bigger rewrites.**
    - Global all-anchor 3D solving should be treated as a hypothesis, not as the default next step.
 
+7. **Anchor count is not a quality metric.**
+   - Geometry quality and residual consistency must explicitly gate how much Bermuda trusts the geometric solve.
+
 ## Revised Target Architecture
 
 The revised target architecture is:
@@ -136,6 +139,12 @@ The purpose is not to claim that cross-floor RSSI is good geometry. It is not. T
 - let biased cross-floor ranges become weak constraints instead of missing constraints,
 - avoid catastrophic anchor-count collapse after a bad floor choice.
 
+Initial rollout constraint:
+
+- the first soft-inclusion rollout should be limited to adjacent floors,
+- non-adjacent floors should remain diagnostic-only until cross-floor range bias is measured,
+- this keeps the change targeted to the actual `street_level` vs `ground_floor` and `basement` cases without assuming distant levels are useful.
+
 ### Stage 3: Remove cold reset on floor switch
 
 Floor changes should no longer clear the full trilateration state.
@@ -168,17 +177,29 @@ Rationale:
 - walls, floors, and layout create room-specific attenuation patterns,
 - this is likely the strongest discriminator where solved `z` is weak or ambiguous.
 
+In this stage, geometry should be treated as a consistency check and tie-breaker:
+
+- fingerprint provides the primary `(room, floor)` candidate in split-level ambiguity,
+- geometry is used to reject impossible candidates and disambiguate near-boundary rooms,
+- low geometry quality should reduce the influence of the trilat point instead of forcing a wrong room.
+
 ### Stage 5: Hybrid floor inference
 
 After diagnostics prove useful, floor inference should become a posterior built from:
 
 - current RSSI floor evidence,
-- cross-floor fingerprint output,
+- cross-floor fingerprint output, with fingerprint-primary arbitration in split-level ambiguity,
 - continuity from the previous stable room/floor,
 - solved `z` only where `z` observability is validated,
 - optional topology priors for connector groups.
 
 This is still "floor first enough" for operational stability, but no longer relies on a single floor vote.
+
+Recommended arbitration rule:
+
+- when fingerprint produces a strong global `(room, floor)` candidate and geometry quality is weak or ambiguous, let fingerprint dominate floor selection,
+- when fingerprint is ambiguous and geometry quality is strong, let geometry constrain the room within the current coarse floor posterior,
+- when both are weak, hold the previous stable room/floor instead of forcing a switch.
 
 ### Stage 6: Optional global 3D-first solve
 
@@ -209,6 +230,7 @@ Important constraint:
 
 - cross-floor anchors must not be treated as equally geometric as same-floor anchors,
 - the first implementation should prefer sigma inflation over inventing a fake corrected distance model.
+- geometry quality and residual consistency must be tracked separately from raw anchor count.
 
 ### Recommended floor mismatch weighting
 
@@ -220,6 +242,29 @@ Start with simple multiplicative inflation:
 
 These values are placeholders for replay tuning, not fixed truths.
 
+## Quality Signals
+
+The current solver already exposes quality signals that should become first-class decision inputs:
+
+- GDOP / geometry quality,
+- condition number,
+- residual consistency,
+- normalized residual RMS.
+
+These should influence:
+
+- overall position confidence,
+- whether geometry is allowed to overrule fingerprint evidence,
+- how strongly room hysteresis holds the previous stable room,
+- whether floor arbitration is allowed to switch immediately or must remain ambiguous.
+
+Recommended rule of thumb:
+
+- strong fingerprint + weak geometry: fingerprint leads,
+- strong geometry + weak fingerprint: geometry may refine within the coarse floor posterior,
+- weak fingerprint + weak geometry: hold state and lower confidence,
+- disagreement between strong signals: emit ambiguity rather than forcing a room flip.
+
 ## Floor Model
 
 The revised plan does **not** assume floor should be inferred from solved `z` alone.
@@ -229,9 +274,10 @@ The revised plan does **not** assume floor should be inferred from solved `z` al
 Use a hybrid floor posterior composed of:
 
 - existing RSSI floor evidence,
-- fingerprint-inferred floor from global room scoring,
+- fingerprint-inferred floor from global room scoring as the primary discriminator for split-level ambiguity,
 - previous stable room/floor,
-- optional connector topology priors.
+- optional connector topology priors,
+- geometry quality and residual consistency as gating signals on how much trilat can influence the result.
 
 ### Later approach
 
@@ -264,6 +310,7 @@ Follow-on changes:
 
 - add a hybrid floor posterior stage,
 - retain a distinct floor-confidence signal,
+- wire geometry quality / residual consistency into confidence and arbitration,
 - keep `rejected_wrong_floor` only as a diagnostic concept if needed for compatibility.
 
 ### `custom_components/bermuda/trilateration.py`
@@ -281,6 +328,8 @@ Add only what the coordinator needs:
 - cleaner support for externally-inflated per-anchor sigma,
 - optional richer diagnostics around residual contribution by anchor.
 
+No early rewrite should replace the current solver with a different optimizer.
+
 ### `custom_components/bermuda/room_classifier.py`
 
 Initial changes:
@@ -292,6 +341,12 @@ Initial changes:
   - current floor-gated outcome,
   - fingerprint-global outcome,
   - fused outcome.
+
+The intended near-term fusion model is:
+
+- fingerprint-primary for split-level floor discrimination,
+- geometry-secondary as a plausibility and boundary disambiguation signal,
+- ambiguity / hold behavior when neither signal is decisive.
 
 Later changes:
 
@@ -345,7 +400,8 @@ Expected payoff:
 
 ### Phase 2: Soft anchor inclusion behind a flag
 
-- include cross-floor anchors with inflated sigma,
+- include adjacent-floor anchors with inflated sigma,
+- keep non-adjacent-floor anchors diagnostic-only in the first rollout,
 - keep existing floor evidence scoring,
 - compare residuals, geometry quality, and room outcomes with and without the flag.
 
@@ -367,6 +423,9 @@ Expected payoff:
 ### Phase 4: Hybrid floor arbitration
 
 - if diagnostics validate fingerprint usefulness, feed fingerprint floor evidence into the floor posterior,
+- require an explicit replay threshold before promoting it:
+  - target `>85%` floor-correct top-room on known traces,
+  - target score gap or confidence margin large enough to avoid frequent ambiguity,
 - allow it to overrule ambiguous RSSI-only floor outcomes in limited conditions,
 - keep explicit ambiguity states where signals disagree strongly.
 
@@ -388,10 +447,12 @@ Expected payoff:
 
 - floor evidence scoring remains unchanged in the baseline path,
 - floor switch does not clear solve state,
-- cross-floor anchors are included with sigma inflation when the feature flag is on,
+- adjacent-floor anchors are included with sigma inflation when the feature flag is on,
+- non-adjacent-floor anchors remain diagnostic-only in the first rollout,
 - downgraded 3D-to-2D paths preserve `z` prior and reduce confidence,
 - global fingerprint scoring can produce a room/floor candidate outside the current selected floor,
-- hybrid floor arbitration can hold ambiguity instead of forcing a wrong room.
+- hybrid floor arbitration can hold ambiguity instead of forcing a wrong room,
+- geometry quality and residual consistency reduce the influence of weak solves.
 
 ### Replay tests
 
@@ -461,6 +522,11 @@ Goal:
 
 - decide whether fingerprint can become a floor arbiter in split-level cases.
 
+Suggested success threshold:
+
+- `>85%` floor-correct top candidate on known traces,
+- usable score gap or confidence margin on the majority of replayed samples.
+
 ### Experiment 4: Cross-floor range bias characterization
 
 For cross-floor scanners in known locations:
@@ -473,6 +539,11 @@ Goal:
 
 - determine whether cross-floor ranges are merely weak or actively misleading,
 - tune sigma inflation accordingly.
+
+Suggested decision rule:
+
+- if adjacent-floor bias is moderate, keep adjacent soft inclusion,
+- if non-adjacent-floor bias is large, continue excluding non-adjacent floors from the solve path in production.
 
 ### Experiment 5: State reset elimination
 
@@ -489,6 +560,7 @@ Goal:
 ## Risks
 
 - Cross-floor RSSI may be so biased that even inflated-sigma inclusion still hurts some layouts.
+- Adjacent-floor inclusion may be beneficial while non-adjacent-floor inclusion is harmful, which would require floor-distance-specific behavior.
 - Global fingerprint scoring may overfit rooms with sparse calibration coverage.
 - Hybrid floor arbitration may become harder to debug unless diagnostics are explicit.
 - `street_level` may overlap vertically with both basement and ground-floor regions, making pure `z` classification inherently ambiguous.
@@ -504,6 +576,7 @@ Goal:
 6. Should cross-floor fingerprint be diagnostic-only first, or directly participate in floor arbitration under a feature flag?
 7. Should non-adjacent floor anchors be softly included, or should the first rollout limit soft inclusion to adjacent floors only?
 8. Is there enough calibration coverage per room and per floor to support global fingerprint ranking?
+9. What geometry-quality or residual-consistency thresholds should suppress geometry-led room changes?
 
 ## Recommended First Implementation Slice
 
@@ -511,7 +584,7 @@ The first slice should be intentionally narrow and directly driven by the review
 
 1. Add diagnostics for floor evidence, would-be-rejected anchors, and fingerprint-global candidates.
 2. Remove floor-switch cold reset and preserve priors through a challenger.
-3. Add soft cross-floor anchor inclusion behind a feature flag.
+3. Add adjacent-floor soft anchor inclusion behind a feature flag.
 4. Add cross-floor fingerprint diagnostics behind a feature flag.
 5. Replay the `Guest Room` and `Garage front` traces before changing final room assignment behavior.
 
@@ -522,7 +595,8 @@ This is the minimum change set that tests the central hypotheses without committ
 - Brief floor challengers no longer wipe the entire solve state.
 - Split-level replay traces stop producing catastrophic room jumps caused by anchor-count collapse.
 - Cross-floor fingerprint diagnostics provide useful floor/room evidence on known traces.
-- Soft cross-floor anchor inclusion improves continuity without materially worsening residual quality.
+- Adjacent-floor soft anchor inclusion improves continuity without materially worsening residual quality.
+- Geometry quality and residual consistency are used to suppress low-trust geometry from forcing room/floor changes.
 - A decision on true global 3D-first solving is deferred until replay data demonstrates that it is both observable and beneficial.
 
 ---
