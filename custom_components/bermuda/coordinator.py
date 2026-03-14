@@ -2338,6 +2338,9 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             if self._calibration_layout_mismatch_signature is not None:
                 ir.async_delete_issue(self.hass, DOMAIN, REPAIR_CALIBRATION_LAYOUT_MISMATCH)
                 self._calibration_layout_mismatch_signature = None
+                # Mismatch was preventing calibration data from loading; rebuild now that
+                # the layout hash has stabilised so the room classifier can find samples.
+                self.hass.async_create_task(self.room_classifier.async_rebuild())
             return
 
         signature = "|".join(
