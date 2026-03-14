@@ -1214,3 +1214,63 @@ class BermudaCalibrationManager:
             return "unknown"
         floor = self._coordinator.fr.async_get_floor(floor_id)
         return floor.name if floor is not None else str(floor_id)
+
+    async def async_migrate_transition_samples_to_zones(
+        self, transition_zone_store
+    ) -> int:
+        """Migrate existing transition samples to TransitionZone objects. Non-destructive."""
+        from collections import defaultdict
+        from datetime import datetime, timezone
+        from .transition_zone_store import TransitionZone, TransitionZoneCapture
+        import uuid
+
+        if transition_zone_store.zones:
+            return 0  # Already populated, skip
+
+        groups: dict[tuple[str, str], list] = defaultdict(list)
+        for sample in self.samples():
+            t_name = sample.get("transition_name")
+            layout_hash = sample.get("anchor_layout_hash", "")
+            if not t_name:
+                continue
+            groups[(t_name, layout_hash)].append(sample)
+
+        count = 0
+        for (t_name, layout_hash), samples in groups.items():
+            captures = []
+            all_floor_ids: set[str] = set()
+            for s in samples:
+                pos = s.get("position", {})
+                x_m = pos.get("x_m")
+                y_m = pos.get("y_m")
+                z_m = pos.get("z_m")
+                sigma_m = float(s.get("sample_radius_m", 1.0))
+                if x_m is None or y_m is None or z_m is None:
+                    continue
+                captures.append(TransitionZoneCapture(x_m=float(x_m), y_m=float(y_m), z_m=float(z_m), sigma_m=sigma_m))
+                for fid in s.get("transition_floor_ids", []):
+                    all_floor_ids.add(fid)
+
+            if not captures:
+                continue
+
+            # Build bidirectional floor pairs
+            floor_ids = sorted(all_floor_ids)
+            floor_pairs = []
+            for i, a in enumerate(floor_ids):
+                for b in floor_ids[i+1:]:
+                    floor_pairs.append((a, b))
+                    floor_pairs.append((b, a))
+
+            zone = TransitionZone(
+                zone_id=uuid.uuid4().hex,
+                name=t_name,
+                captures=captures,
+                floor_pairs=floor_pairs,
+                anchor_layout_hash=layout_hash,
+                created_at=datetime.now(timezone.utc).isoformat(),
+            )
+            await transition_zone_store.async_save_zone(zone)
+            count += 1
+
+        return count

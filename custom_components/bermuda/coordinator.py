@@ -58,6 +58,8 @@ from homeassistant.util.dt import get_age, now
 from .bermuda_device import BermudaDevice
 from .calibration import BermudaCalibrationManager
 from .calibration_store import BermudaCalibrationStore
+from .transition_zone_store import BermudaTransitionZoneStore, TransitionZone
+from .reachability_gate import ReachabilityGate, ReachabilityDecision
 from .bermuda_irk import BermudaIrkManager
 from .ranging_model import BermudaRangingModel
 from .room_classifier import BermudaRoomClassifier, GlobalFingerprintResult
@@ -74,6 +76,7 @@ from .const import (
     CONF_MAX_VELOCITY,
     CONF_TRILAT_CROSS_FLOOR_PENALTY_DB,
     CONF_TRILAT_SOFT_INCLUDE_OTHER_FLOOR_ANCHORS,
+    CONF_TRILAT_REACHABILITY_GATE,
     CONF_SMOOTHING_SAMPLES,
     CONF_UPDATE_INTERVAL,
     DEFAULT_DEVTRACK_TIMEOUT,
@@ -82,6 +85,7 @@ from .const import (
     DEFAULT_SMOOTHING_SAMPLES,
     DEFAULT_TRILAT_CROSS_FLOOR_PENALTY_DB,
     DEFAULT_TRILAT_SOFT_INCLUDE_OTHER_FLOOR_ANCHORS,
+    DEFAULT_TRILAT_REACHABILITY_GATE,
     DEFAULT_UPDATE_INTERVAL,
     DISTANCE_TIMEOUT,
     DOMAIN,
@@ -247,6 +251,8 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         self._calibration_layout_mismatch_signature: str | None = None
         self.calibration_store = BermudaCalibrationStore(hass, entry.entry_id)
         self.scanner_anchor_store = BermudaScannerAnchorStore(hass)
+        self._transition_zone_store = BermudaTransitionZoneStore(hass)
+        self._reachability_gate = ReachabilityGate()
         self.calibration = BermudaCalibrationManager(hass, self, self.calibration_store)
         self.ranging_model = BermudaRangingModel(self.calibration)
         self.room_classifier = BermudaRoomClassifier(self.calibration, self.ar)
@@ -396,6 +402,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
     async def async_initialize(self) -> None:
         """Initialize coordinator-owned subsystems after setup."""
         await self.scanner_anchor_store.async_ensure_loaded()
+        await self._transition_zone_store.async_load()
         await self.calibration.async_initialize()
         self.calibration.register_change_callback(self.async_handle_calibration_samples_changed)
         self._restore_scanner_anchors_from_store()
@@ -552,6 +559,9 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 DEFAULT_TRILAT_SOFT_INCLUDE_OTHER_FLOOR_ANCHORS,
             )
         )
+
+    def trilat_reachability_gate_enabled(self) -> bool:
+        return bool(self.options.get(CONF_TRILAT_REACHABILITY_GATE, DEFAULT_TRILAT_REACHABILITY_GATE))
 
     def get_manufacturer_from_id(self, uuid: int | str) -> tuple[str, bool] | tuple[None, None]:
         """
@@ -1709,6 +1719,15 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         recent_transition_floor_ids: tuple[str, ...] = ()
         recent_transition_support_01: float = 0.0
         recent_transition_seen_at: float = 0.0
+        # Challenger reference position (frozen at challenger onset)
+        challenger_reference_position: tuple[float, float, float] | None = None
+        challenger_onset_time: float = 0.0
+        challenger_motion_budget_m: float = 0.0
+        # Floor confidence for gate bypass logic
+        floor_confidence: float = 0.0
+        # Per-zone traversal tracking: zone_id -> (entry_at, exit_at); exit_at=0.0 means in-zone
+        zone_traversal_history: dict = field(default_factory=dict)
+        zone_entry_scores: dict = field(default_factory=dict)
 
     _TRILAT_MIN_ANCHORS: int = 3
     _TRILAT_MIN_ANCHORS_3D: int = 4
@@ -1728,6 +1747,15 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
     _TRILAT_MAX_POSITION_SPEED_MPS: float = 5.0
     _TRILAT_MAX_VERTICAL_SPEED_MPS: float = 1.5
     _TRILAT_MAX_FILTER_DT_S: float = 5.0
+    _CHALLENGER_REFERENCE_QUALITY_THRESHOLD: float = 0.30
+    _CHALLENGER_UNCERTAINTY_BUDGET_M: float = 1.5
+    _CHALLENGER_MAX_MOTION_BUDGET_M: float = 3.0
+    _FLOOR_CONFIDENCE_HIGH_THRESHOLD: float = 0.65
+    _FLOOR_CONFIDENCE_GATE_THRESHOLD: float = 0.50
+    _ZONE_ENTRY_THRESHOLD: float = 0.45
+    _ZONE_EXIT_THRESHOLD: float = 0.20
+    _ZONE_TRAVERSAL_RECENCY_S: float = 30.0
+
     @staticmethod
     def _score_rssi(rssi_filtered: float | None) -> float:
         """Convert filtered RSSI to a monotonic confidence score."""
@@ -2329,6 +2357,64 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 continue
             self._refresh_trilateration_for_device(device)
 
+    def _update_floor_confidence(
+        self,
+        state: "BermudaDataUpdateCoordinator.TrilatDecisionState",
+        *,
+        selected_floor_id: str | None,
+        floor_evidence: dict,
+        floor_ambiguity: bool,
+    ) -> None:
+        """Update floor_confidence after each inference cycle."""
+        if selected_floor_id is None or floor_ambiguity:
+            state.floor_confidence = max(0.0, state.floor_confidence - 0.05)
+            return
+        total = sum(floor_evidence.values())
+        if total <= 0.0:
+            state.floor_confidence = max(0.0, state.floor_confidence - 0.05)
+            return
+        best = floor_evidence.get(selected_floor_id, 0.0)
+        rssi_ratio = best / total
+        if rssi_ratio >= self._FLOOR_CONFIDENCE_HIGH_THRESHOLD:
+            state.floor_confidence = min(1.0, state.floor_confidence + 0.04)
+        else:
+            state.floor_confidence = max(0.0, state.floor_confidence - 0.02)
+
+    def _update_zone_traversal_tracker(
+        self,
+        state: "BermudaDataUpdateCoordinator.TrilatDecisionState",
+        *,
+        nowstamp: float,
+        x_m: float,
+        y_m: float,
+        z_m: float,
+        geometry_quality_01: float,
+        layout_hash: str,
+    ) -> None:
+        """Track zone entry/exit for background traversal detection. High-quality solves only."""
+        if geometry_quality_01 < self._CHALLENGER_REFERENCE_QUALITY_THRESHOLD:
+            return
+        for zone in self._transition_zone_store.zones:
+            if zone.anchor_layout_hash != layout_hash:
+                continue
+            score = zone.score(x_m, y_m, z_m)
+            prev_score = state.zone_entry_scores.get(zone.zone_id, 0.0)
+            state.zone_entry_scores[zone.zone_id] = score
+            history = state.zone_traversal_history.get(zone.zone_id, (0.0, 0.0))
+            entry_at, exit_at = history
+            # Entry: crossed above threshold
+            if prev_score < self._ZONE_ENTRY_THRESHOLD <= score:
+                state.zone_traversal_history[zone.zone_id] = (nowstamp, 0.0)
+            # Exit: crossed below threshold, completing a traversal
+            elif prev_score >= self._ZONE_EXIT_THRESHOLD > score and entry_at > 0.0 and exit_at == 0.0:
+                state.zone_traversal_history[zone.zone_id] = (entry_at, nowstamp)
+        # Prune stale completed traversals
+        cutoff = nowstamp - self._ZONE_TRAVERSAL_RECENCY_S * 2
+        state.zone_traversal_history = {
+            zid: (e, x) for zid, (e, x) in state.zone_traversal_history.items()
+            if x == 0.0 or x > cutoff
+        }
+
     def _refresh_trilateration_for_device(self, device: BermudaDevice) -> None:
         """Resolve per-device trilateration diagnostics."""
         nowstamp = monotonic_time_coarse()
@@ -2823,6 +2909,18 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                     state.challenger_fingerprint_hold_since = 0.0
                     state.challenger_fingerprint_hold_total_s = 0.0
                     state.challenger_fingerprint_hold_expired = False
+                    # Capture reference position for reachability gate
+                    if (
+                        device.trilat_x_m is not None
+                        and device.trilat_y_m is not None
+                        and device.trilat_z_m is not None
+                        and device.trilat_geometry_quality >= self._CHALLENGER_REFERENCE_QUALITY_THRESHOLD
+                    ):
+                        state.challenger_reference_position = (device.trilat_x_m, device.trilat_y_m, device.trilat_z_m)
+                    else:
+                        state.challenger_reference_position = None
+                    state.challenger_onset_time = nowstamp
+                    state.challenger_motion_budget_m = 0.0
 
                 current_floor_fp_score = fingerprint_result.floor_scores.get(state.floor_id, 0.0) if state.floor_id else 0.0
                 challenger_floor_fp_score = (
@@ -2898,11 +2996,48 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                     effective_required_dwell_s *= (1.0 - (0.4 * transition_support_01))
                     transition_dwell_reduction_applied = True
 
+                # Update motion budget while challenger is active
+                if state.floor_challenger_id is not None and state.challenger_onset_time > 0.0:
+                    elapsed_s = max(0.0, nowstamp - state.challenger_onset_time)
+                    # Use max velocity as conservative upper bound (velocity tracking not yet available)
+                    budget_from_elapsed = elapsed_s * self._TRILAT_MAX_POSITION_SPEED_MPS
+                    state.challenger_motion_budget_m = min(
+                        budget_from_elapsed + self._CHALLENGER_UNCERTAINTY_BUDGET_M,
+                        self._CHALLENGER_MAX_MOTION_BUDGET_M,
+                    )
+
                 challenger_effective_dwell_s = max(
                     0.0,
                     (nowstamp - state.floor_challenger_since) - fingerprint_hold_elapsed_s,
                 )
-                if not fingerprint_hold_active and challenger_effective_dwell_s >= effective_required_dwell_s:
+
+                # Reachability gate
+                _gate_blocked = False
+                if self.trilat_reachability_gate_enabled() and state.floor_challenger_id is not None:
+                    _gate_result = self._reachability_gate.evaluate(
+                        from_floor_id=state.floor_id,
+                        to_floor_id=state.floor_challenger_id,
+                        floor_confidence=state.floor_confidence,
+                        floor_confidence_threshold=self._FLOOR_CONFIDENCE_GATE_THRESHOLD,
+                        reference_position=state.challenger_reference_position,
+                        motion_budget_m=state.challenger_motion_budget_m,
+                        zones=self._transition_zone_store.zones,
+                        zone_traversal_history=state.zone_traversal_history,
+                        nowstamp=nowstamp,
+                        traversal_recency_s=self._ZONE_TRAVERSAL_RECENCY_S,
+                        layout_hash=layout_hash,
+                    )
+                    _gate_blocked = not _gate_result.allowed
+                    # Always log diagnostics regardless of gate outcome
+                    if hasattr(device, 'trilat_floor_diagnostics') and isinstance(device.trilat_floor_diagnostics, dict):
+                        device.trilat_floor_diagnostics.update({
+                            "reachability_gate_allowed": _gate_result.allowed,
+                            "reachability_gate_reason": _gate_result.reason,
+                            "reachability_gate_budget_m": _gate_result.motion_budget_m,
+                            "reachability_gate_nearest_m": _gate_result.nearest_zone_distance_m,
+                        })
+
+                if not _gate_blocked and not fingerprint_hold_active and challenger_effective_dwell_s >= effective_required_dwell_s:
                     if fingerprint_supports_current_floor:
                         fingerprint_switch_veto_active = True
                     elif (
@@ -2920,12 +3055,18 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                         state.challenger_fingerprint_hold_since = 0.0
                         state.challenger_fingerprint_hold_total_s = 0.0
                         state.challenger_fingerprint_hold_expired = False
+                        state.challenger_reference_position = None
+                        state.challenger_onset_time = 0.0
+                        state.challenger_motion_budget_m = 0.0
             else:
                 state.floor_challenger_id = None
                 state.floor_challenger_since = 0.0
                 state.challenger_fingerprint_hold_since = 0.0
                 state.challenger_fingerprint_hold_total_s = 0.0
                 state.challenger_fingerprint_hold_expired = False
+                state.challenger_reference_position = None
+                state.challenger_onset_time = 0.0
+                state.challenger_motion_budget_m = 0.0
         else:
             current_floor_score = floor_evidence.get(state.floor_id, 0.0)
             floor_margin = 0.0
@@ -2934,8 +3075,17 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             state.challenger_fingerprint_hold_since = 0.0
             state.challenger_fingerprint_hold_total_s = 0.0
             state.challenger_fingerprint_hold_expired = False
+            state.challenger_reference_position = None
+            state.challenger_onset_time = 0.0
+            state.challenger_motion_budget_m = 0.0
 
         selected_floor_id = state.floor_id or best_floor_id
+        self._update_floor_confidence(
+            state,
+            selected_floor_id=selected_floor_id,
+            floor_evidence=floor_evidence,
+            floor_ambiguity=floor_ambiguity,
+        )
         selected_floor_name = self._resolve_floor_name(selected_floor_id)
         _apply_anchor_status_entries(selected_floor_id)
         _apply_floor_diagnostics(
@@ -3555,6 +3705,16 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             ),
         )
         self._set_trilat_speed_diagnostics(device, state)
+        if layout_hash and device.trilat_x_m is not None and device.trilat_y_m is not None:
+            self._update_zone_traversal_tracker(
+                state,
+                nowstamp=nowstamp,
+                x_m=device.trilat_x_m,
+                y_m=device.trilat_y_m,
+                z_m=device.trilat_z_m if device.trilat_z_m is not None else 0.0,
+                geometry_quality_01=quality_metrics.geometry_quality_01,
+                layout_hash=layout_hash,
+            )
         if _debug_this_device:
             if solver_dimension == "3d" and solve_result.z_m is not None:
                 _LOGGER_TARGET_SPAM_LESS.debug(
