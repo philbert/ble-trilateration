@@ -249,18 +249,57 @@ For the first rollout:
 - a reasonable first cap is `3.0 m`,
 - the cap should remain configurable because it is layout-dependent.
 
+## Unknown or Stale Source Floor
+
+The gate is pair-based, which assumes a trustworthy `from_floor`. At startup, after long
+absence, or after a tracking failure, the stable floor may be `None`, stale, or already wrong.
+A strict gate in that state can trap the estimator indefinitely on an incorrect floor.
+
+Explicit rule:
+
+- if `floor_id is None`: bypass the gate entirely, allow evidence competition to establish
+  an initial floor assignment,
+- if `floor_id` was last set under low confidence and has not been re-confirmed since: treat it
+  as untrustworthy, apply no gate, allow evidence to override it freely,
+- once a floor is established with sufficient confidence and confirmed by the topology gate at
+  least once, the gate becomes active for subsequent challengers.
+
+A `floor_confidence` field on the device state should encode this. The gate checks it before
+evaluating any `(from_floor, to_floor)` pair.
+
+## Background Transition Proximity Tracker
+
+The challenger reference position anchors the reachability gate at the onset of a challenge.
+But a legitimate transition may have already occurred before the challenger appeared. If the
+device has passed a zone and moved away, and only then the RSSI-based challenger forms, the
+reference position will be far from the zone and the gate will incorrectly block the move.
+
+To handle this, a lightweight background tracker should continuously record transition-zone
+proximity using only high-quality live solves, independent of any active challenger:
+
+- each update cycle, if solve quality is above a threshold and the current position is within
+  a zone's union envelope, record the proximity timestamp and zone ID,
+- when a challenger forms, the reachability gate checks both the budget-based distance test
+  **and** whether a recent background proximity was recorded within a configurable recency
+  window (default 30 seconds),
+- recent background proximity overrides an otherwise-blocked gate.
+
+This is the mechanism that allows legitimate transitions to succeed even when the challenger
+forms a few seconds after the zone traversal.
+
 ## State To Track
 
 For each tracked device, the floor estimator should track:
 
 - current stable floor,
+- current stable floor confidence,
 - current stable room,
 - last stable position estimate,
 - challenger reference position captured before the floor-ambiguity episode,
 - recent position/velocity history,
 - current challenger floor,
 - challenger start time,
-- most recent credible transition-zone proximity,
+- most recent credible transition-zone proximity (from background tracker),
 - last transition zone that was plausibly traversed,
 - uncertainty bounds on recent position.
 

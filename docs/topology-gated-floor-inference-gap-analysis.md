@@ -17,6 +17,8 @@ described in `topology-gated-floor-inference-design.md` and identifies what need
 | Challenger reference position | Not tracked | Frozen at floor-ambiguity onset | Medium |
 | Motion budget tracking | Max velocity clamp on position jumps only | Integrated velocity budget since challenger began | Medium |
 | Signal priority order | RSSI-first, fingerprints as veto | Topology gate → fingerprints → RSSI → geometry | Large |
+| Unknown/stale source floor | Not handled — gate would trap wrong floor | Bypass gate when `floor_confidence` below threshold or floor is `None` | Small |
+| Background proximity tracker | No zone proximity tracked outside active challenger | High-quality live solves continuously record zone proximity; recent traversal overrides gate | Medium |
 
 ---
 
@@ -98,7 +100,9 @@ This is collected in the config flow.
 - Persist per-floor Z config (new key in `ConfigEntry` options or a dedicated store alongside
   `scanner_anchor_store` and `calibration_store`).
 - Street level (or any floor the user marks) should default to range mode.
-- This config is a prerequisite for sections 4, 5, and the reachability gate (section 6).
+- This config is a prerequisite for sections 4 and 5 (phone-height prior and X/Y envelope).
+  It is **not** a prerequisite for the topology gate (section 6), which operates on transition
+  zone geometry and the challenger reference position independently of floor Z values.
 
 ---
 
@@ -119,15 +123,27 @@ z_prior_min = floor_z_m
 z_prior_max = floor_z_m + 1.2
 ```
 
-Apply this as a `SolvePrior3D` (the infrastructure already exists in `trilateration.py`) when
-solving for a device believed to be on that floor. This is a strong prior: a phone spends the
-overwhelming majority of its time between the floor surface and ~1.2m above it.
+Apply this as a `SolvePrior3D` (the infrastructure already exists in `trilateration.py`). This
+is a strong prior: a phone spends the overwhelming majority of its time between the floor surface
+and ~1.2m above it.
+
+The prior must not be keyed on the current assigned floor alone. If the stable floor is already
+wrong, injecting a prior anchored to it will reinforce the error. Instead:
+
+- **When topology and floor evidence agree**: inject the phone-height prior for the agreed floor
+  as a continuity aid.
+- **When a challenger is active**: run the solve with per-candidate priors for both the stable
+  floor and the challenger floor, and compare the residuals. Feed the residual difference into
+  Stage 4 as an additional geometry-derived hint rather than pre-selecting a floor.
+- **When floor state is unknown or ambiguous**: run the solve unconstrained in Z and rely on
+  the topology gate and fingerprint evidence to resolve the floor.
 
 **What needs to change**:
 
 - After per-floor Z config is available (section 3), construct a `SolvePrior3D` per floor with
   the Z band as a Gaussian prior centred at `floor_z_m + 0.6` (mid-band) with appropriate sigma.
-- Inject this prior into the 3D solve when the device's current floor is known with confidence.
+- During an active challenger, run two solves (one per candidate floor prior) and diff the
+  residuals rather than injecting the stable floor's prior unconditionally.
 - For floors with a Z range (street level), use the range midpoint and widen the sigma accordingly.
 
 ---
@@ -206,9 +222,12 @@ transitions or being silently bypassed where it matters most.
 - Add `challenger_reference_position: tuple[float, float, float] | None` to
   `TrilatDecisionState`.
 - Add `challenger_motion_budget_m: float` tracking integrated velocity since challenger onset.
-- Add a `TransitionZone` data class with centroid, support radius, and allowed floor pairs.
+- Add a `TransitionZone` data class with a list of per-capture `(x, y, z, radius_m)` tuples
+  and allowed `(from_floor_id, to_floor_id)` pairs. No single centroid — the effective geometry
+  is the union of capture discs.
 - Add a `ReachabilityGate` that evaluates the above at each floor decision cycle.
 - Wire the gate into the floor challenger protocol before the dwell and veto checks.
+- The gate must also handle the case where `from_floor` is unknown or unreliable (see gap 11).
 - Gate should be behind a feature flag until validated on replay traces.
 
 ---
@@ -232,8 +251,7 @@ Their primary role is to constrain state transitions, not to provide fingerprint
 
 - Introduce a `TransitionZone` model separate from calibration samples:
   - stable internal ID,
-  - centroid `x/y/z`,
-  - support radius,
+  - one or more captures, each with `(x, y, z, radius_m)` — no averaging or centroiding,
   - allowed `(from_floor_id, to_floor_id)` pairs.
 - Add a `transition_zone_store` alongside `calibration_store`.
 - Update the recording service to distinguish transition zone captures from position samples.
@@ -324,6 +342,74 @@ at 3m for first rollout).
 
 ---
 
+### 11. Unknown or Stale Source Floor at Gate Evaluation
+
+**Current**:
+
+Not handled. The floor challenger protocol assumes `state.floor_id` is a trustworthy source
+floor. At startup, after long absence, or after a tracking failure, `floor_id` may be `None`,
+stale, or already wrong. A strict `(from_floor, to_floor)` gate in that state can trap the
+estimator on an incorrect floor indefinitely.
+
+**Target**:
+
+When `from_floor` is unknown, missing, or flagged as low-confidence, the gate must not block
+floor assignment. The correct behaviour is:
+
+- if `state.floor_id is None`: bypass the gate entirely, allow normal floor evidence competition
+  to establish an initial floor,
+- if `state.floor_id` was set under low confidence and has not been re-confirmed: treat it as
+  untrustworthy, apply no gate, allow evidence to override it freely,
+- once a floor is established with sufficient confidence and confirmed by the topology gate at
+  least once, the gate becomes active for subsequent challengers.
+
+**What needs to change**:
+
+- Add a `floor_confidence: float` field to `TrilatDecisionState` tracking confidence in the
+  current stable floor.
+- The reachability gate checks `floor_confidence` before evaluating the `(from_floor, to_floor)`
+  pair. Below a configurable threshold the gate is bypassed for that cycle.
+- This prevents the gate from cementing an already-wrong floor into place at startup or recovery.
+
+---
+
+### 12. Background Transition Proximity Tracker
+
+**Current**:
+
+The state machine tracks `most recent credible transition-zone proximity` (listed in the design
+doc's State To Track section) but no mechanism is defined for populating it outside an active
+challenger. If the device has already passed through the zone before a challenger appears,
+the challenger reference position may be far from the zone, and the gate would incorrectly block
+a transition that already occurred.
+
+**Target**:
+
+A lightweight background tracker should continuously record transition-zone proximity using only
+high-quality live solves (not challenger-period estimates). This populates a
+`last_zone_proximity_at: float` timestamp and `last_zone_id: str` for each device, independent
+of any active challenger.
+
+When a challenger appears, the reachability gate checks not only the distance from the challenger
+reference position, but also whether the background tracker recorded a recent zone traversal
+within a configurable recency window (e.g. 30 seconds). If so, the gate treats the transition as
+plausible regardless of the current budget calculation.
+
+This is the mechanism that allows legitimate transitions to succeed even when the challenger
+forms a few seconds after the device has already passed the zone.
+
+**What needs to change**:
+
+- Add `last_zone_proximity_at: float | None` and `last_zone_id: str | None` to
+  `TrilatDecisionState`.
+- Each update cycle, if solve quality is above a threshold and the current position is within
+  a zone's union envelope, record the proximity timestamp.
+- In the reachability gate, check the recency of background proximity alongside the
+  budget calculation. Recent background proximity overrides an otherwise-blocked gate.
+- The recency window should be configurable and default conservatively (e.g. 30s).
+
+---
+
 ## Implementation Order
 
 The phases below are sequenced so the topology gate — the core hypothesis — is validated in
@@ -335,15 +421,21 @@ would make it impossible to know which one fixed or broke any given failure.
 1. **Challenger reference position** (gap 8): Add field to `TrilatDecisionState`, set on
    challenger onset. No gate logic yet — just capture.
 2. **Motion budget tracking** (gap 9): Add accumulation alongside challenger state. No gate yet.
-3. **TransitionZone data model** (gap 7, partial): Define `TransitionZone` class with per-capture
+3. **Floor confidence tracking** (gap 11): Add `floor_confidence` field to `TrilatDecisionState`.
+   Gate bypasses when confidence is below threshold or floor is `None`.
+4. **Background transition proximity tracker** (gap 12): Each update cycle, record proximity to
+   transition zones using high-quality live solves. Store `last_zone_proximity_at` and
+   `last_zone_id` per device. No gate logic yet.
+5. **TransitionZone data model** (gap 7, partial): Define `TransitionZone` class with per-capture
    geometry (union model, no centroiding) and `(from_floor_id, to_floor_id)` pairs. Add store.
    Migrate existing transition sample recordings to populate zones. No gate logic yet.
-4. **Transition-zone proximity inference**: Evaluate proximity using challenger reference
+6. **Transition-zone proximity inference**: Evaluate proximity using challenger reference
    position, not the live estimate. Log proximity decisions as diagnostics only.
-5. **Reachability gate** (gap 6): Implement `ReachabilityGate` per `(from_floor, to_floor)` pair.
+7. **Reachability gate** (gap 6): Implement `ReachabilityGate` per `(from_floor, to_floor)` pair.
+   Gate checks both budget distance and recent background proximity (recency window).
    Wire into floor challenger protocol behind a feature flag. Partial topology coverage falls back
-   per-pair to soft behaviour.
-6. **Replay validation**: Test against known failure traces (`Guest Room → Garage front`,
+   per-pair to soft behaviour. Unknown/low-confidence `from_floor` bypasses the gate.
+8. **Replay validation**: Test against known failure traces (`Guest Room → Garage front`,
    `Ana's Office → Garage front`). Gate must block both before proceeding.
 
 ### Phase 2 — Geometry improvements
