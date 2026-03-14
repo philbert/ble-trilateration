@@ -404,6 +404,11 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         await self.scanner_anchor_store.async_ensure_loaded()
         await self._transition_zone_store.async_load()
         await self.calibration.async_initialize()
+        migrated = await self.calibration.async_migrate_transition_samples_to_zones(
+            self._transition_zone_store
+        )
+        if migrated:
+            _LOGGER.debug("Migrated %d transition sample group(s) to TransitionZone store", migrated)
         self.calibration.register_change_callback(self.async_handle_calibration_samples_changed)
         self._restore_scanner_anchors_from_store()
         await self.async_handle_calibration_samples_changed()
