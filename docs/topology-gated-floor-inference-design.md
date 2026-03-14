@@ -71,10 +71,12 @@ A transition zone is a Bermuda-native object representing a real place where flo
 Each transition zone has:
 
 - a stable internal id,
-- one or more recorded captures,
-- geometric support in `x/y/z`,
-- a support radius or support envelope,
-- a set of allowed destination floors.
+- one or more recorded captures, each with its own position and support radius,
+- a set of allowed `(from_floor_id, to_floor_id)` pairs.
+
+Destination-only is insufficient. A zone that authorizes `ground_floor → street_level` must not
+implicitly authorize `top_floor → street_level`. Each direction of travel must be modeled
+explicitly as a floor pair.
 
 Transition zones are not Home Assistant floors or areas. They are house-specific topology primitives.
 
@@ -181,19 +183,29 @@ For example, in a four-floor house (basement, street level, ground floor, top fl
 
 ### Implications for the Pipeline
 
-- **Stage 1**: use per-floor Z bands as a bounded prior when solving for `z`.
+- **Stage 1**: use per-floor Z bands as a `SolvePrior3D` input to tighten the Z estimate.
+- **Stage 4**: Z output from Stage 1 feeds into floor evidence fusion as a geometry-derived hint, weighted by solve quality. It does not bypass the Stage 3 reachability gate.
 - **Stage 3**: floor surface Z tightens the geometry used to evaluate reachability budget.
-- **Transition zones**: user-declared floor Z makes it straightforward to assign Z coordinates to transition zones without ambiguity.
+- **Transition zones**: user-declared floor Z makes it straightforward to assign Z coordinates to transition zone captures without ambiguity.
 
 ## Minimal Geometry Model
 
 The geometry does not need to be sophisticated.
 
-For the first usable design, each transition zone can be represented as:
+For the first usable design, a transition zone's geometry is the **union of its recorded captures**:
 
-- a centroid in `x/y/z`,
-- a support radius,
-- optionally a confidence or spread from recorded captures.
+- each capture has a position `x/y/z` and a support radius,
+- the zone's effective envelope is the union of all per-capture discs,
+- capture positions are **not averaged or centroided**.
+
+Naive centroiding must be avoided. Stairs and landings occupy a specific geometric path.
+Averaging captures at the top and bottom of a staircase produces a centroid in the middle of
+the floor slab — exactly where no transition is possible. The union model preserves the actual
+geometry.
+
+For the reachability check, the distance from the challenger reference position to the zone is
+the minimum distance to any individual capture disc. A position is within the zone if it falls
+within the support radius of at least one capture.
 
 That is enough for:
 
@@ -262,13 +274,15 @@ Run a full 3D Cartesian solve using **all available scanners regardless of floor
 
 There is no physical justification for excluding cross-floor scanners from the solve. BLE signal propagation through a floor slab is not categorically different from propagation through a wall. Restricting the solve to same-floor scanners discards real distance information and does not improve accuracy.
 
-`z` should be treated as the most important coordinate to resolve first:
+`z` is the most structurally informative coordinate:
 
-- `z` determines which floor the device is on, which in turn constrains `x/y` and room assignment.
 - `z` has a much tighter real-world prior than `x` or `y`: in a typical house, floor surfaces are at discrete, known heights with small spread, whereas `x` and `y` range freely across the floor plate.
-- That restricted domain makes `z` easier to resolve with confidence, not harder.
+- That restricted domain makes `z` a strong floor evidence term.
 
-The correct pipeline is therefore: resolve `z` first to confirm floor, then constrain `x/y` to that floor for room assignment.
+However, `z` from Stage 1 is **evidence, not a pre-confirmation**. It is fed into Stage 4 as the
+highest-weight geometry-derived floor hint. The reachability gate in Stage 3 still runs before
+any floor evidence is resolved. A bad `z` estimate under poor geometry must not be able to bypass
+the topology constraint.
 
 Outputs:
 
@@ -283,9 +297,13 @@ This stage should not decide floor changes by itself.
 
 Independently of room assignment, evaluate:
 
-- which transition zones are near the current estimate,
+- which transition zones are near the **challenger reference position** (frozen at challenger onset),
 - which transition zones were near the device recently,
 - whether the current evidence supports actual proximity to any transition zone.
+
+The proximity check must use the challenger reference position, not the live position estimate.
+The live estimate degrades during the same conditions that trigger a bad floor challenger. Using
+it for proximity evaluation would pollute the gate with the geometry it is meant to guard against.
 
 This stage must be position-based, not room-context-based.
 
@@ -355,15 +373,22 @@ This is intentionally different from the current ordering.
 
 The transition gate should not behave the same in every situation.
 
-Recommended rule:
+The gate applies **per `(from_floor_id, to_floor_id)` pair**, not per layout. Real installations
+will have partial topology coverage — some floor pairs will have zones configured and others will
+not.
 
-- if no transition zones are configured for the current layout, fall back to existing soft floor behavior
-- if transition zones are configured and a challenger floor is unreachable, block challenger advancement
+Recommended rule per challenger pair:
 
-For the first rollout, this should be a binary gate:
+- if no zone covers this specific `(from_floor, to_floor)` pair, fall back to existing soft floor behavior for that transition only,
+- if at least one zone covers this pair and the challenger is unreachable, block challenger advancement.
 
-- hard when the transition is impossible,
-- absent when no transition zones are configured.
+A zone covering `ground_floor → street_level` implies nothing about `ground_floor → top_floor`.
+Each pair is evaluated independently.
+
+For the first rollout, each pair's gate is binary:
+
+- hard when the pair has zones configured and the transition is unreachable,
+- absent when no zones cover the pair.
 
 A graded "near-hard" or probabilistic middle state can be considered later if replay traces show the binary version is too blunt.
 
@@ -413,14 +438,23 @@ This design directly targets the known failures:
 
 ## Minimal Rollout Strategy
 
-This design should be introduced conservatively:
+This design should be introduced conservatively, with the topology gate validated before any
+geometry improvements are introduced.
 
 1. Add exact switch-time diagnostics for floor-switch preconditions and reachability decisions.
 2. Add challenger reference position capture from the last confident pre-challenge state.
-3. Implement transition-zone proximity and recent-transition memory without changing assignment.
-4. Add a binary reachability gate behind a feature flag.
-5. Replay the known failure traces.
-6. Only then simplify or remove older veto machinery.
+3. Define `TransitionZone` data model and store. Populate from existing transition sample
+   recordings. No gate logic yet.
+4. Implement transition-zone proximity inference using the challenger reference position
+   (not the live estimate). No assignment change yet.
+5. Add a binary reachability gate behind a feature flag.
+6. Replay the known failure traces against the gate only.
+7. Only after the gate is validated: introduce geometry improvements (per-floor Z config,
+   phone-height band prior, full 3D solve, X/Y envelope constraints).
+8. Only then simplify or remove older veto machinery.
+
+This order keeps the first hypothesis — "the topology gate blocks the known impossible
+transitions" — testable in isolation, without coupling it to a simultaneous geometry rewrite.
 
 This keeps regression risk controlled.
 

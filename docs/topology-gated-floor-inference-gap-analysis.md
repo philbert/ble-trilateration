@@ -8,7 +8,7 @@ described in `topology-gated-floor-inference-design.md` and identifies what need
 | Area | Current State | Target State | Gap Size |
 |---|---|---|---|
 | Geometry solve dimensionality | 2D when cross-floor anchors present | Always full 3D with all scanners | Medium |
-| Z resolution order | Z derived after XY, same-floor only | Z resolved first, all scanners | Medium |
+| Z as floor evidence | Z unused as floor signal, derived after XY from same-floor only | Z from full 3D solve fed into Stage 4 as geometry-derived floor hint | Medium |
 | Per-floor Z config | Not in config flow | `floor_z_m` per HA floor | Small |
 | Phone-height Z prior | None | `[floor_z, floor_z + 1.2]` band per floor | Small |
 | Per-floor X/Y envelope | None | Radius-expanded bounding box from samples | Small |
@@ -58,16 +58,22 @@ to the floor decision — only as an output.
 
 **Target**:
 
-Z is the most important coordinate. It should be resolved first using all available scanners.
-The result — constrained by the per-floor Z prior — determines the floor with high confidence,
-which then constrains XY for room assignment.
+Z is the most structurally informative coordinate and should be fed into Stage 4 (Floor Evidence
+Fusion) as the highest-weight geometry-derived hint. However, Z from Stage 1 is **evidence, not
+a pre-confirmation**. The reachability gate (Stage 3) still runs before floor evidence is
+resolved. A bad Z estimate under poor geometry must not bypass the topology constraint.
+
+The per-floor Z prior (phone-height band) tightens the Z estimate and sharpens its value as
+floor evidence, but the floor decision remains gated by topology first.
 
 **What needs to change**:
 
-- Invert the pipeline: solve Z first from the full 3D solve, apply the per-floor Z prior (see
-  section 4), assign floor from the resulting Z band, then constrain XY to that floor's envelope.
-- This replaces the RSSI-evidence-based floor selection as the primary floor signal. RSSI floor
-  evidence becomes a secondary check (Stage 4 in the design document).
+- Feed the full 3D solve's Z output into Stage 4 as a geometry-derived floor hint, weighted by
+  solve quality.
+- Apply the per-floor Z prior as a `SolvePrior3D` input to Stage 1, not as a post-hoc floor
+  selector.
+- Remove the pattern of RSSI floor selection gating which anchors are included in the solve.
+  All anchors participate in the solve; topology gates the floor decision.
 
 ---
 
@@ -185,8 +191,15 @@ Before a challenger floor can advance, a reachability gate must pass:
 4. If `distance(challenger_reference_position, nearest_zone) > reachable_budget`: block the
    challenger from advancing regardless of RSSI or dwell.
 
-This is a hard gate when transition zones are configured; it degrades gracefully to the existing
-soft behaviour when no transition zones are configured.
+The gate applies **per `(from_floor_id, to_floor_id)` pair**, not per layout. Partial topology
+coverage is the common case:
+
+- if no zone covers this specific pair, fall back to soft behaviour for that transition only,
+- if at least one zone covers the pair, apply the hard gate for that pair.
+
+A zone covering `ground_floor → street_level` implies nothing about `ground_floor → top_floor`.
+Each pair is evaluated independently. This prevents the gate from either over-blocking uncovered
+transitions or being silently bypassed where it matters most.
 
 **What needs to change**:
 
@@ -313,38 +326,45 @@ at 3m for first rollout).
 
 ## Implementation Order
 
-The gaps are ordered by dependency. Lower-numbered items are prerequisites for higher-numbered ones.
+The phases below are sequenced so the topology gate — the core hypothesis — is validated in
+isolation before the geometry rewrite is introduced. Coupling both changes in the first slice
+would make it impossible to know which one fixed or broke any given failure.
 
-### Phase 1 — Foundation (no behaviour change)
+### Phase 1 — Topology gate (minimal slice)
 
-1. **Per-floor Z config** (gap 3): Add config flow step, persist `floor_z_m` per floor.
-2. **Challenger reference position** (gap 8): Add field to `TrilatDecisionState`, set on
+1. **Challenger reference position** (gap 8): Add field to `TrilatDecisionState`, set on
    challenger onset. No gate logic yet — just capture.
-3. **Motion budget tracking** (gap 9): Add accumulation alongside challenger state. No gate yet.
-4. **TransitionZone data model** (gap 7, partial): Define `TransitionZone` class and store.
-   Migrate existing transition sample recording to populate zones. No change to gate logic yet.
+2. **Motion budget tracking** (gap 9): Add accumulation alongside challenger state. No gate yet.
+3. **TransitionZone data model** (gap 7, partial): Define `TransitionZone` class with per-capture
+   geometry (union model, no centroiding) and `(from_floor_id, to_floor_id)` pairs. Add store.
+   Migrate existing transition sample recordings to populate zones. No gate logic yet.
+4. **Transition-zone proximity inference**: Evaluate proximity using challenger reference
+   position, not the live estimate. Log proximity decisions as diagnostics only.
+5. **Reachability gate** (gap 6): Implement `ReachabilityGate` per `(from_floor, to_floor)` pair.
+   Wire into floor challenger protocol behind a feature flag. Partial topology coverage falls back
+   per-pair to soft behaviour.
+6. **Replay validation**: Test against known failure traces (`Guest Room → Garage front`,
+   `Ana's Office → Garage front`). Gate must block both before proceeding.
 
 ### Phase 2 — Geometry improvements
 
-5. **Phone-height Z prior** (gap 4): Inject `SolvePrior3D` per floor once `floor_z_m` is
-   available. Low risk — uses existing prior infrastructure.
-6. **Full 3D solve with all scanners** (gap 1 + gap 2): Remove the `can_solve_3d` cross-floor
+7. **Per-floor Z config** (gap 3): Add config flow step, persist `floor_z_m` per floor.
+8. **Phone-height Z prior** (gap 4): Inject `SolvePrior3D` per floor. Feed Z output into Stage 4
+   as geometry-derived floor evidence (not a pre-confirmation).
+9. **Full 3D solve with all scanners** (gap 1 + gap 2): Remove the `can_solve_3d` cross-floor
    restriction. Always solve 3D. Validate on replay traces before enabling by default.
-7. **Per-floor X/Y envelope** (gap 5): Compute `FloorEnvelope` from calibration samples +
-   scanner anchors. Apply as soft prior in XY solve.
+10. **Per-floor X/Y envelope** (gap 5): Compute `FloorEnvelope` from calibration samples +
+    scanner anchors. Apply as soft prior in XY solve.
 
-### Phase 3 — Topology gate
+### Phase 3 — Signal priority reorder
 
-8. **Reachability gate** (gap 6): Implement `ReachabilityGate` using challenger reference
-   position, motion budget, and `TransitionZone` store. Wire into floor challenger protocol
-   behind a feature flag.
-9. **Signal priority reorder** (gap 10): Restructure floor inference block so topology gate
-   runs first, fingerprints become primary evidence, RSSI secondary, Z-derived hint tertiary.
-   Only after phase 3 gate is validated on replay traces.
+11. **Signal priority reorder** (gap 10): Restructure floor inference block so topology gate
+    runs first, fingerprints become primary evidence among reachable floors, RSSI secondary,
+    Z-derived hint tertiary. Only after phase 1 gate and phase 2 geometry are validated.
 
 ### Phase 4 — Cleanup
 
-10. Remove or demote the older fingerprint veto and transition-support dwell-reduction machinery
+12. Remove or demote the older fingerprint veto and transition-support dwell-reduction machinery
     once the topology gate provides equivalent coverage more cleanly.
 
 ---
