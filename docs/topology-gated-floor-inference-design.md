@@ -119,6 +119,43 @@ So:
 - transition zones are not ordinary room calibration samples,
 - but they should still preserve calibration-like evidence because that helps detect proximity robustly.
 
+## Per-Floor Z Configuration
+
+Users should declare the floor surface Z height for each Home Assistant floor during config flow.
+
+This is a minimal config ask with disproportionate value. The user already knows where their floors are; they just need to provide the Z coordinate in Bermuda's coordinate system.
+
+Each floor should accept either:
+
+- a fixed `floor_z_m` value for flat indoor floors,
+- or a `floor_z_min_m` / `floor_z_max_m` range for floors with natural Z variation (outdoor areas, slopes, split entries).
+
+Street level is the most common case for the variable range, since it may include outdoor or sloped areas.
+
+### Phone-Height Band
+
+From `floor_z_m`, Bermuda derives a **phone-height band** automatically:
+
+```
+phone_band = [floor_z_m, floor_z_m + 1.2]
+```
+
+This is grounded in physical reality: a device spends the overwhelming majority of its time between the floor surface and approximately 1.2m above it (pocket, table, or hand height). The range from 1.2m up to the ceiling is rarely occupied.
+
+This band becomes a strong prior for `z` during trilateration and for floor evidence fusion.
+
+### Floor Discrimination
+
+In a multi-storey house the phone-height bands for adjacent floors are separated by the structural gap between ceiling and the floor above. In practice this gap is typically 1.0m or more, which is larger than normal BLE ranging noise. Clean band separation means `z` alone can often discriminate the floor without relying on fingerprint evidence.
+
+For example, in a four-floor house (basement, street level, ground floor, top floor) with ~2.2m floor-to-floor heights, the bands would have no overlap and a meaningful gap between each pair.
+
+### Implications for the Pipeline
+
+- **Stage 1**: use per-floor Z bands as a bounded prior when solving for `z`.
+- **Stage 3**: floor surface Z tightens the geometry used to evaluate reachability budget.
+- **Transition zones**: user-declared floor Z makes it straightforward to assign Z coordinates to transition zones without ambiguity.
+
 ## Minimal Geometry Model
 
 The geometry does not need to be sophisticated.
@@ -192,7 +229,17 @@ This is still a small state machine. It does not require a full smoother or fact
 
 ### Stage 1: Geometry Solve
 
-Run the best available solve using the current trilateration pipeline.
+Run a full 3D Cartesian solve using **all available scanners regardless of floor**.
+
+There is no physical justification for excluding cross-floor scanners from the solve. BLE signal propagation through a floor slab is not categorically different from propagation through a wall. Restricting the solve to same-floor scanners discards real distance information and does not improve accuracy.
+
+`z` should be treated as the most important coordinate to resolve first:
+
+- `z` determines which floor the device is on, which in turn constrains `x/y` and room assignment.
+- `z` has a much tighter real-world prior than `x` or `y`: in a typical house, floor surfaces are at discrete, known heights with small spread, whereas `x` and `y` range freely across the floor plate.
+- That restricted domain makes `z` easier to resolve with confidence, not harder.
+
+The correct pipeline is therefore: resolve `z` first to confirm floor, then constrain `x/y` to that floor for room assignment.
 
 Outputs:
 
@@ -361,6 +408,7 @@ These should be answered before implementation:
 4. What is the physically reasonable uncertainty cap for transition reachability in this layout?
 5. Should room assignment remain floor-scoped initially, or should floor-soft room evidence already be introduced at the same time?
 6. How should the user experience look when no transition zones are configured for a layout?
+7. Per-floor Z configuration should be collected in the config flow alongside or immediately after transition zone setup. Each HA floor should prompt for a floor surface Z (fixed or range). This is a prerequisite for the phone-height band prior and for well-grounded transition zone placement.
 
 ## Recommended Next Review
 
