@@ -119,6 +119,35 @@ So:
 - transition zones are not ordinary room calibration samples,
 - but they should still preserve calibration-like evidence because that helps detect proximity robustly.
 
+## Per-Floor X/Y Envelope Constraints
+
+Once `z` is resolved with high confidence and a floor is confirmed, the X/Y solve should be constrained to the physical footprint of that floor.
+
+A device on a confirmed floor cannot be outside the footprint of that floor. Applying this as a constraint after floor confirmation significantly tightens room assignment.
+
+### Deriving the Envelope
+
+The floor envelope is derived from calibration samples on that floor:
+
+- for each sample, expand outward by its `sample_radius_m` in all directions,
+- take the bounding box (or convex hull) of the expanded points.
+
+This accounts for the fact that a sample centroid represents a zone, not a point. A device at the edge of a sample's radius is still legitimately on that floor.
+
+Scanner anchor positions on the floor can supplement the envelope, particularly for floors that have no calibration samples yet. This gives a useful footprint estimate before any calibration has been collected.
+
+### Street Level Exception
+
+Street level should be treated as unbounded in X/Y. It may include outdoor areas, slopes, or large open spaces where no meaningful bounding box applies. Either the user marks it explicitly as unbounded in config, or Bermuda infers it from the large spread of its samples.
+
+### Soft vs Hard Clamping
+
+A device confirmed on a floor can legitimately be near the floor boundary. Hard-clipping the solve at the envelope edge risks biasing positions of devices genuinely near walls or windows. Soft clamping — penalising positions outside the envelope rather than rejecting them outright — is preferable.
+
+### Envelope Growth
+
+The envelope is derived from available samples and grows as more calibration is collected. A sparse floor will have a conservative (potentially too small) envelope. The sample radius expansion partially compensates for this, but users should be aware that uncalibrated areas of a floor are not yet constrained.
+
 ## Per-Floor Z Configuration
 
 Users should declare the floor surface Z height for each Home Assistant floor during config flow.
