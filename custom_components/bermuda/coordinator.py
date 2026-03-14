@@ -1724,7 +1724,12 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         recent_transition_floor_ids: tuple[str, ...] = ()
         recent_transition_support_01: float = 0.0
         recent_transition_seen_at: float = 0.0
-        # Challenger reference position (frozen at challenger onset)
+        # Last known position recorded while geometry quality was acceptable (updated every cycle).
+        # Used as the challenger reference — more reliable than the position at challenger onset,
+        # which may already be degraded by the time the challenger appears.
+        last_good_position: tuple[float, float, float] | None = None
+        last_good_position_at: float = 0.0
+        # Challenger reference position (frozen from last_good_position at challenger onset)
         challenger_reference_position: tuple[float, float, float] | None = None
         challenger_onset_time: float = 0.0
         challenger_motion_budget_m: float = 0.0
@@ -2399,6 +2404,9 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         """Track zone entry/exit for background traversal detection. High-quality solves only."""
         if geometry_quality_01 < self._CHALLENGER_REFERENCE_QUALITY_THRESHOLD:
             return
+        # Update last known good position — used as challenger reference, not the onset position
+        state.last_good_position = (x_m, y_m, z_m)
+        state.last_good_position_at = nowstamp
         for zone in self._transition_zone_store.zones:
             if zone.anchor_layout_hash != layout_hash:
                 continue
@@ -2914,14 +2922,14 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                     state.challenger_fingerprint_hold_since = 0.0
                     state.challenger_fingerprint_hold_total_s = 0.0
                     state.challenger_fingerprint_hold_expired = False
-                    # Capture reference position for reachability gate
+                    # Use last known good position as reference — more reliable than the
+                    # current position at challenger onset, which may already be degraded.
+                    # Only use it if it was recorded recently (within 2x the traversal window).
                     if (
-                        device.trilat_x_m is not None
-                        and device.trilat_y_m is not None
-                        and device.trilat_z_m is not None
-                        and device.trilat_geometry_quality >= self._CHALLENGER_REFERENCE_QUALITY_THRESHOLD
+                        state.last_good_position is not None
+                        and (nowstamp - state.last_good_position_at) < self._ZONE_TRAVERSAL_RECENCY_S * 2
                     ):
-                        state.challenger_reference_position = (device.trilat_x_m, device.trilat_y_m, device.trilat_z_m)
+                        state.challenger_reference_position = state.last_good_position
                     else:
                         state.challenger_reference_position = None
                     state.challenger_onset_time = nowstamp
