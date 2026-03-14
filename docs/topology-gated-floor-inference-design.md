@@ -255,22 +255,17 @@ The gate is pair-based, which assumes a trustworthy `from_floor`. At startup, af
 absence, or after a tracking failure, the stable floor may be `None`, stale, or already wrong.
 A strict gate in that state can trap the estimator indefinitely on an incorrect floor.
 
-Explicit rule:
+Unified rule:
 
-- if `floor_id is None`: bypass the gate entirely, allow evidence competition to establish
-  an initial floor assignment,
-- if `floor_id` was last set under low confidence and has not been re-confirmed since: treat it
-  as untrustworthy, apply no gate, allow evidence to override it freely,
-- once a floor is established with sufficient confidence and confirmed by the topology gate at
-  least once, the gate becomes active for subsequent challengers.
-
-A `floor_confidence` field on the device state should encode this. The gate checks it before
-evaluating any `(from_floor, to_floor)` pair.
-
-When no transition zones are configured for a given pair, floor confidence is established
-through fingerprint and RSSI evidence agreement alone, using the same convergence criteria that
-currently govern the first floor assignment. Topology-backed confirmation is not required to
-raise confidence when topology coverage does not exist for that pair.
+- `floor_confidence` is high enough to activate the gate when **either** of the following is true:
+  - a floor transition was confirmed by the topology gate (zone coverage exists for the pair and
+    the gate passed), **or**
+  - fingerprint and RSSI evidence have converged above the existing threshold for that floor,
+    for pairs where no zone coverage exists.
+- Both paths produce the same `floor_confidence` state. The gate then applies for all subsequent
+  challengers regardless of which path established it.
+- If `floor_id is None` or `floor_confidence` is below the activation threshold: bypass the
+  gate entirely, allow evidence competition to run freely.
 
 ## Background Transition Proximity Tracker
 
@@ -282,14 +277,21 @@ reference position will be far from the zone and the gate will incorrectly block
 To handle this, a lightweight background tracker should continuously record transition-zone
 proximity using only high-quality live solves, independent of any active challenger:
 
-- each update cycle, if solve quality is above a threshold and the current position is within
-  a zone's union envelope, record the proximity timestamp and zone ID,
-- when a challenger forms, the reachability gate checks both the budget-based distance test
-  **and** whether the background tracker recorded a recent proximity to a zone that covers the
-  specific `(from_floor, to_floor)` pair being challenged, within a configurable recency window
-  (default 30 seconds),
-- only a proximity to a zone compatible with the active challenger pair overrides the gate —
-  proximity to an unrelated zone does not.
+- each update cycle, if solve quality is above a threshold, record whether the current position
+  is inside or outside each zone's union envelope,
+- track zone entry and zone exit per zone ID: a **traversal** is recorded when the device enters
+  a zone's envelope and subsequently exits it,
+- proximity alone (entering but not yet exiting) is not sufficient — a device can be near a
+  staircase or doorway while remaining on the same floor.
+
+When a challenger forms, the reachability gate uses the background traversal history as follows:
+
+- if a traversal of a zone covering the active `(from_floor, to_floor)` pair was recorded within
+  a configurable recency window (default 30 seconds), the gate treats the transition as
+  topologically plausible — the distance budget test is applied from the zone's position rather
+  than the challenger reference position,
+- if only proximity (entry, no exit) was recorded, the gate is not relaxed,
+- traversals of zones covering other pairs have no effect.
 
 This is the mechanism that allows legitimate transitions to succeed even when the challenger
 forms a few seconds after the zone traversal.
@@ -306,8 +308,7 @@ For each tracked device, the floor estimator should track:
 - recent position/velocity history,
 - current challenger floor,
 - challenger start time,
-- most recent credible transition-zone proximity (from background tracker),
-- last transition zone that was plausibly traversed,
+- per-zone traversal history: entry and exit timestamps keyed by zone ID (not a single global slot),
 - uncertainty bounds on recent position.
 
 This is still a small state machine. It does not require a full smoother or factor graph.

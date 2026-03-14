@@ -354,14 +354,18 @@ estimator on an incorrect floor indefinitely.
 **Target**:
 
 When `from_floor` is unknown, missing, or flagged as low-confidence, the gate must not block
-floor assignment. The correct behaviour is:
+floor assignment.
 
-- if `state.floor_id is None`: bypass the gate entirely, allow normal floor evidence competition
-  to establish an initial floor,
-- if `state.floor_id` was set under low confidence and has not been re-confirmed: treat it as
-  untrustworthy, apply no gate, allow evidence to override it freely,
-- once a floor is established with sufficient confidence and confirmed by the topology gate at
-  least once, the gate becomes active for subsequent challengers.
+Unified `floor_confidence` rule: confidence is high enough to activate the gate when **either**:
+
+- a floor transition was confirmed by the topology gate (zone coverage exists for the pair and
+  the gate passed), **or**
+- fingerprint and RSSI evidence have converged above the existing threshold, for pairs where no
+  zone coverage is configured.
+
+Both paths produce the same `floor_confidence` state. The gate applies for all subsequent
+challengers regardless of which path established it. If `floor_id is None` or confidence is
+below the activation threshold, the gate is bypassed entirely.
 
 **What needs to change**:
 
@@ -370,9 +374,6 @@ floor assignment. The correct behaviour is:
 - The reachability gate checks `floor_confidence` before evaluating the `(from_floor, to_floor)`
   pair. Below a configurable threshold the gate is bypassed for that cycle.
 - This prevents the gate from cementing an already-wrong floor into place at startup or recovery.
-- When no zones are configured for a given pair, `floor_confidence` is established through
-  fingerprint and RSSI agreement alone using the existing convergence criteria. Topology-backed
-  confirmation is not required for uncovered pairs.
 
 ---
 
@@ -388,29 +389,30 @@ a transition that already occurred.
 
 **Target**:
 
-A lightweight background tracker should continuously record transition-zone proximity using only
-high-quality live solves (not challenger-period estimates). This populates a
-`last_zone_proximity_at: float` timestamp and `last_zone_id: str` for each device, independent
-of any active challenger.
+A lightweight background tracker should continuously record zone entry and exit events using only
+high-quality live solves, independent of any active challenger. Proximity alone (entering a
+zone's envelope) is not sufficient — a device can be near a staircase while remaining on the
+same floor. A **traversal** requires zone entry followed by zone exit.
 
-When a challenger appears, the reachability gate checks not only the distance from the challenger
-reference position, but also whether the background tracker recorded a recent proximity to a zone
-that covers the specific `(from_floor, to_floor)` pair being challenged, within a configurable
-recency window (e.g. 30 seconds). Only a proximity to a compatible zone overrides the gate —
-proximity to an unrelated zone does not.
+When a challenger appears, the reachability gate checks the background traversal history:
+
+- if a traversal of a zone covering the active `(from_floor, to_floor)` pair was recorded within
+  a configurable recency window (default 30 seconds), the gate applies the distance budget test
+  from the zone's position rather than the challenger reference position,
+- if only zone entry (no exit) was recorded, the gate is not relaxed,
+- traversals of zones covering other pairs have no effect.
 
 This is the mechanism that allows legitimate transitions to succeed even when the challenger
-forms a few seconds after the device has already passed the zone.
+forms a few seconds after the zone traversal.
 
 **What needs to change**:
 
-- Add `last_zone_proximity_at: float | None` and `last_zone_id: str | None` to
-  `TrilatDecisionState`.
-- Each update cycle, if solve quality is above a threshold and the current position is within
-  a zone's union envelope, record the proximity timestamp.
-- In the reachability gate, check the recency of background proximity alongside the budget
-  calculation. Only proximity to a zone covering the active `(from_floor, to_floor)` pair
-  overrides the gate. Proximity to a different pair's zone has no effect.
+- Replace single `last_zone_proximity_at` / `last_zone_id` with a per-zone traversal history:
+  `zone_traversal_history: dict[zone_id, (entry_at, exit_at)]`, keyed by zone ID.
+- Each update cycle, track zone entry (position inside union envelope) and exit (position outside)
+  per zone. Record a completed traversal when exit follows entry.
+- In the reachability gate, check for a recent completed traversal of a zone covering the active
+  `(from_floor, to_floor)` pair. If found, shift the distance anchor to that zone's position.
 - The recency window should be configurable and default conservatively (e.g. 30s).
 
 ---
@@ -428,12 +430,12 @@ would make it impossible to know which one fixed or broke any given failure.
 2. **Motion budget tracking** (gap 9): Add accumulation alongside challenger state. No gate yet.
 3. **Floor confidence tracking** (gap 11): Add `floor_confidence` field to `TrilatDecisionState`.
    Gate bypasses when confidence is below threshold or floor is `None`.
-4. **Background transition proximity tracker** (gap 12): Each update cycle, record proximity to
-   transition zones using high-quality live solves. Store `last_zone_proximity_at` and
-   `last_zone_id` per device. No gate logic yet.
-5. **TransitionZone data model** (gap 7, partial): Define `TransitionZone` class with per-capture
+4. **TransitionZone data model** (gap 7, partial): Define `TransitionZone` class with per-capture
    geometry (union model, no centroiding) and `(from_floor_id, to_floor_id)` pairs. Add store.
    Migrate existing transition sample recordings to populate zones. No gate logic yet.
+5. **Background transition proximity tracker** (gap 12): Each update cycle, record proximity to
+   transition zones using high-quality live solves. Tracker depends on the zone model from step 4.
+   Store per-zone proximity history keyed by zone ID. No gate logic yet.
 6. **Transition-zone proximity inference**: Evaluate proximity using challenger reference
    position, not the live estimate. Log proximity decisions as diagnostics only.
 7. **Reachability gate** (gap 6): Implement `ReachabilityGate` per `(from_floor, to_floor)` pair.
