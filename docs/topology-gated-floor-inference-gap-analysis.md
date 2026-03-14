@@ -396,14 +396,20 @@ same floor. A **traversal** requires zone entry followed by zone exit.
 
 When a challenger appears, the reachability gate checks the background traversal history:
 
-- if a traversal of a zone covering the active `(from_floor, to_floor)` pair was recorded within
-  a configurable recency window (default 30 seconds), the gate applies the distance budget test
-  from the zone's position rather than the challenger reference position,
-- if only zone entry (no exit) was recorded, the gate is not relaxed,
+- if a completed traversal (entry then exit) of a zone covering the active `(from_floor,
+  to_floor)` pair was recorded within a configurable recency window (default 30 seconds), the
+  gate transitions from **blocked** to **eligible** — the hard block is removed,
+- traversal does not itself constitute evidence of destination-floor arrival; the challenger must
+  still win normal evidence competition (fingerprints, RSSI, Z) to advance,
+- if only zone entry (no exit) was recorded, the hard block remains,
 - traversals of zones covering other pairs have no effect.
 
-This is the mechanism that allows legitimate transitions to succeed even when the challenger
-forms a few seconds after the zone traversal.
+A device that enters a stairwell and returns without changing floors will not trigger a floor
+change because evidence will continue to favour the source floor. The gate removal is necessary
+but not sufficient for a floor switch.
+
+For a future iteration, a directional Z change after zone exit can corroborate genuine traversals.
+This is deferred until the binary traversal gate is validated on replay traces.
 
 **What needs to change**:
 
@@ -411,8 +417,8 @@ forms a few seconds after the zone traversal.
   `zone_traversal_history: dict[zone_id, (entry_at, exit_at)]`, keyed by zone ID.
 - Each update cycle, track zone entry (position inside union envelope) and exit (position outside)
   per zone. Record a completed traversal when exit follows entry.
-- In the reachability gate, check for a recent completed traversal of a zone covering the active
-  `(from_floor, to_floor)` pair. If found, shift the distance anchor to that zone's position.
+- In the reachability gate, check for a recent completed traversal of a compatible zone.
+  If found, remove the hard block; do not shift the distance anchor or grant plausibility.
 - The recency window should be configurable and default conservatively (e.g. 30s).
 
 ---
@@ -433,15 +439,17 @@ would make it impossible to know which one fixed or broke any given failure.
 4. **TransitionZone data model** (gap 7, partial): Define `TransitionZone` class with per-capture
    geometry (union model, no centroiding) and `(from_floor_id, to_floor_id)` pairs. Add store.
    Migrate existing transition sample recordings to populate zones. No gate logic yet.
-5. **Background transition proximity tracker** (gap 12): Each update cycle, record proximity to
-   transition zones using high-quality live solves. Tracker depends on the zone model from step 4.
-   Store per-zone proximity history keyed by zone ID. No gate logic yet.
+5. **Background traversal tracker** (gap 12): Each update cycle, record zone entry and exit
+   events per zone using high-quality live solves. Tracker depends on the zone model from step 4.
+   Store per-zone traversal history `(entry_at, exit_at)` keyed by zone ID. A completed traversal
+   is entry followed by exit — proximity alone is not recorded. No gate logic yet.
 6. **Transition-zone proximity inference**: Evaluate proximity using challenger reference
    position, not the live estimate. Log proximity decisions as diagnostics only.
 7. **Reachability gate** (gap 6): Implement `ReachabilityGate` per `(from_floor, to_floor)` pair.
-   Gate checks both budget distance and recent background proximity (recency window).
-   Wire into floor challenger protocol behind a feature flag. Partial topology coverage falls back
-   per-pair to soft behaviour. Unknown/low-confidence `from_floor` bypasses the gate.
+   Gate blocks unless: budget distance passes, OR a recent compatible traversal (not proximity)
+   is recorded within the recency window. Traversal removes the hard block only — evidence
+   competition still applies. Wire behind a feature flag. Partial coverage falls back per-pair.
+   Unknown/low-confidence `from_floor` bypasses the gate.
 8. **Replay validation**: Test against known failure traces (`Guest Room → Garage front`,
    `Ana's Office → Garage front`). Gate must block both before proceeding.
 

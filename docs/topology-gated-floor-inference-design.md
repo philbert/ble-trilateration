@@ -287,11 +287,21 @@ proximity using only high-quality live solves, independent of any active challen
 When a challenger forms, the reachability gate uses the background traversal history as follows:
 
 - if a traversal of a zone covering the active `(from_floor, to_floor)` pair was recorded within
-  a configurable recency window (default 30 seconds), the gate treats the transition as
-  topologically plausible — the distance budget test is applied from the zone's position rather
-  than the challenger reference position,
-- if only proximity (entry, no exit) was recorded, the gate is not relaxed,
+  a configurable recency window (default 30 seconds), the gate transitions from **blocked** to
+  **eligible** — the hard block is removed and normal evidence competition is allowed,
+- traversal does not itself constitute evidence that the destination floor was reached; the
+  challenger must still win the evidence competition (fingerprints, RSSI, Z) to advance,
+- if only zone entry (no exit) was recorded, the hard block remains,
 - traversals of zones covering other pairs have no effect.
+
+A traversal that is followed by the device returning to the source floor (e.g. entering a
+stairwell and turning around) will not produce a floor change because the evidence competition
+will continue to favour the source floor. The gate's job is only to remove an unjustified hard
+block, not to grant destination plausibility directly.
+
+For a later iteration, a directional Z change after zone exit can be added as a corroborating
+signal to distinguish genuine traversals from zone-entry-and-return events. This is deferred
+until the binary traversal gate is validated on replay traces.
 
 This is the mechanism that allows legitimate transitions to succeed even when the challenger
 forms a few seconds after the zone traversal.
