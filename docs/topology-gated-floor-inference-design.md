@@ -267,6 +267,11 @@ Explicit rule:
 A `floor_confidence` field on the device state should encode this. The gate checks it before
 evaluating any `(from_floor, to_floor)` pair.
 
+When no transition zones are configured for a given pair, floor confidence is established
+through fingerprint and RSSI evidence agreement alone, using the same convergence criteria that
+currently govern the first floor assignment. Topology-backed confirmation is not required to
+raise confidence when topology coverage does not exist for that pair.
+
 ## Background Transition Proximity Tracker
 
 The challenger reference position anchors the reachability gate at the onset of a challenge.
@@ -280,9 +285,11 @@ proximity using only high-quality live solves, independent of any active challen
 - each update cycle, if solve quality is above a threshold and the current position is within
   a zone's union envelope, record the proximity timestamp and zone ID,
 - when a challenger forms, the reachability gate checks both the budget-based distance test
-  **and** whether a recent background proximity was recorded within a configurable recency
-  window (default 30 seconds),
-- recent background proximity overrides an otherwise-blocked gate.
+  **and** whether the background tracker recorded a recent proximity to a zone that covers the
+  specific `(from_floor, to_floor)` pair being challenged, within a configurable recency window
+  (default 30 seconds),
+- only a proximity to a zone compatible with the active challenger pair overrides the gate —
+  proximity to an unrelated zone does not.
 
 This is the mechanism that allows legitimate transitions to succeed even when the challenger
 forms a few seconds after the zone traversal.
@@ -358,9 +365,10 @@ This stage should be able to succeed even if room assignment is lagging.
 
 Given:
 
-- current and recent position estimates,
-- recent motion budget,
-- nearest valid transition zone for a challenger floor,
+- the **challenger reference position** (frozen at challenger onset, not the live estimate),
+- the accumulated motion budget since challenger onset,
+- the background tracker's most recent proximity record for this `(from_floor, to_floor)` pair,
+- the nearest valid transition zone covering this floor pair,
 
 decide whether that challenger floor is reachable or unreachable.
 

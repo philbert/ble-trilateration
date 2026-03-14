@@ -370,6 +370,9 @@ floor assignment. The correct behaviour is:
 - The reachability gate checks `floor_confidence` before evaluating the `(from_floor, to_floor)`
   pair. Below a configurable threshold the gate is bypassed for that cycle.
 - This prevents the gate from cementing an already-wrong floor into place at startup or recovery.
+- When no zones are configured for a given pair, `floor_confidence` is established through
+  fingerprint and RSSI agreement alone using the existing convergence criteria. Topology-backed
+  confirmation is not required for uncovered pairs.
 
 ---
 
@@ -391,9 +394,10 @@ high-quality live solves (not challenger-period estimates). This populates a
 of any active challenger.
 
 When a challenger appears, the reachability gate checks not only the distance from the challenger
-reference position, but also whether the background tracker recorded a recent zone traversal
-within a configurable recency window (e.g. 30 seconds). If so, the gate treats the transition as
-plausible regardless of the current budget calculation.
+reference position, but also whether the background tracker recorded a recent proximity to a zone
+that covers the specific `(from_floor, to_floor)` pair being challenged, within a configurable
+recency window (e.g. 30 seconds). Only a proximity to a compatible zone overrides the gate —
+proximity to an unrelated zone does not.
 
 This is the mechanism that allows legitimate transitions to succeed even when the challenger
 forms a few seconds after the device has already passed the zone.
@@ -404,8 +408,9 @@ forms a few seconds after the device has already passed the zone.
   `TrilatDecisionState`.
 - Each update cycle, if solve quality is above a threshold and the current position is within
   a zone's union envelope, record the proximity timestamp.
-- In the reachability gate, check the recency of background proximity alongside the
-  budget calculation. Recent background proximity overrides an otherwise-blocked gate.
+- In the reachability gate, check the recency of background proximity alongside the budget
+  calculation. Only proximity to a zone covering the active `(from_floor, to_floor)` pair
+  overrides the gate. Proximity to a different pair's zone has no effect.
 - The recency window should be configurable and default conservatively (e.g. 30s).
 
 ---
@@ -440,23 +445,23 @@ would make it impossible to know which one fixed or broke any given failure.
 
 ### Phase 2 — Geometry improvements
 
-7. **Per-floor Z config** (gap 3): Add config flow step, persist `floor_z_m` per floor.
-8. **Phone-height Z prior** (gap 4): Inject `SolvePrior3D` per floor. Feed Z output into Stage 4
-   as geometry-derived floor evidence (not a pre-confirmation).
-9. **Full 3D solve with all scanners** (gap 1 + gap 2): Remove the `can_solve_3d` cross-floor
-   restriction. Always solve 3D. Validate on replay traces before enabling by default.
-10. **Per-floor X/Y envelope** (gap 5): Compute `FloorEnvelope` from calibration samples +
+9. **Per-floor Z config** (gap 3): Add config flow step, persist `floor_z_m` per floor.
+10. **Phone-height Z prior** (gap 4): Inject `SolvePrior3D` per floor. Feed Z output into Stage 4
+    as geometry-derived floor evidence (not a pre-confirmation).
+11. **Full 3D solve with all scanners** (gap 1 + gap 2): Remove the `can_solve_3d` cross-floor
+    restriction. Always solve 3D. Validate on replay traces before enabling by default.
+12. **Per-floor X/Y envelope** (gap 5): Compute `FloorEnvelope` from calibration samples +
     scanner anchors. Apply as soft prior in XY solve.
 
 ### Phase 3 — Signal priority reorder
 
-11. **Signal priority reorder** (gap 10): Restructure floor inference block so topology gate
+13. **Signal priority reorder** (gap 10): Restructure floor inference block so topology gate
     runs first, fingerprints become primary evidence among reachable floors, RSSI secondary,
     Z-derived hint tertiary. Only after phase 1 gate and phase 2 geometry are validated.
 
 ### Phase 4 — Cleanup
 
-12. Remove or demote the older fingerprint veto and transition-support dwell-reduction machinery
+14. Remove or demote the older fingerprint veto and transition-support dwell-reduction machinery
     once the topology gate provides equivalent coverage more cleanly.
 
 ---
