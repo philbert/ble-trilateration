@@ -1,216 +1,196 @@
-![Bermuda Logo](img/logo@2x.png)
+# BLE Trilateration
 
-[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=agittins&repository=bermuda&category=Integration)
+**BLE Trilateration** is a [Home Assistant](https://home-assistant.io/) custom integration that tracks the physical location of Bluetooth Low Energy (BLE) devices inside your home using a network of BLE scanner anchors and a topology-aware trilateration engine.
 
-# Bermuda BLE Trilateration
-
-- Track bluetooth devices by Area (Room) in [Home Assistant](https://home-assistant.io/), using [ESPHome](https://esphome.io/) [Bluetooth Proxies](https://esphome.io/components/bluetooth_proxy.html) and Shelly Gen2 or later devices.
-
-- (eventually) Triangulate device positions! Like, on a map. Maybe.
-
-
-[![GitHub Release][releases-shield]][releases]
-[![GitHub Activity][commits-shield]][commits]
-[![License][license-shield]](LICENSE)
-[![HomeAssistant Minimum Version][haminverbadge]][haminver]
-[![pre-commit][pre-commit-shield]][pre-commit]
-[![Black][black-shield]][black]
-[![hacs][hacsbadge]][hacs]
-[![Project Maintenance][maintenance-shield]][user_profile]
-[![Discord][discord-shield]][discord]
-[![Community Forum][forum-shield]][forum]
-
-[![GitHub Sponsors][sponsorsbadge]][sponsors]
-[![BuyMeCoffee][buymecoffeebadge]][buymecoffee]
-[![Patreon Sponsorship][patreonbadge]][patreon]
-
-
-## What it does:
-
-Bermuda aims to let you track any bluetooth device, and have Home Assistant tell you where in your house that device is. The only extra hardware you need are esp32 devices running esphome that act as bluetooth proxies. Alternatively, Shelly Plus devices can also perform this function.
-
-- Area-based device location (ie, device-level room prescence) is working reasonably well.
-- Creates sensors for Area and Distance for devices you choose
-- Supports iBeacon devices, including those with randomised MAC addresses (like Android phones running HA Companion App)
-- Supports IRK (resolvable keys) via the [Private BLE Device](https://www.home-assistant.io/integrations/private_ble_device/) core component. Once your iOS device (or Android!) is set up in Private BLE Device, it will automatically receive Bermuda sensors as well!
-- Creates `device_tracker` entities for chosen devices, which can be linked to "Person"s for Home/Not Home tracking
-- Configurable settings for rssi reference level, environmental attenuation, max tracking radius
-- Provides a comprehensive json/yaml dump of devices and their distances from each bluetooth
-  receiver, via the `bermuda.dump_devices` service.
-
-## What you need:
-
-- Home Assistant. The current release of Bermuda requires at least ![haminverbadge]
-- One or more devices providing bluetooth proxy information to HA using HA's bluetooth backend. These can be:
-  - ESPHome devices with the `bluetooth_proxy` component enabled. I like the D1-Mini32 boards because they're cheap and easy to deploy.
-  - Shelly Plus or later devices with Bluetooth proxying enabled in the Shelly integration.
-  - USB Bluetooth on your HA host. This is not ideal, since they do not timestamp the advertisement packets and finding a well-supported usb bluetooth adaptor is non-trivial. However they can be used for simple "Home/Not Home" tracking, and basic Area distance support is enabled currently.
-
-- Some bluetooth BLE devices you want to track. Phones, smart watches, beacon tiles, thermometers etc.
-
-- Bermuda! I strongly recommend installing Bermuda via HACS:
-  [![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=agittins&repository=bermuda&category=Integration)
-
-## Documentation and help
-
-[The Wiki](https://github.com/agittins/bermuda/wiki/) is the primary and official source of information for setting up Bermuda.
-
-[Discussions](https://github.com/agittins/bermuda/discussions/) contain both official and user-contributed guides, how-tos and general Q&A.
-
-[HA Community Thread for Bermuda](https://community.home-assistant.io/t/bermuda-bluetooth-ble-room-presence-and-tracking-custom-integration/625780/1) contains a *wealth* of information from and for users of Bermuda, and is where many folk first ask for assistance in setting up.
-
-## Screenshots
-
-After installing, the integration should be visible in Settings, Devices & Services
-
-![The integration, in Settings, Devices & Services](img/screenshots/integration.png)
-
-Press the `CONFIGURE` button to see the configuration dialog. At the bottom is a field
-where you can enter/list any bluetooth devices the system can see. Choosing devices
-will add them to the configured devices list and creating sensor entities for them. See [How Do The Settings Work?](#how-do-the-settings-work) for more info.
-
-![Bermuda integration configuration option flow](img/screenshots/configuration.png)
-
-Choosing the device screen shows the current sensors and other info. Note that there are extra sensors in the "not shown" section that are disabled by default (the screenshot shows several of these enabled already). You can edit the properties of these to enable them for more detailed data on your device locations. This is primarily intended for troubleshooting or development, though.
-
-![Screenshot of device information view](img/screenshots/deviceinfo.png)
-
-The sensor information also includes attributes area name and id, relevant MAC addresses
-etc.
-
-![Bermuda sensor information](img/screenshots/sensor-info.png)
-
-In Settings, People, you can define any Bermuda device to track home/away status
-for any person/user.
-
-![Assign a Bermuda sensor for Person tracking](img/screenshots/person-tracker.png)
-
-## FAQ
-
-See [The FAQ](https://github.com/agittins/bermuda/wiki/FAQ) in the Wiki!
-
-## Hacking tips
-
-Wanna improve this? Awesome! Bear in mind this is my first ever HA
-integration, and I'm much more greybeard sysadmin than programmer, so ~~if~~where
-I'm doing stupid things I really would welcome some improvements!
-
-You can start by using the service `bermuda.dump_devices` to examine the
-internal state.
-
-### Using `bermuda.dump_devices` service
-
-Just calling the service `bermuda.dump_devices` will give you a full dump of the internal
-data structures that bermuda uses to track and calculate its state. This can be helpful
-for working out what's going on and troubleshooting, or to use if you have a very custom
-need that you can solve with template sensors etc.
-
-If called with no parameters, the service will return all data. parameters are available
-which let you limit or reformat the resulting data to make it easier to work with. In particular
-the `addresses` parameter is helpful to only return data relevant for one or more MAC addresses
-(or iBeacon UUIDs).
-See the information on parameters in the `Services` page in Home Assistant, under `Developer Tools`.
-
-Important: If you decide to use the results of this call for your own templates etc, bear in mind that
-the format might change in any release, and won't necessarily be considered a "breaking change".
-This is beacuse the structure is used internally, rather than being a published API. That said, efforts will be made
-to indicate in the release notes if fields in the structure are renamed or moved, but not for adding new
-items.
-
-## Prior Art
-
-The `bluetooth_tracker` and `ble_tracker` integrations are only built to give a "home/not home"
-determination, and don't do "Area" based location. (nb: "Zones" are places outside the
-home, while "Areas" are rooms/areas inside the home). I wanted to be free to experiment with
-this in ways that might not suit core, but hopefully at least some of this could find
-a home in the core codebase one day.
-
-The "monitor" script uses standalone Pi's to gather bluetooth data and then pumps it into
-MQTT. It doesn't use the `bluetooth_proxy` capabilities which I feel are the future of
-home bluetooth networking (well, it is for my home, anyway!).
-
-ESPresense looks cool, but I don't want to dedicate my nodes to non-esphome use, and again
-it doesn't leverage the bluetooth proxy features now in HA. I am probably reinventing
-a fair amount of ESPresense's wheel.
-
-## Installation
-
-You can install Bermuda by opening HACS on your Home Assistant instance and searching for "Bermuda".
-Alternatively you can click the button below to be automatically redirected.
-
-[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=agittins&repository=bermuda&category=Integration)
-
-You should now be able to add the `Bermuda BLE Trilateration` integration. Once you have done that,
-you need to restart Home Assistant, then in `Settings`, `Devices & Services` choose `Add Integration`
-and search for `Bermuda BLE Trilateration`. It's possible that it will autodetect for you just by
-noticing nearby bluetooth devices.
-
-Once the integration is added, you need to set up your devices by clicking `Configure` in `Devices and Services`,
-`Bermuda BLE Trilateration`.
-
-In the `Configuration` dialog, you can choose which bluetooth devices you would like the integration to track.
-
-You can manually install Bermuda by doing the following:
-
-1. Using the tool of choice open the directory (folder) for your HA configuration (where you find `configuration.yaml`).
-2. If you do not have a `custom_components` directory (folder) there, you need to create it.
-3. In the `custom_components` directory (folder) create a new folder called `bermuda`.
-4. Download _all_ the files from the `custom_components/bermuda/` directory (folder) in this repository.
-5. Place the files you downloaded in the new directory (folder) you created.
-6. Restart Home Assistant
-7. In the HA UI go to "Configuration" -> "Integrations" click "+" and search for "Bermuda BLE Trilateration"
-
-<!---->
-
-## Contributions are welcome!
-
-If you want to contribute to this please read the [Contribution guidelines](CONTRIBUTING.md)
-
-## Credits
-
-This project was generated from [@oncleben31](https://github.com/oncleben31)'s [Home Assistant Custom Component Cookiecutter](https://github.com/oncleben31/cookiecutter-homeassistant-custom-component) template.
-
-Code template was mainly taken from [@Ludeeus](https://github.com/ludeeus)'s [integration_blueprint][integration_blueprint] template
-[Cookiecutter User Guide](https://cookiecutter-homeassistant-custom-component.readthedocs.io/en/stable/quickstart.html)\*\*
+> **Forked from [Bermuda BLE Trilateration](https://github.com/agittins/bermuda) by [@agittins](https://github.com/agittins).** Full credit to the original author for the foundational integration design. This fork continues the project as an independent effort with significant changes to the estimation pipeline, floor inference, and configuration model.
 
 ---
 
-[integration_blueprint]: https://github.com/custom-components/integration_blueprint
+## What it does
 
-[black]: https://github.com/psf/black
-[black-shield]: https://img.shields.io/badge/code%20style-black-000000.svg?style=for-the-badge
+BLE Trilateration receives RSSI signal-strength readings from a set of fixed BLE scanner anchors (ESPHome bluetooth proxies, Shelly Gen2+ devices, or USB bluetooth adapters) and computes a 3D Cartesian position estimate for each tracked device. From that position it infers the device's room (Home Assistant Area) and floor.
 
-[buymecoffee]: https://www.buymeacoffee.com/AshleyGittins
-[buymecoffeebadge]: https://img.shields.io/badge/buy%20me%20a%20coffee-Caffeinate-green.svg?style=for-the-badge
+The core algorithm is a **topology-gated trilateration pipeline**:
 
-[commits-shield]: https://img.shields.io/github/commit-activity/y/agittins/bermuda.svg?style=for-the-badge
-[commits]: https://github.com/agittins/bermuda/commits/main
+1. **3D geometry solve** — a weighted least-squares trilateration using all visible anchors, producing an `(x, y, z)` estimate along with a geometry-quality score.
+2. **Calibration fingerprinting** — stored RSSI signatures from known room positions are matched against live readings to produce a room probability vector.
+3. **Floor reachability gate** — before a floor change is accepted, the system asks whether the device could physically have reached that floor given its recent position history and the locations of configured transition zones (stairs, lifts). Physically impossible floor changes are blocked before they can corrupt room inference.
+4. **Floor evidence fusion** — fingerprint evidence, RSSI floor evidence, and geometry-derived Z hints are combined among only the reachable floors.
+5. **Room inference** — final room assignment is made within the confirmed floor.
+6. **Hysteresis** — stability smoothing is applied at legitimate room boundaries, not as a first line of defense against impossible teleportation.
 
-[hacs]: https://hacs.xyz
-[hacsbadge]: https://img.shields.io/badge/HACS-Default-green.svg?style=for-the-badge
+The key design principle is that **topology and physical reachability are first-class constraints**, not post-hoc vetoes. A device that was stable in a room on one floor cannot appear on another floor two seconds later unless it passed through a configured transition zone.
 
-[haminver]: https://github.com/agittins/bermuda/commits/main/hacs.json
-[haminverbadge]: https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fgithub.com%2Fagittins%2Fbermuda%2Fraw%2Fmain%2Fhacs.json&query=%24.homeassistant&style=for-the-badge&logo=homeassistant&logoColor=%2311BDF2&label=Minimum%20HA%20Version
+### What you get
 
-[discord]: https://discord.gg/Qa5fW2R
-[discord-shield]: https://img.shields.io/discord/330944238910963714.svg?style=for-the-badge
+- `sensor` entities for Area (room) and Distance for each tracked device
+- `device_tracker` entities linkable to Home Assistant Persons for Home/Away tracking
+- Supports iBeacon devices including Android phones with randomised MAC addresses running the HA Companion App
+- Supports IRK (resolvable keys) via the [Private BLE Device](https://www.home-assistant.io/integrations/private_ble_device/) core integration
+- Multi-floor tracking with topology-gated floor inference
 
-[exampleimg]: example.png
-[forum-shield]: https://img.shields.io/badge/community-forum-brightgreen.svg?style=for-the-badge
-[forum]: https://community.home-assistant.io/
+---
 
-[license-shield]: https://img.shields.io/github/license/agittins/bermuda.svg?style=for-the-badge
-[maintenance-shield]: https://img.shields.io/badge/maintainer-%40agittins-blue.svg?style=for-the-badge
+## What you need
 
-[patreon]: https://patreon.com/AshGittins
-[patreonbadge]: https://img.shields.io/badge/Patreon-Sponsor-green?style=for-the-badge
+- **Home Assistant** — a recent release
+- **BLE scanner anchors** — one or more of:
+  - ESPHome devices with the `bluetooth_proxy` component enabled
+  - Shelly Plus (Gen2 or later) devices with Bluetooth proxying enabled
+  - A USB Bluetooth adapter on the HA host (limited — no packet timestamps, suitable only for Home/Away and coarse area detection)
+- **BLE devices to track** — phones, smart watches, beacon tiles, thermometers, etc.
+- **At least three anchors** for meaningful 2D trilateration; more anchors and vertical spread improve 3D and multi-floor accuracy.
 
-[pre-commit]: https://github.com/pre-commit/pre-commit
-[pre-commit-shield]: https://img.shields.io/badge/pre--commit-enabled-brightgreen?style=for-the-badge
+---
 
-[sponsorsbadge]: https://img.shields.io/github/sponsors/agittins?style=for-the-badge&label=GitHub%20Sponsors&color=green
-[sponsors]: https://github.com/sponsors/agittins
+## Installation
 
-[releases-shield]: https://img.shields.io/github/release/agittins/bermuda.svg?style=for-the-badge
-[releases]: https://github.com/agittins/bermuda/releases
-[user_profile]: https://github.com/agittins
+Install via HACS by adding this repository as a custom repository, then search for **BLE Trilateration**.
+
+Alternatively, copy the `custom_components/bermuda/` directory into your HA `custom_components/` folder and restart Home Assistant.
+
+After installation, add the integration in **Settings → Devices & Services → Add Integration** and search for **BLE Trilateration**.
+
+---
+
+## Setup Guide
+
+Setup is done in stages. Each stage builds on the previous one. You can stop after any stage and the integration will still provide value with whatever is configured.
+
+### Stage 0: Choose a Coordinate Origin
+
+BLE Trilateration works in a **Cartesian coordinate system** that you define. Before placing anchors you need to pick an origin point — a fixed reference location in your home that will be `(0, 0, 0)`.
+
+Good choices:
+- A corner of the house at ground/street level
+- The centre of a room on the main floor
+
+The coordinate system convention is:
+- `x` — horizontal, positive toward one side of the house (e.g. East)
+- `y` — horizontal, positive toward the other side (e.g. North)
+- `z` — vertical, positive upward; the origin floor surface should be at `z = 0`
+
+All anchor positions, calibration samples, and transition zones must use the same coordinate system.
+
+---
+
+### Stage 1: Add BLE Scanner Anchors
+
+Each scanner anchor needs a **3D position** measured from your chosen origin.
+
+In **Settings → Devices & Services → BLE Trilateration → Configure → Scanner Anchors**, for each anchor:
+- Enter its `x`, `y`, and `z` coordinates in metres
+- Give it a human-readable name
+
+> **Tips:**
+> - Measure anchor positions as accurately as you can. Errors here directly limit position accuracy.
+> - Anchors at different heights (e.g. a device on the ceiling vs. one at desk height) provide Z separation that helps floor inference.
+> - Aim for anchors that cover every room you want to track, with no room having fewer than two visible anchors.
+
+---
+
+### Stage 2: Add Tracked Devices
+
+In **Configure → Select Devices**, choose the BLE devices you want to track. The list shows all currently visible devices. Selecting a device creates sensor and device_tracker entities for it.
+
+Devices can be:
+- Regular BLE peripherals (by MAC address)
+- iBeacon devices (by UUID)
+- Private BLE devices set up via the [Private BLE Device](https://www.home-assistant.io/integrations/private_ble_device/) integration (for iOS and Android devices with rotating MACs)
+
+---
+
+### Stage 3: Set Floor Z Heights
+
+For multi-floor homes, tell the integration where each floor's surface is in your coordinate system.
+
+In **Configure → Floor Heights**, for each Home Assistant floor:
+- Set `floor_z_m` — the Z coordinate of the floor surface in metres
+- Optionally set a `floor_z_min_m` / `floor_z_max_m` range for floors with natural Z variation (outdoor areas, sloped entries, garages)
+
+> **Example:** If your origin is at ground-floor level, `ground_floor` might have `floor_z_m = 0`, a first floor above might have `floor_z_m = 2.5`, and a basement `floor_z_m = -2.8`.
+
+The integration uses these values to derive a **phone-height band** (`floor_z_m` to `floor_z_m + 1.2 m`) as a strong prior for the Z estimate during trilateration. Floors with non-overlapping bands can often be discriminated from Z alone.
+
+---
+
+### Stage 4: Collect Calibration Samples
+
+Calibration samples are RSSI fingerprints recorded at known positions. They allow the classifier to distinguish rooms whose RSSI patterns differ even when trilateration geometry is ambiguous.
+
+In **Configure → Calibration Samples → Record New Sample**:
+1. Stand (or place your tracked device) at a representative position in a room
+2. Choose the room/area and confirm the `(x, y, z)` position
+3. Let the integration record for 60 seconds
+
+> **Tips:**
+> - Collect at least one sample per room you want to track
+> - For large rooms, collect multiple samples at different positions
+> - Collect samples with your home in its normal state (furniture in place, doors as usually set)
+> - Samples are tied to the current anchor layout hash — adding or repositioning anchors invalidates existing samples and requires recapture
+
+---
+
+### Stage 5: Record Transition Zones (Multi-Floor Homes)
+
+Transition zones tell the integration where floor changes are physically possible — typically stairs, lifts, or ramps.
+
+Without transition zones configured for a floor pair, the integration falls back to evidence-only floor inference with no topology gate for that pair.
+
+In **Configure → Transition Samples → Record New Zone**:
+1. Stand at the entry point of the transition (e.g. the bottom of the stairs)
+2. Record a capture — this records your position and current RSSI fingerprint
+3. Stand at the exit point of the transition (e.g. the top of the stairs) and record a second capture
+4. Assign the zone a name and specify the **floor pairs** it connects (e.g. `ground_floor → first_floor`)
+
+> **Notes:**
+> - Each end of the transition (bottom and top of stairs) should be a separate capture. Do **not** average them — the integration stores each as an independent Gaussian kernel.
+> - A zone authorises specific directional floor pairs. A zone connecting `ground_floor → first_floor` does not automatically authorise `ground_floor → basement`.
+> - The integration blocks floor changes that would require passing through a transition zone that the device has not been near recently.
+
+---
+
+## How the Floor Inference Works
+
+The integration separates two questions before assigning a floor:
+
+1. **Which floors are physically reachable right now?** — answered by the topology and reachability gate using transition zones and recent device motion
+2. **Among the reachable floors, which one has the best evidence?** — answered by fingerprint matching, RSSI, and Z geometry
+
+The reachability gate works as follows:
+- When a new floor candidate (challenger) appears, the system freezes the device's last confident pre-challenge position
+- It estimates how far the device could have moved since then, based on elapsed time and observed motion
+- It checks whether the nearest transition zone covering that floor pair is within that reach
+- If not, the challenger is blocked — it cannot win the evidence competition regardless of RSSI
+
+A **background traversal tracker** continuously records when the device enters and exits each transition zone. If the device genuinely traversed a zone (entered and then exited) in the recent past, the gate is lifted and the floor change is allowed to compete on evidence normally.
+
+This means a legitimate floor change — where the user actually walked up or down the stairs — will succeed. An impossible floor change — where the classifier was confused by multipath signals through a floor slab — will be blocked before it can cascade into wrong room inference.
+
+---
+
+## Developer / Diagnostic Tools
+
+The `bermuda.dump_devices` service returns the full internal state of the integration as JSON/YAML. This is useful for:
+- Inspecting raw RSSI readings per scanner
+- Checking position estimates and geometry quality scores
+- Debugging room classification and floor inference
+- Building custom template sensors from integration data
+
+Call it from **Developer Tools → Services** in Home Assistant. Pass an `addresses` parameter to filter output to a single device.
+
+> Note: the internal data structure is not a stable public API. Fields may change between releases.
+
+---
+
+## Credits
+
+This project is a fork of [Bermuda BLE Trilateration](https://github.com/agittins/bermuda) by [@agittins](https://github.com/agittins). The original integration introduced the concept of BLE-proxy-based room presence in Home Assistant and provided the foundational architecture this fork builds on.
+
+The integration template was originally generated from [@oncleben31](https://github.com/oncleben31)'s [Home Assistant Custom Component Cookiecutter](https://github.com/oncleben31/cookiecutter-homeassistant-custom-component) and [@Ludeeus](https://github.com/ludeeus)'s [integration_blueprint](https://github.com/custom-components/integration_blueprint).
+
+---
+
+## Contributing
+
+Contributions are welcome. Please read [CONTRIBUTING.md](CONTRIBUTING.md) before submitting a pull request.
