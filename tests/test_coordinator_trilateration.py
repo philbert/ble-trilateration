@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -14,6 +15,7 @@ from custom_components.bermuda.const import (
 )
 from custom_components.bermuda.coordinator import BermudaDataUpdateCoordinator
 from custom_components.bermuda.room_classifier import GlobalFingerprintResult, RoomClassification
+from custom_components.bermuda.trilat_bootstrap_store import TrilatBootstrapRecord
 
 
 class _DummyScanner(SimpleNamespace):
@@ -162,6 +164,10 @@ def _make_coordinator():
     coordinator._transition_zone_store = SimpleNamespace(zones=[])
     coordinator.room_classifier = None
     coordinator._floor_config_store = SimpleNamespace(get=lambda _fid: None)
+    coordinator._trilat_bootstrap_store = SimpleNamespace(
+        get=lambda _addr: None,
+        schedule_save=lambda *_args, **_kwargs: None,
+    )
     return coordinator
 
 
@@ -620,6 +626,80 @@ def test_floor_challenger_switches_earlier_when_transition_supports_challenger()
     assert device.trilat_floor_diagnostics["transition_support_01"] == 0.8
     assert device.trilat_floor_diagnostics["transition_dwell_reduction_applied"] is True
     assert device.trilat_floor_diagnostics["effective_required_dwell_s"] == pytest.approx(5.44, rel=1e-6)
+
+
+def test_restart_bootstrap_holds_restored_floor_until_fingerprint_is_ready():
+    """A warm-started floor should survive restart bootstrap while the classifier is still cold."""
+    coordinator = _make_coordinator()
+    coordinator._trilat_bootstrap_store = SimpleNamespace(
+        get=lambda _addr: TrilatBootstrapRecord(
+            saved_at="2026-03-15T03:00:00+00:00",
+            floor_id="f1",
+            area_id="guest_room",
+            x_m=9.0,
+            y_m=7.0,
+            z_m=3.3,
+            layout_hash="layout-a",
+            floor_confidence=0.9,
+            geometry_quality_01=0.6,
+        ),
+        schedule_save=lambda *_args, **_kwargs: None,
+    )
+    device = _DummyDevice("dev-bootstrap")
+
+    sc_f1a = _make_scanner(coordinator, "boot-a", "f1", 0.0, 0.0, 3.0)
+    sc_f1b = _make_scanner(coordinator, "boot-b", "f1", 6.0, 0.0, 3.0)
+    sc_f1c = _make_scanner(coordinator, "boot-c", "f1", 0.0, 8.0, 3.0)
+    sc_f2a = _make_scanner(coordinator, "boot-d", "f2", 0.0, 0.0, 2.0)
+    sc_f2b = _make_scanner(coordinator, "boot-e", "f2", 6.0, 0.0, 2.0)
+    sc_f2c = _make_scanner(coordinator, "boot-f", "f2", 0.0, 8.0, 2.0)
+
+    with (
+        patch("custom_components.bermuda.coordinator.monotonic_time_coarse", return_value=100.0),
+        patch("custom_components.bermuda.coordinator.now", return_value=datetime.fromisoformat("2026-03-15T03:00:20+00:00")),
+    ):
+        device.adverts = {
+            ("dev-bootstrap", sc_f1a.address): _make_advert(sc_f1a, 100.0, -82.0, 5.0),
+            ("dev-bootstrap", sc_f1b.address): _make_advert(sc_f1b, 100.0, -82.0, 5.0),
+            ("dev-bootstrap", sc_f1c.address): _make_advert(sc_f1c, 100.0, -82.0, 5.0),
+            ("dev-bootstrap", sc_f2a.address): _make_advert(sc_f2a, 100.0, -58.0, 5.0),
+            ("dev-bootstrap", sc_f2b.address): _make_advert(sc_f2b, 100.0, -58.0, 5.0),
+            ("dev-bootstrap", sc_f2c.address): _make_advert(sc_f2c, 100.0, -58.0, 5.0),
+        }
+        coordinator._refresh_trilateration_for_device(device)
+
+    state = coordinator._get_trilat_decision_state(device)
+    assert state.floor_id == "f1"
+    assert device.trilat_floor_diagnostics["best_floor_id"] == "f2"
+    assert device.trilat_floor_diagnostics["selected_floor_id"] == "f1"
+    assert device.trilat_floor_diagnostics["bootstrap_hold_active"] is True
+
+
+def test_trilat_bootstrap_save_requires_fingerprint_floor_agreement():
+    """Do not overwrite the restart bootstrap prior with a solve whose floor disagrees with fingerprint."""
+    coordinator = _make_coordinator()
+    saved_records = []
+    coordinator._trilat_bootstrap_store = SimpleNamespace(
+        get=lambda _addr: None,
+        schedule_save=lambda address, record: saved_records.append((address, record)),
+    )
+    device = _DummyDevice("dev-bootstrap-save")
+    device.trilat_status = "ok"
+    device.trilat_floor_id = "f2"
+    device.trilat_x_m = 1.5
+    device.trilat_y_m = 6.9
+    device.trilat_z_m = 2.0
+    device.trilat_geometry_quality = 4.0
+    device.area_last_seen_id = "guest_room"
+    device.trilat_floor_diagnostics = {
+        "fingerprint_floor_id": "f1",
+        "fingerprint_floor_confidence": 0.72,
+    }
+    state = coordinator._get_trilat_decision_state(device)
+
+    coordinator._schedule_trilat_bootstrap_save(device, state, layout_hash="layout-a")
+
+    assert saved_records == []
 
 
 def test_floor_challenger_does_not_reduce_dwell_on_weak_transition_support():
