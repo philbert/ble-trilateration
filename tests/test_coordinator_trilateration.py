@@ -675,6 +675,34 @@ def test_restart_bootstrap_holds_restored_floor_until_fingerprint_is_ready():
     assert device.trilat_floor_diagnostics["bootstrap_hold_active"] is True
 
 
+def test_restart_bootstrap_restores_floor_even_when_layout_hash_differs():
+    """A layout mismatch should suppress stale geometry, not discard the floor bootstrap."""
+    coordinator = _make_coordinator()
+    coordinator._trilat_bootstrap_store = SimpleNamespace(
+        get=lambda _addr: TrilatBootstrapRecord(
+            saved_at="2026-03-15T03:00:00+00:00",
+            floor_id="f1",
+            area_id="guest_room",
+            x_m=9.0,
+            y_m=7.0,
+            z_m=3.3,
+            layout_hash="layout-b",
+            floor_confidence=0.9,
+            geometry_quality_01=0.6,
+        ),
+        schedule_save=lambda *_args, **_kwargs: None,
+    )
+    device = _DummyDevice("dev-bootstrap-layout-mismatch")
+    state = coordinator._get_trilat_decision_state(device)
+
+    assert state.floor_id == "f1"
+    assert state.bootstrap_restored_at > 0.0
+    assert state.last_solution_xy is None
+    assert state.last_solution_z is None
+    assert state.last_good_position is None
+    assert device.area_last_seen_id is None
+
+
 def test_trilat_bootstrap_save_requires_fingerprint_floor_agreement():
     """Do not overwrite the restart bootstrap prior with a solve whose floor disagrees with fingerprint."""
     coordinator = _make_coordinator()

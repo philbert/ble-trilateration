@@ -2013,20 +2013,22 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         """Warm-start floor/geometry state from the last trusted trilat solution."""
         if state.bootstrap_applied:
             return
-        state.bootstrap_applied = True
         record = self._trilat_bootstrap_store.get(device.address)
         if record is None:
+            state.bootstrap_applied = True
             return
         layout_hash = self.current_anchor_layout_hash()
-        if record.layout_hash and layout_hash and record.layout_hash != layout_hash:
-            return
+        layout_matches = not (record.layout_hash and layout_hash and record.layout_hash != layout_hash)
         try:
             saved_at = datetime.fromisoformat(record.saved_at)
         except ValueError:
+            state.bootstrap_applied = True
             return
         record_age_s = (now() - saved_at).total_seconds()
         if record_age_s < 0.0 or record_age_s > self._TRILAT_BOOTSTRAP_MAX_AGE_S:
+            state.bootstrap_applied = True
             return
+        state.bootstrap_applied = True
         nowstamp = monotonic_time_coarse()
         state.floor_id = record.floor_id
         # Restore the previous floor as a startup prior, but leave confidence at 0 so
@@ -2035,20 +2037,21 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         state.floor_confidence = 0.0
         state.bootstrap_restored_at = nowstamp
         state.bootstrap_hold_until = nowstamp + self._TRILAT_BOOTSTRAP_HOLD_S
-        state.last_filter_stamp = nowstamp
-        state.last_solution_xy = (record.x_m, record.y_m)
-        state.last_solution_z = record.z_m
-        if record.z_m is not None:
-            state.last_good_position = (record.x_m, record.y_m, record.z_m)
-            state.last_good_position_at = nowstamp
-            state.last_solver_dimension = "3d"
-        else:
-            state.last_solver_dimension = "2d"
-        if record.area_id:
-            device.area_last_seen_id = record.area_id
-            resolved_area_name = self.resolve_area_name(record.area_id)
-            if resolved_area_name:
-                device.area_last_seen = resolved_area_name
+        if layout_matches:
+            state.last_filter_stamp = nowstamp
+            state.last_solution_xy = (record.x_m, record.y_m)
+            state.last_solution_z = record.z_m
+            if record.z_m is not None:
+                state.last_good_position = (record.x_m, record.y_m, record.z_m)
+                state.last_good_position_at = nowstamp
+                state.last_solver_dimension = "3d"
+            else:
+                state.last_solver_dimension = "2d"
+            if record.area_id:
+                device.area_last_seen_id = record.area_id
+                resolved_area_name = self.resolve_area_name(record.area_id)
+                if resolved_area_name:
+                    device.area_last_seen = resolved_area_name
 
     def _schedule_trilat_bootstrap_save(
         self,
