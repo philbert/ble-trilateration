@@ -530,7 +530,11 @@ def test_floor_challenger_does_not_switch_after_hold_ceiling_if_fingerprint_stil
 
 
 def test_floor_challenger_switches_earlier_when_fingerprint_supports_challenger():
-    """Strong challenger-floor fingerprints should reduce floor-switch dwell."""
+    """Strong challenger-floor fingerprints cause a switch at normal dwell.
+
+    Phase 4: fp-dwell reduction is removed; combined evidence (fp primary) already
+    boosts the challenger's score, so the switch happens at standard dwell.
+    """
     coordinator = _make_coordinator()
     coordinator.room_classifier = SimpleNamespace(
         fingerprint_global=lambda **_kwargs: GlobalFingerprintResult(
@@ -564,14 +568,14 @@ def test_floor_challenger_switches_earlier_when_fingerprint_supports_challenger(
     state = coordinator._get_trilat_decision_state(device)
     assert state.floor_id == "f1"
 
-    with patch("custom_components.bermuda.coordinator.monotonic_time_coarse", return_value=106.0):
+    with patch("custom_components.bermuda.coordinator.monotonic_time_coarse", return_value=109.0):
         device.adverts = {
-            ("dev-phase3-switch", sc_f1a.address): _make_advert(sc_f1a, 106.0, -82.0, 5.0),
-            ("dev-phase3-switch", sc_f1b.address): _make_advert(sc_f1b, 106.0, -82.0, 5.0),
-            ("dev-phase3-switch", sc_f1c.address): _make_advert(sc_f1c, 106.0, -82.0, 5.0),
-            ("dev-phase3-switch", sc_f2a.address): _make_advert(sc_f2a, 106.0, -58.0, 5.0),
-            ("dev-phase3-switch", sc_f2b.address): _make_advert(sc_f2b, 106.0, -58.0, 5.0),
-            ("dev-phase3-switch", sc_f2c.address): _make_advert(sc_f2c, 106.0, -58.0, 5.0),
+            ("dev-phase3-switch", sc_f1a.address): _make_advert(sc_f1a, 109.0, -82.0, 5.0),
+            ("dev-phase3-switch", sc_f1b.address): _make_advert(sc_f1b, 109.0, -82.0, 5.0),
+            ("dev-phase3-switch", sc_f1c.address): _make_advert(sc_f1c, 109.0, -82.0, 5.0),
+            ("dev-phase3-switch", sc_f2a.address): _make_advert(sc_f2a, 109.0, -58.0, 5.0),
+            ("dev-phase3-switch", sc_f2b.address): _make_advert(sc_f2b, 109.0, -58.0, 5.0),
+            ("dev-phase3-switch", sc_f2c.address): _make_advert(sc_f2c, 109.0, -58.0, 5.0),
         }
         state.floor_challenger_id = "f2"
         state.floor_challenger_since = 101.0
@@ -579,11 +583,14 @@ def test_floor_challenger_switches_earlier_when_fingerprint_supports_challenger(
 
     assert state.floor_id == "f2"
     assert device.trilat_floor_diagnostics["fingerprint_floor_id"] == "f2"
-    assert device.trilat_floor_diagnostics["effective_required_dwell_s"] == 4.0
+    assert device.trilat_floor_diagnostics["effective_required_dwell_s"] == 8.0
 
 
 def test_floor_challenger_switches_earlier_when_transition_supports_challenger():
-    """Strong transition support should reduce floor-switch dwell even without fingerprint support."""
+    """Transition support is recorded in diagnostics but no longer reduces dwell (Phase 4).
+
+    The switch still occurs once standard dwell expires.
+    """
     coordinator = _make_coordinator()
     coordinator.calibration = SimpleNamespace(
         current_anchor_layout_hash="layout-a",
@@ -609,14 +616,14 @@ def test_floor_challenger_switches_earlier_when_transition_supports_challenger()
     state = coordinator._get_trilat_decision_state(device)
     assert state.floor_id == "f1"
 
-    with patch("custom_components.bermuda.coordinator.monotonic_time_coarse", return_value=107.0):
+    with patch("custom_components.bermuda.coordinator.monotonic_time_coarse", return_value=109.0):
         device.adverts = {
-            ("dev-phase5-transition-switch", sc_f1a.address): _make_advert(sc_f1a, 107.0, -82.0, 5.0),
-            ("dev-phase5-transition-switch", sc_f1b.address): _make_advert(sc_f1b, 107.0, -82.0, 5.0),
-            ("dev-phase5-transition-switch", sc_f1c.address): _make_advert(sc_f1c, 107.0, -82.0, 5.0),
-            ("dev-phase5-transition-switch", sc_f2a.address): _make_advert(sc_f2a, 107.0, -58.0, 5.0),
-            ("dev-phase5-transition-switch", sc_f2b.address): _make_advert(sc_f2b, 107.0, -58.0, 5.0),
-            ("dev-phase5-transition-switch", sc_f2c.address): _make_advert(sc_f2c, 107.0, -58.0, 5.0),
+            ("dev-phase5-transition-switch", sc_f1a.address): _make_advert(sc_f1a, 109.0, -82.0, 5.0),
+            ("dev-phase5-transition-switch", sc_f1b.address): _make_advert(sc_f1b, 109.0, -82.0, 5.0),
+            ("dev-phase5-transition-switch", sc_f1c.address): _make_advert(sc_f1c, 109.0, -82.0, 5.0),
+            ("dev-phase5-transition-switch", sc_f2a.address): _make_advert(sc_f2a, 109.0, -58.0, 5.0),
+            ("dev-phase5-transition-switch", sc_f2b.address): _make_advert(sc_f2b, 109.0, -58.0, 5.0),
+            ("dev-phase5-transition-switch", sc_f2c.address): _make_advert(sc_f2c, 109.0, -58.0, 5.0),
         }
         state.floor_challenger_id = "f2"
         state.floor_challenger_since = 101.0
@@ -624,8 +631,7 @@ def test_floor_challenger_switches_earlier_when_transition_supports_challenger()
 
     assert state.floor_id == "f2"
     assert device.trilat_floor_diagnostics["transition_support_01"] == 0.8
-    assert device.trilat_floor_diagnostics["transition_dwell_reduction_applied"] is True
-    assert device.trilat_floor_diagnostics["effective_required_dwell_s"] == pytest.approx(5.44, rel=1e-6)
+    assert device.trilat_floor_diagnostics["effective_required_dwell_s"] == 8.0
 
 
 def test_restart_bootstrap_holds_restored_floor_until_fingerprint_is_ready():
@@ -731,7 +737,7 @@ def test_trilat_bootstrap_save_requires_fingerprint_floor_agreement():
 
 
 def test_floor_challenger_does_not_reduce_dwell_on_weak_transition_support():
-    """Weak transition support should remain diagnostic-only and leave dwell unchanged."""
+    """Transition support is diagnostic-only and never reduces dwell (Phase 4)."""
     coordinator = _make_coordinator()
     coordinator.calibration = SimpleNamespace(
         current_anchor_layout_hash="layout-a",
@@ -772,12 +778,15 @@ def test_floor_challenger_does_not_reduce_dwell_on_weak_transition_support():
 
     assert state.floor_id == "f1"
     assert device.trilat_floor_diagnostics["transition_support_01"] == 0.5
-    assert device.trilat_floor_diagnostics["transition_dwell_reduction_applied"] is False
     assert device.trilat_floor_diagnostics["effective_required_dwell_s"] == 8.0
 
 
-def test_floor_challenger_vetoes_without_plausible_transition_route():
-    """A cross-floor challenger should be vetoed when transition samples exist but no route supports it."""
+def test_floor_challenger_switches_despite_lacking_transition_route_when_gate_disabled():
+    """Without the reachability gate, a challenger switches once dwell expires even without transition support.
+
+    Phase 4: the transition_switch_veto mechanism is removed. The topology gate (disabled here)
+    is the proper defense. With no gate and no veto, evidence competition and dwell govern the switch.
+    """
     coordinator = _make_coordinator()
     coordinator.room_classifier = SimpleNamespace(
         fingerprint_global=lambda **_kwargs: GlobalFingerprintResult(
@@ -845,14 +854,10 @@ def test_floor_challenger_vetoes_without_plausible_transition_route():
         }
         state.floor_challenger_id = "f2"
         state.floor_challenger_since = 101.0
-        state.challenger_fingerprint_hold_total_s = 16.0
-        state.challenger_fingerprint_hold_expired = True
         coordinator._refresh_trilateration_for_device(device)
 
-    assert state.floor_id == "f1"
-    assert state.floor_challenger_id == "f2"
+    assert state.floor_id == "f2"
     assert device.trilat_floor_diagnostics["transition_support_01"] == 0.0
-    assert device.trilat_floor_diagnostics["transition_switch_veto_active"] is True
 
 
 def test_floor_challenger_can_use_recent_transition_memory_when_room_context_lags():
@@ -931,14 +936,11 @@ def test_floor_challenger_can_use_recent_transition_memory_when_room_context_lag
         }
         state.floor_challenger_id = "f2"
         state.floor_challenger_since = 101.0
-        state.challenger_fingerprint_hold_total_s = 16.0
-        state.challenger_fingerprint_hold_expired = True
         coordinator._refresh_trilateration_for_device(device)
 
     assert state.floor_id == "f2"
     assert device.trilat_floor_diagnostics["transition_support_01"] == 1.0
     assert device.trilat_floor_diagnostics["transition_recent_support_01"] == 1.0
-    assert device.trilat_floor_diagnostics["transition_switch_veto_active"] is False
 
 
 def test_phase2_keeps_mean_sigma_and_z_bounds_same_floor_only():

@@ -1730,9 +1730,6 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         last_status: str = "unknown"
         room_challenger_id: str | None = None
         room_challenger_since: float = 0.0
-        challenger_fingerprint_hold_since: float = 0.0
-        challenger_fingerprint_hold_total_s: float = 0.0
-        challenger_fingerprint_hold_expired: bool = False
         recent_transition_name: str | None = None
         recent_transition_room_area_id: str | None = None
         recent_transition_floor_ids: tuple[str, ...] = ()
@@ -2677,9 +2674,6 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             effective_required_dwell_s: float | None = None,
             challenger_effective_dwell_s: float | None = None,
             fingerprint_result: GlobalFingerprintResult | None = None,
-            fingerprint_hold_active: bool = False,
-            fingerprint_hold_elapsed_s: float | None = None,
-            fingerprint_hold_ceiling_s: float | None = None,
             fingerprint_switch_veto_active: bool = False,
             transition_support_01: float = 0.0,
             transition_immediate_support_01: float = 0.0,
@@ -2687,8 +2681,6 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             transition_recent_age_s: float | None = None,
             transition_recent_name: str | None = None,
             transition_recent_floor_ids: tuple[str, ...] = (),
-            transition_switch_veto_active: bool = False,
-            transition_dwell_reduction_applied: bool = False,
             bootstrap_restored: bool = False,
             bootstrap_hold_active: bool = False,
             bootstrap_hold_remaining_s: float | None = None,
@@ -2753,10 +2745,6 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                     if state.floor_challenger_id
                     else 0.0
                 ),
-                "fingerprint_hold_active": fingerprint_hold_active,
-                "fingerprint_hold_elapsed_s": fingerprint_hold_elapsed_s,
-                "fingerprint_hold_ceiling_s": fingerprint_hold_ceiling_s,
-                "fingerprint_hold_expired": state.challenger_fingerprint_hold_expired,
                 "fingerprint_switch_veto_active": fingerprint_switch_veto_active,
                 "transition_support_01": transition_support_01,
                 "transition_immediate_support_01": transition_immediate_support_01,
@@ -2767,8 +2755,6 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 "transition_recent_floor_names": [
                     self._resolve_floor_name(floor_id) for floor_id in transition_recent_floor_ids
                 ],
-                "transition_switch_veto_active": transition_switch_veto_active,
-                "transition_dwell_reduction_applied": transition_dwell_reduction_applied,
                 "bootstrap_restored": bootstrap_restored,
                 "bootstrap_hold_active": bootstrap_hold_active,
                 "bootstrap_hold_remaining_s": bootstrap_hold_remaining_s,
@@ -3145,24 +3131,16 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         floor_margin: float | None = None
         effective_required_dwell_s = float(policy.floor_dwell_seconds)
         challenger_effective_dwell_s: float | None = None
-        fingerprint_hold_active = False
-        fingerprint_hold_elapsed_s = 0.0
-        fingerprint_hold_ceiling_s = float(policy.floor_dwell_seconds) * 2.0
         fingerprint_switch_veto_active = False
-        transition_switch_veto_active = False
         transition_support_01 = 0.0
         transition_immediate_support_01 = 0.0
         transition_recent_support_01 = 0.0
         transition_recent_age_s: float | None = None
-        transition_dwell_reduction_applied = False
         _gate_result_pre: ReachabilityDecision | None = None
         if state.floor_id is None:
             state.floor_id = best_floor_id
             state.floor_challenger_id = None
             state.floor_challenger_since = 0.0
-            state.challenger_fingerprint_hold_since = 0.0
-            state.challenger_fingerprint_hold_total_s = 0.0
-            state.challenger_fingerprint_hold_expired = False
         elif best_floor_id != state.floor_id:
             current_floor_score = floor_evidence.get(state.floor_id, 0.0)
             floor_margin = (best_floor_score - current_floor_score) / max(best_floor_score, 1e-9)
@@ -3173,9 +3151,6 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 if bootstrap_hold_active and not fingerprint_has_floor_signal:
                     state.floor_challenger_id = None
                     state.floor_challenger_since = 0.0
-                    state.challenger_fingerprint_hold_since = 0.0
-                    state.challenger_fingerprint_hold_total_s = 0.0
-                    state.challenger_fingerprint_hold_expired = False
                     state.challenger_reference_position = None
                     state.challenger_onset_time = 0.0
                     state.challenger_motion_budget_m = 0.0
@@ -3221,9 +3196,6 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                         # Gate blocks before challenger can form or accumulate dwell.
                         state.floor_challenger_id = None
                         state.floor_challenger_since = 0.0
-                        state.challenger_fingerprint_hold_since = 0.0
-                        state.challenger_fingerprint_hold_total_s = 0.0
-                        state.challenger_fingerprint_hold_expired = False
                         state.challenger_reference_position = None
                         state.challenger_onset_time = 0.0
                         state.challenger_motion_budget_m = 0.0
@@ -3233,9 +3205,6 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                         if state.floor_challenger_id != best_floor_id:
                             state.floor_challenger_id = best_floor_id
                             state.floor_challenger_since = nowstamp
-                            state.challenger_fingerprint_hold_since = 0.0
-                            state.challenger_fingerprint_hold_total_s = 0.0
-                            state.challenger_fingerprint_hold_expired = False
                             state.last_fingerprint_veto_at = 0.0
                             # Use last known good position as reference — more reliable than the
                             # current position at challenger onset, which may already be degraded.
@@ -3261,11 +3230,6 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                             if current_floor_fp_score > 0.0
                             else 0.0
                         )
-                        challenger_floor_fp_ratio = (
-                            challenger_floor_fp_score / max(current_floor_fp_score, 1e-9)
-                            if challenger_floor_fp_score > 0.0
-                            else 0.0
-                        )
                         fingerprint_supports_current_floor = (
                             fingerprint_has_floor_signal
                             and fingerprint_result.floor_id == state.floor_id
@@ -3277,51 +3241,12 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                                 )
                             )
                         )
-                        fingerprint_supports_challenger = (
-                            fingerprint_has_floor_signal
-                            and fingerprint_result.floor_id == state.floor_challenger_id
-                            and (
-                                fingerprint_result.floor_confidence >= self._TRILAT_FINGERPRINT_FLOOR_CONFIDENCE_HIGH
-                                or (
-                                    fingerprint_result.floor_confidence >= self._TRILAT_FINGERPRINT_FLOOR_CONFIDENCE_MODERATE
-                                    and challenger_floor_fp_ratio >= self._TRILAT_FINGERPRINT_FLOOR_SCORE_RATIO_HOLD
-                                )
-                            )
-                        )
-
-                        if fingerprint_supports_current_floor and not state.challenger_fingerprint_hold_expired:
-                            if state.challenger_fingerprint_hold_since <= 0.0:
-                                state.challenger_fingerprint_hold_since = nowstamp
-                            active_hold_s = max(0.0, nowstamp - state.challenger_fingerprint_hold_since)
-                            projected_hold_s = state.challenger_fingerprint_hold_total_s + active_hold_s
-                            if projected_hold_s < fingerprint_hold_ceiling_s:
-                                fingerprint_hold_active = True
-                                fingerprint_hold_elapsed_s = projected_hold_s
-                            else:
-                                state.challenger_fingerprint_hold_total_s = fingerprint_hold_ceiling_s
-                                state.challenger_fingerprint_hold_since = 0.0
-                                state.challenger_fingerprint_hold_expired = True
-                                fingerprint_hold_elapsed_s = state.challenger_fingerprint_hold_total_s
-                        else:
-                            if state.challenger_fingerprint_hold_since > 0.0:
-                                state.challenger_fingerprint_hold_total_s += max(
-                                    0.0,
-                                    nowstamp - state.challenger_fingerprint_hold_since,
-                                )
-                                state.challenger_fingerprint_hold_since = 0.0
-                            fingerprint_hold_elapsed_s = state.challenger_fingerprint_hold_total_s
-
-                        if fingerprint_supports_challenger:
-                            effective_required_dwell_s *= 0.5
 
                         transition_immediate_support_01 = _transition_support_for_challenger(state.floor_challenger_id)
                         transition_recent_support_01, transition_recent_age_s = _recent_transition_support_for_challenger(
                             state.floor_challenger_id
                         )
                         transition_support_01 = max(transition_immediate_support_01, transition_recent_support_01)
-                        if transition_support_01 > self._TRILAT_TRANSITION_SUPPORT_REQUIRED:
-                            effective_required_dwell_s *= (1.0 - (0.4 * transition_support_01))
-                            transition_dwell_reduction_applied = True
 
                         # Update motion budget while challenger is active
                         if state.floor_challenger_id is not None and state.challenger_onset_time > 0.0:
@@ -3334,14 +3259,14 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
 
                         challenger_effective_dwell_s = max(
                             0.0,
-                            (nowstamp - state.floor_challenger_since) - fingerprint_hold_elapsed_s,
+                            nowstamp - state.floor_challenger_since,
                         )
 
-                        # Hysteresis is the last line of defence (Phase 3 priority order).
+                        # Hysteresis is the last line of defence (Phase 3 + 4 priority order).
                         veto_hold_active = (
                             nowstamp - state.last_fingerprint_veto_at
                         ) < self._FINGERPRINT_VETO_HOLD_S
-                        if not fingerprint_hold_active and challenger_effective_dwell_s >= effective_required_dwell_s:
+                        if challenger_effective_dwell_s >= effective_required_dwell_s:
                             if fingerprint_supports_current_floor:
                                 # Safety net: combined evidence already de-prioritises this
                                 # challenger via fingerprint weighting, but veto if it still
@@ -3352,21 +3277,10 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                                 # Veto hold window: fp_conf briefly dropped but the veto was
                                 # active recently — do not allow a single-cycle dip to switch.
                                 fingerprint_switch_veto_active = True
-                            elif (
-                                int(transition_context_diag.get("transition_layout_sample_count", 0) or 0) > 0
-                                and transition_support_01 <= self._TRILAT_TRANSITION_SUPPORT_REQUIRED
-                                and fingerprint_has_floor_signal
-                                and state.floor_id is not None
-                                and current_floor_fp_score >= challenger_floor_fp_score
-                            ):
-                                transition_switch_veto_active = True
                             else:
                                 state.floor_id = best_floor_id
                                 state.floor_challenger_id = None
                                 state.floor_challenger_since = 0.0
-                                state.challenger_fingerprint_hold_since = 0.0
-                                state.challenger_fingerprint_hold_total_s = 0.0
-                                state.challenger_fingerprint_hold_expired = False
                                 state.challenger_reference_position = None
                                 state.challenger_onset_time = 0.0
                                 state.challenger_motion_budget_m = 0.0
@@ -3375,9 +3289,6 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 _gate_result_pre = None
                 state.floor_challenger_id = None
                 state.floor_challenger_since = 0.0
-                state.challenger_fingerprint_hold_since = 0.0
-                state.challenger_fingerprint_hold_total_s = 0.0
-                state.challenger_fingerprint_hold_expired = False
                 state.challenger_reference_position = None
                 state.challenger_onset_time = 0.0
                 state.challenger_motion_budget_m = 0.0
@@ -3387,9 +3298,6 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             floor_margin = 0.0
             state.floor_challenger_id = None
             state.floor_challenger_since = 0.0
-            state.challenger_fingerprint_hold_since = 0.0
-            state.challenger_fingerprint_hold_total_s = 0.0
-            state.challenger_fingerprint_hold_expired = False
             state.challenger_reference_position = None
             state.challenger_onset_time = 0.0
             state.challenger_motion_budget_m = 0.0
@@ -3425,9 +3333,6 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             effective_required_dwell_s=effective_required_dwell_s,
             challenger_effective_dwell_s=challenger_effective_dwell_s,
             fingerprint_result=fingerprint_result,
-            fingerprint_hold_active=fingerprint_hold_active,
-            fingerprint_hold_elapsed_s=fingerprint_hold_elapsed_s,
-            fingerprint_hold_ceiling_s=fingerprint_hold_ceiling_s,
             fingerprint_switch_veto_active=fingerprint_switch_veto_active,
             transition_support_01=transition_support_01,
             transition_immediate_support_01=transition_immediate_support_01,
@@ -3435,8 +3340,6 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             transition_recent_age_s=transition_recent_age_s,
             transition_recent_name=state.recent_transition_name,
             transition_recent_floor_ids=state.recent_transition_floor_ids,
-            transition_switch_veto_active=transition_switch_veto_active,
-            transition_dwell_reduction_applied=transition_dwell_reduction_applied,
             bootstrap_restored=bootstrap_restored,
             bootstrap_hold_active=bootstrap_hold_active,
             bootstrap_hold_remaining_s=bootstrap_hold_remaining_s,
@@ -3478,9 +3381,6 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 bootstrap_hold_remaining_s=bootstrap_hold_remaining_s,
                 challenger_effective_dwell_s=challenger_effective_dwell_s,
                 fingerprint_result=fingerprint_result,
-                fingerprint_hold_active=fingerprint_hold_active,
-                fingerprint_hold_elapsed_s=fingerprint_hold_elapsed_s,
-                fingerprint_hold_ceiling_s=fingerprint_hold_ceiling_s,
                 fingerprint_switch_veto_active=fingerprint_switch_veto_active,
                 transition_support_01=transition_support_01,
                 transition_immediate_support_01=transition_immediate_support_01,
@@ -3488,8 +3388,6 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 transition_recent_age_s=transition_recent_age_s,
                 transition_recent_name=state.recent_transition_name,
                 transition_recent_floor_ids=state.recent_transition_floor_ids,
-                transition_switch_veto_active=transition_switch_veto_active,
-                transition_dwell_reduction_applied=transition_dwell_reduction_applied,
             )
 
         if _debug_this_device:
@@ -3506,10 +3404,9 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 (
                     "Trilat floor diag: %s selected=%s challenger=%s margin=%s "
                     "cross_floor=%d switches=%d resets=%d fp_floor=%s fp_conf=%s "
-                    "fp_reason=%s fp_hold=%s/%s fp_veto=%s effective_dwell=%s/%s "
+                    "fp_reason=%s fp_veto=%s effective_dwell=%s/%s "
                     "transition_support=%s transition_immediate=%s transition_recent=%s "
-                    "transition_recent_age=%s transition_recent_name=%s transition_veto=%s "
-                    "transition_dwell=%s evidence=[%s]"
+                    "transition_recent_age=%s transition_recent_name=%s evidence=[%s]"
                 ),
                 device.name,
                 selected_floor_id,
@@ -3521,8 +3418,6 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 fingerprint_result.floor_id,
                 f"{fingerprint_result.floor_confidence:.3f}",
                 fingerprint_result.reason,
-                f"{fingerprint_hold_elapsed_s:.3f}" if fingerprint_hold_elapsed_s is not None else "n/a",
-                f"{fingerprint_hold_ceiling_s:.3f}" if fingerprint_hold_ceiling_s is not None else "n/a",
                 fingerprint_switch_veto_active,
                 f"{challenger_effective_dwell_s:.3f}" if challenger_effective_dwell_s is not None else "n/a",
                 f"{effective_required_dwell_s:.3f}" if effective_required_dwell_s is not None else "n/a",
@@ -3531,8 +3426,6 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 f"{transition_recent_support_01:.3f}",
                 f"{transition_recent_age_s:.3f}" if transition_recent_age_s is not None else "n/a",
                 state.recent_transition_name,
-                transition_switch_veto_active,
-                transition_dwell_reduction_applied,
                 evidence_str,
             )
 
