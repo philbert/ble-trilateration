@@ -1,5 +1,9 @@
 # BLE Trilateration
 
+<p align="center">
+  <img src="img/ble-trilateration.jpeg" alt="BLE Trilateration" width="420">
+</p>
+
 **BLE Trilateration** is a [Home Assistant](https://home-assistant.io/) custom integration that tracks the physical location of Bluetooth Low Energy (BLE) devices inside your home using a network of BLE scanner anchors and a topology-aware trilateration engine.
 
 > **Forked from [Bermuda BLE Trilateration](https://github.com/agittins/bermuda) by [@agittins](https://github.com/agittins).** Full credit to the original author for the foundational integration design. This fork continues the project as an independent effort with significant changes to the estimation pipeline, floor inference, and configuration model.
