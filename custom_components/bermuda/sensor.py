@@ -156,6 +156,14 @@ async def async_setup_entry(
         )
     )
 
+    # Catch up on devices/scanners that already existed before this platform finished
+    # wiring its dispatcher callbacks. Without this pass, restored per-scanner BLE
+    # status sensors can stay unavailable until a later dispatcher event happens.
+    for address, device in list(coordinator.devices.items()):
+        if device.create_sensor:
+            device_new(address)
+    create_scanner_entities()
+
 
 RETIRED_SENSOR_UNIQUE_ID_SUFFIXES = (
     "_floor",

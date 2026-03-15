@@ -15,18 +15,19 @@ from custom_components.bermuda.bermuda_device import BermudaDevice
 from custom_components.bermuda.const import DOMAIN, NAME
 from custom_components.bermuda.sensor import (
     BermudaSensorGeometryQuality,
+    BermudaSensorHorizontalSpeed,
     BermudaSensorPositionConfidence,
     BermudaSensorResidualConsistency,
     BermudaSensorScannerAdvertStatus,
+    BermudaSensorTrackedDeviceAdvertStatus,
+    BermudaSensorTrackingConfidence,
+    BermudaSensorTrilatAnchorCount,
     BermudaSensorTrilatFloor,
     BermudaSensorTrilatX,
     BermudaSensorTrilatY,
     BermudaSensorTrilatZ,
-    BermudaSensorTrackedDeviceAdvertStatus,
-    BermudaSensorTrackingConfidence,
-    BermudaSensorHorizontalSpeed,
-    BermudaSensorTrilatAnchorCount,
     BermudaSensorVerticalSpeed,
+    async_setup_entry as sensor_async_setup_entry,
     _remove_retired_sensor_entities,
 )
 
@@ -290,6 +291,38 @@ async def test_per_scanner_ble_status_sensors_expose_structured_status(hass) -> 
         "tracked_device_name": tracked.name,
         "tracked_device_address": tracked.address,
     }
+
+
+async def test_sensor_platform_catches_up_existing_tracked_devices_and_scanners(hass) -> None:
+    """Sensor setup should create BLE-status entities for already-known devices/scanners."""
+    entry = await setup_integration(hass)
+    coordinator = entry.runtime_data.coordinator
+
+    tracked = BermudaDevice("AA:BB:CC:DD:EE:71", coordinator)
+    tracked.create_sensor = True
+    coordinator.devices[tracked.address] = tracked
+
+    scanner = _create_scanner(coordinator, "AA:BB:CC:DD:EE:72")
+
+    added_entities = []
+
+    def _async_add_entities(entities, _update_before_add=False):
+        added_entities.extend(entities)
+
+    await sensor_async_setup_entry(hass, entry, _async_add_entities)
+
+    assert any(
+        isinstance(entity, BermudaSensorScannerAdvertStatus)
+        and entity.address == tracked.address
+        and entity._scanner.address == scanner.address
+        for entity in added_entities
+    )
+    assert any(
+        isinstance(entity, BermudaSensorTrackedDeviceAdvertStatus)
+        and entity.address == scanner.address
+        and entity._tracked_device.address == tracked.address
+        for entity in added_entities
+    )
 
 
 async def test_trilat_anchor_count_sensor_exposes_anchor_status_lines(hass) -> None:
