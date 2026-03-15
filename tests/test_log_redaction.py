@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 
-from custom_components.bermuda.const import BermudaSecretFilter, redact_secret_hex32
+from custom_components.ble_trilateration.const import BermudaSecretFilter, redact_secret_hex32
 
 
 def test_redact_secret_hex32_masks_irk_like_values() -> None:
@@ -18,7 +18,7 @@ def test_redact_secret_hex32_masks_irk_like_values() -> None:
 def test_secret_filter_rewrites_logrecord_message() -> None:
     """The central logging filter should mask secrets without per-call redaction."""
     record = logging.LogRecord(
-        name="custom_components.bermuda",
+        name="custom_components.ble_trilateration",
         level=logging.DEBUG,
         pathname=__file__,
         lineno=1,

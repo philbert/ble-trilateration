@@ -1,4 +1,4 @@
-"""Test Bermuda BLE Trilateration setup process."""
+"""Test BLE Trilateration setup process."""
 
 from __future__ import annotations
 
@@ -7,8 +7,8 @@ from homeassistant.core import HomeAssistant
 # from homeassistant.exceptions import ConfigEntryNotReady
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.bermuda.const import DOMAIN, IrkTypes
-from custom_components.bermuda.coordinator import BermudaDataUpdateCoordinator
+from custom_components.ble_trilateration.const import DOMAIN, IrkTypes
+from custom_components.ble_trilateration.coordinator import BermudaDataUpdateCoordinator
 
 from .const import MOCK_CONFIG
 from homeassistant.config_entries import ConfigEntryState

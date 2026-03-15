@@ -1,8 +1,8 @@
 """
-Custom integration to integrate Bermuda BLE Trilateration with Home Assistant.
+Custom integration to integrate BLE Trilateration with Home Assistant.
 
 For more details about this integration, please refer to
-https://github.com/agittins/bermuda
+https://github.com/philbert/ble-trilateration
 """
 
 from __future__ import annotations

@@ -2,8 +2,8 @@
   "config": {
     "step": {
       "user": {
-        "title": "Bermuda BLE Trilateration",
-        "description": "If you need help with the configuration have a look at our [GitHub page](https://github.com/agittins/bermuda)",
+        "title": "BLE Trilateration",
+        "description": "If you need help with the configuration have a look at our [GitHub page](https://github.com/philbert/ble-trilateration)",
         "data": {
           "username": "Username",
           "password": "Password"
@@ -20,13 +20,13 @@
   "options": {
     "error": {
       "some_active": "You have at least some active devices, this is good.",
-      "no_scanners": "You need to configure some bluetooth scanners before Bermuda will have anything to work with. \nAny one of esphome bluetooth_proxy, Shelly bluetooth proxy or local bluetooth adaptor should get you started.",
-      "no_devices": "No bluetooth devices are actively being reported from your scanners. \nYou will need to solve this before Bermuda can be of much help."
+      "no_scanners": "You need to configure some bluetooth scanners before BLE Trilateration will have anything to work with. \nAny one of esphome bluetooth_proxy, Shelly bluetooth proxy or local bluetooth adaptor should get you started.",
+      "no_devices": "No bluetooth devices are actively being reported from your scanners. \nYou will need to solve this before BLE Trilateration can be of much help."
     },
     "step": {
       "init": {
-        "title": "Configure Bermuda",
-        "description": "Bermuda can currently see:\n- {device_counter_active} active out of {device_counter_devices} bluetooth devices.\n- {scanner_counter_active} active out of {scanner_counter_scanners} bluetooth scanner devices.\n\n{status}"
+        "title": "Configure BLE Trilateration",
+        "description": "BLE Trilateration can currently see:\n- {device_counter_active} active out of {device_counter_devices} bluetooth devices.\n- {scanner_counter_active} active out of {scanner_counter_scanners} bluetooth scanner devices.\n\n{status}"
       },
       "globalopts": {
         "title": "Global settings",
@@ -52,7 +52,7 @@
       },
       "selectdevices": {
         "title": "Select Devices",
-        "description": "Choose which devices you wish to track. If no devices appear below, then Bermuda is not seeing any data coming from Bluetooth scanners. Ensure you have an esphome ble_proxy device, Shelly devices with bluetooth proxy configured or a local bluetooth adaptor."
+        "description": "Choose which devices you wish to track. If no devices appear below, then BLE Trilateration is not seeing any data coming from Bluetooth scanners. Ensure you have an esphome ble_proxy device, Shelly devices with bluetooth proxy configured or a local bluetooth adaptor."
       },
       "calibration1_global": {
         "title": "Calibration 1: Global",
@@ -215,7 +215,7 @@
     },
     "record_transition_sample": {
       "name": "Record Transition Sample",
-      "description": "Start a timed capture for one Bermuda-native floor-transition sample tied to a tracked device.",
+      "description": "Start a timed capture for one BLE Trilateration-native floor-transition sample tied to a tracked device.",
       "fields": {
         "device_id": {
           "name": "Device",
@@ -255,7 +255,7 @@
         },
         "capture_duration_s": {
           "name": "Capture Duration",
-          "description": "Capture duration in seconds. Bermuda records live anchor observations during this window before storing the transition sample."
+          "description": "Capture duration in seconds. BLE Trilateration records live anchor observations during this window before storing the transition sample."
         }
       }
     }
@@ -263,20 +263,20 @@
   "issues": {
     "scanner_without_area": {
       "title": "Some Bluetooth Proxies don't have an AREA",
-      "description": "Bermuda requires all bluetooth proxies to have a valid area assigned in order to work correctly. Assign an area by visiting each proxy's device page (via `Devices and Services`), and click the pencil icon in the top-right to assign an area. The following proxies are missing an area assignment:\n\n{scannerlist}"
+      "description": "BLE Trilateration requires all bluetooth proxies to have a valid area assigned in order to work correctly. Assign an area by visiting each proxy's device page (via `Devices and Services`), and click the pencil icon in the top-right to assign an area. The following proxies are missing an area assignment:\n\n{scannerlist}"
     },
     "trilat_without_anchors": {
       "title": "Trilateration is enabled but no anchors are configured",
-      "description": "Bermuda trilateration requires at least three scanner anchors with `Trilat Anchor Enabled` turned on and valid `Anchor X/Y` coordinates on the same floor. Configure anchors on your scanner entities. Current scanners without usable anchor configuration:\n\n{scannerlist}"
+      "description": "BLE Trilateration requires at least three scanner anchors with `Trilat Anchor Enabled` turned on and valid `Anchor X/Y` coordinates on the same floor. Configure anchors on your scanner entities. Current scanners without usable anchor configuration:\n\n{scannerlist}"
     },
     "calibration_layout_mismatch": {
       "title": "Calibration samples don't match the current anchor layout",
-      "description": "Bermuda has {sample_count} saved calibration samples, but none match the current anchor layout `{current_layout_hash}`. The most common saved layout is `{dominant_layout_hash}` with {dominant_layout_count} sample(s).\n\nAnchor differences detected:\n{changed_anchor_lines}\n\nIf you physically moved anchors, keep the samples as historical and record new ones. If you only corrected anchor coordinates, you can update the stored sample geometry to match the current anchors.",
+      "description": "BLE Trilateration has {sample_count} saved calibration samples, but none match the current anchor layout `{current_layout_hash}`. The most common saved layout is `{dominant_layout_hash}` with {dominant_layout_count} sample(s).\n\nAnchor differences detected:\n{changed_anchor_lines}\n\nIf you physically moved anchors, keep the samples as historical and record new ones. If you only corrected anchor coordinates, you can update the stored sample geometry to match the current anchors.",
       "fix_flow": {
         "step": {
           "init": {
             "title": "Confirm calibration sample repair",
-            "description": "Bermuda found {sample_count} saved calibration samples that do not match the current configured anchor layout `{current_layout_hash}`.\n\nUse this repair only if no physical anchor layout change occurred and you merely corrected configured anchor coordinates. In that case, BLE Trilateration will update the stored anchor geometry inside `ble_trilateration/calibration_samples` to match the current anchors.\n\nIf anchors were physically moved, do not run this repair. Cancel instead and record new calibration samples for the new physical layout.",
+            "description": "BLE Trilateration found {sample_count} saved calibration samples that do not match the current configured anchor layout `{current_layout_hash}`.\n\nUse this repair only if no physical anchor layout change occurred and you merely corrected configured anchor coordinates. In that case, BLE Trilateration will update the stored anchor geometry inside `ble_trilateration/calibration_samples` to match the current anchors.\n\nIf anchors were physically moved, do not run this repair. Cancel instead and record new calibration samples for the new physical layout.",
             "data": {
               "update_stored_sample_geometry": "Update stored sample geometry"
             }

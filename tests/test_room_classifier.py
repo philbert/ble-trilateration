@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from custom_components.bermuda.room_classifier import BermudaRoomClassifier
+from custom_components.ble_trilateration.room_classifier import BermudaRoomClassifier
 
 
 class _FakeCalibration:

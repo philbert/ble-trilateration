@@ -9,8 +9,8 @@ from homeassistant.helpers import entity_registry as er
 from homeassistant.setup import async_setup_component
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.bermuda.bermuda_device import BermudaDevice
-from custom_components.bermuda.const import DOMAIN, NAME
+from custom_components.ble_trilateration.bermuda_device import BermudaDevice
+from custom_components.ble_trilateration.const import DOMAIN, NAME
 
 from .const import MOCK_CONFIG
 
@@ -20,7 +20,7 @@ async def setup_integration(hass):
     entry = MockConfigEntry(domain=DOMAIN, data=MOCK_CONFIG, entry_id="test-number", title=NAME)
     entry.add_to_hass(hass)
 
-    with patch("custom_components.bermuda.BermudaDataUpdateCoordinator.async_refresh"):
+    with patch("custom_components.ble_trilateration.BermudaDataUpdateCoordinator.async_refresh"):
         assert await async_setup_component(hass, DOMAIN, {})
 
     await hass.async_block_till_done()
@@ -75,7 +75,7 @@ async def test_legacy_scanner_number_entities_removed_on_setup(hass) -> None:
         suggested_object_id="legacy_scanner_rssi_offset",
     )
 
-    with patch("custom_components.bermuda.BermudaDataUpdateCoordinator.async_refresh"):
+    with patch("custom_components.ble_trilateration.BermudaDataUpdateCoordinator.async_refresh"):
         assert await async_setup_component(hass, DOMAIN, {})
 
     await hass.async_block_till_done()

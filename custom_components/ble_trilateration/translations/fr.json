@@ -2,8 +2,8 @@
   "config": {
     "step": {
       "user": {
-        "title": "Bermuda BLE Trilateration",
-        "description": "Si vous avez besoin d'aide pour la configuration, regardez ici: https://github.com/agittins/bermuda",
+        "title": "BLE Trilateration",
+        "description": "Si vous avez besoin d'aide pour la configuration, regardez ici: https://github.com/philbert/ble-trilateration",
         "data": {
           "username": "Identifiant",
           "password": "Mot de Passe"

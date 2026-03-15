@@ -6,7 +6,7 @@ import math
 
 import pytest
 
-from custom_components.bermuda.ranging_model import BermudaRangingModel
+from custom_components.ble_trilateration.ranging_model import BermudaRangingModel
 
 
 class _FakeCalibration:

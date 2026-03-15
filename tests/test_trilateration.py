@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 
-from custom_components.bermuda.trilateration import (
+from custom_components.ble_trilateration.trilateration import (
     AnchorMeasurement,
     SolvePrior2D,
     SolvePrior3D,

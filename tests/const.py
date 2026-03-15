@@ -1,27 +1,27 @@
-"""Constants for Bermuda BLE Trilateration tests."""
+"""Constants for BLE Trilateration tests."""
 
 from __future__ import annotations
 
-import custom_components.bermuda.const
+import custom_components.ble_trilateration.const
 
-# from custom_components.bermuda.const import CONF_DEVICES
+# from custom_components.ble_trilateration.const import CONF_DEVICES
 MOCK_OPTIONS = {
-    custom_components.bermuda.const.CONF_MAX_VELOCITY: 3.0,
-    custom_components.bermuda.const.CONF_DEVTRACK_TIMEOUT: 30,
-    custom_components.bermuda.const.CONF_UPDATE_INTERVAL: 10.0,
-    custom_components.bermuda.const.CONF_SMOOTHING_SAMPLES: 20,
-    custom_components.bermuda.const.CONF_DEVICES: [],  # ["EE:E8:37:9F:6B:54"],
+    custom_components.ble_trilateration.const.CONF_MAX_VELOCITY: 3.0,
+    custom_components.ble_trilateration.const.CONF_DEVTRACK_TIMEOUT: 30,
+    custom_components.ble_trilateration.const.CONF_UPDATE_INTERVAL: 10.0,
+    custom_components.ble_trilateration.const.CONF_SMOOTHING_SAMPLES: 20,
+    custom_components.ble_trilateration.const.CONF_DEVICES: [],  # ["EE:E8:37:9F:6B:54"],
 }
 
 MOCK_OPTIONS_GLOBALS = {
-    custom_components.bermuda.const.CONF_MAX_VELOCITY: 3.0,
-    custom_components.bermuda.const.CONF_DEVTRACK_TIMEOUT: 30,
-    custom_components.bermuda.const.CONF_UPDATE_INTERVAL: 10.0,
-    custom_components.bermuda.const.CONF_SMOOTHING_SAMPLES: 20,
+    custom_components.ble_trilateration.const.CONF_MAX_VELOCITY: 3.0,
+    custom_components.ble_trilateration.const.CONF_DEVTRACK_TIMEOUT: 30,
+    custom_components.ble_trilateration.const.CONF_UPDATE_INTERVAL: 10.0,
+    custom_components.ble_trilateration.const.CONF_SMOOTHING_SAMPLES: 20,
 }
 
 MOCK_OPTIONS_DEVICES = {
-    custom_components.bermuda.const.CONF_DEVICES: [],  # ["EE:E8:37:9F:6B:54"],
+    custom_components.ble_trilateration.const.CONF_DEVICES: [],  # ["EE:E8:37:9F:6B:54"],
 }
 
 MOCK_CONFIG = {"source": "user"}

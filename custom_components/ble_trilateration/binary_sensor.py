@@ -1,4 +1,4 @@
-"""Binary sensor platform for Bermuda BLE Trilateration."""
+"""Binary sensor platform for BLE Trilateration."""
 
 from __future__ import annotations
 

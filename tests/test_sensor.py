@@ -11,9 +11,9 @@ from homeassistant.helpers import entity_registry as er
 from homeassistant.setup import async_setup_component
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.bermuda.bermuda_device import BermudaDevice
-from custom_components.bermuda.const import DOMAIN, NAME
-from custom_components.bermuda.sensor import (
+from custom_components.ble_trilateration.bermuda_device import BermudaDevice
+from custom_components.ble_trilateration.const import DOMAIN, NAME
+from custom_components.ble_trilateration.sensor import (
     BermudaSensorGeometryQuality,
     BermudaSensorHorizontalSpeed,
     BermudaSensorPositionConfidence,
@@ -39,7 +39,7 @@ async def setup_integration(hass):
     entry = MockConfigEntry(domain=DOMAIN, data=MOCK_CONFIG, entry_id="test-sensor", title=NAME)
     entry.add_to_hass(hass)
 
-    with patch("custom_components.bermuda.BermudaDataUpdateCoordinator.async_refresh"):
+    with patch("custom_components.ble_trilateration.BermudaDataUpdateCoordinator.async_refresh"):
         assert await async_setup_component(hass, DOMAIN, {})
 
     await hass.async_block_till_done()

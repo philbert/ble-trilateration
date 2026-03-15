@@ -1,4 +1,4 @@
-"""Sensor platform for Bermuda BLE Trilateration."""
+"""Sensor platform for BLE Trilateration."""
 
 from __future__ import annotations
 

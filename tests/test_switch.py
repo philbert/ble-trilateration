@@ -1,4 +1,4 @@
-"""Test Bermuda BLE Trilateration switch."""
+"""Test BLE Trilateration switch."""
 
 from __future__ import annotations
 
@@ -7,14 +7,14 @@ from __future__ import annotations
 # from homeassistant.const import ATTR_ENTITY_ID
 
 
-# from custom_components.bermuda.const import DEFAULT_NAME
+# from custom_components.ble_trilateration.const import DEFAULT_NAME
 
 
 # from unittest.mock import call
 # from unittest.mock import patch
 
 
-# from custom_components.bermuda.const import SWITCH
+# from custom_components.ble_trilateration.const import SWITCH
 
 # Not currently used - commenting out
 # async def test_switch_services(hass: HomeAssistant):
@@ -29,7 +29,7 @@ from __future__ import annotations
 # additional things, like whether a function
 # was called or what arguments it was called with
 # with patch(
-#     "custom_components.bermuda.BermudaDataUpdateCoordinator.async_set_title"
+#     "custom_components.ble_trilateration.BermudaDataUpdateCoordinator.async_set_title"
 # ) as title_func:
 #     await hass.services.async_call(
 #         SWITCH,

@@ -1,10 +1,10 @@
 {
-  "title": "Bermuda BLE Trilateratie",
+  "title": "BLE Trilateratie",
   "config": {
     "step": {
       "user": {
-        "title": "Bermuda BLE Trilateration",
-        "description": "Als je hulp nodig hebt met de configuratie, kijk dan op onze [GitHub pagina](https://github.com/agittins/bermuda)",
+        "title": "BLE Trilateration",
+        "description": "Als je hulp nodig hebt met de configuratie, kijk dan op onze [GitHub pagina](https://github.com/philbert/ble-trilateration)",
         "data": {
           "username": "Gebruikersnaam",
           "password": "Wachtwoord"
@@ -21,13 +21,13 @@
   "options": {
     "error": {
       "some_active": "Er zijn ten minste enkele actieve apparaten, dat is goed.",
-      "no_scanners": "Je moet enkele Bluetooth-scanners configureren voordat Bermuda iets heeft om mee te werken. \nMet ESPhome bluetooth_proxy, Shelly bluetooth proxy of een lokale bluetooth adapter kun je aan de slag.",
-      "no_devices": "Er worden geen bluetooth-apparaten actief gemeld door uw scanners. \nDit moet eerst opgelost worden voordat Bermuda ergens mee kan helpen."
+      "no_scanners": "Je moet enkele Bluetooth-scanners configureren voordat BLE Trilateration iets heeft om mee te werken. \nMet ESPhome bluetooth_proxy, Shelly bluetooth proxy of een lokale bluetooth adapter kun je aan de slag.",
+      "no_devices": "Er worden geen bluetooth-apparaten actief gemeld door uw scanners. \nDit moet eerst opgelost worden voordat BLE Trilateration ergens mee kan helpen."
     },
     "step": {
       "init": {
-        "title": "Bermuda configureren",
-        "description": "Bermuda kan op dit moment het volgende zien:\n- {device_counter_active}, van de {device_counter_devices}, actieve Bluetooth-apparaten.\n- {scanner_counter_active}, van de {scanner_counter_scanners}, actieve Bluetooth-scanners.\n\n{status}"
+        "title": "BLE Trilateration configureren",
+        "description": "BLE Trilateration kan op dit moment het volgende zien:\n- {device_counter_active}, van de {device_counter_devices}, actieve Bluetooth-apparaten.\n- {scanner_counter_active}, van de {scanner_counter_scanners}, actieve Bluetooth-scanners.\n\n{status}"
       },
       "globalopts": {
         "title": "Globale instellingen",
@@ -53,7 +53,7 @@
       },
       "selectdevices": {
         "title": "Selecteer apparaten",
-        "description": "Kies welke apparaten moeten worden gevolgd. Als er geen apparaten hieronder verschijnen, ziet Bermuda geen gegevens van Bluetooth-scanners. Zorg ervoor dat je een esphome ble_proxy-apparaat, Shelly-apparaten met Bluetooth-proxy geconfigureerd of een lokale Bluetooth-adapter hebt.",
+        "description": "Kies welke apparaten moeten worden gevolgd. Als er geen apparaten hieronder verschijnen, ziet BLE Trilateration geen gegevens van Bluetooth-scanners. Zorg ervoor dat je een esphome ble_proxy-apparaat, Shelly-apparaten met Bluetooth-proxy geconfigureerd of een lokale Bluetooth-adapter hebt.",
         "data": {
           "configured_devices": "Apparaat"
         }

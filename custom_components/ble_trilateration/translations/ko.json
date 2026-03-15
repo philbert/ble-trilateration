@@ -2,8 +2,8 @@
     "config": {
         "step": {
             "user": {
-                "title": "Bermuda BLE 삼각측량",
-                "description": "설정에 도움이 필요하시면 [GitHub 페이지](https://github.com/agittins/bermuda)를 참조하세요.",
+                "title": "BLE Trilateration",
+                "description": "설정에 도움이 필요하시면 [GitHub 페이지](https://github.com/philbert/ble-trilateration)를 참조하세요.",
                 "data": {
                     "username": "사용자 이름",
                     "password": "비밀번호"
@@ -20,13 +20,13 @@
     "options": {
         "error": {
             "some_active": "활성 상태인 장치가 일부 있습니다. 좋습니다.",
-            "no_scanners": "Bermuda가 작동하려면 블루투스 스캐너를 설정해야 합니다. esphome bluetooth_proxy, Shelly bluetooth proxy 또는 로컬 블루투스 어댑터로 시작할 수 있습니다.",
-            "no_devices": "스캐너에서 활발하게 보고하는 블루투스 장치가 없습니다. Bermuda가 제대로 작동하려면 이 문제를 먼저 해결해야 합니다."
+            "no_scanners": "BLE Trilateration가 작동하려면 블루투스 스캐너를 설정해야 합니다. esphome bluetooth_proxy, Shelly bluetooth proxy 또는 로컬 블루투스 어댑터로 시작할 수 있습니다.",
+            "no_devices": "스캐너에서 활발하게 보고하는 블루투스 장치가 없습니다. BLE Trilateration가 제대로 작동하려면 이 문제를 먼저 해결해야 합니다."
         },
         "step": {
             "init": {
-                "title": "Bermuda 설정",
-                "description": "Bermuda가 현재 감지한 내용:\n- 블루투스 장치 {device_counter_devices}개 중 {device_counter_active}개 활성.\n- 블루투스 스캐너 {scanner_counter_scanners}개 중 {scanner_counter_active}개 활성.\n\n{status}"
+                "title": "BLE Trilateration 설정",
+                "description": "BLE Trilateration가 현재 감지한 내용:\n- 블루투스 장치 {device_counter_devices}개 중 {device_counter_active}개 활성.\n- 블루투스 스캐너 {scanner_counter_scanners}개 중 {scanner_counter_active}개 활성.\n\n{status}"
             },
             "globalopts": {
                 "title": "전역 설정",
@@ -52,7 +52,7 @@
             },
             "selectdevices": {
                 "title": "장치 선택",
-                "description": "추적할 장치를 선택하세요. 아래에 장치가 나타나지 않으면 Bermuda가 블루투스 스캐너에서 데이터를 받지 못하는 것입니다. esphome ble_proxy 장치, 블루투스 프록시가 설정된 Shelly 장치 또는 로컬 블루투스 어댑터가 있는지 확인하세요."
+                "description": "추적할 장치를 선택하세요. 아래에 장치가 나타나지 않으면 BLE Trilateration가 블루투스 스캐너에서 데이터를 받지 못하는 것입니다. esphome ble_proxy 장치, 블루투스 프록시가 설정된 Shelly 장치 또는 로컬 블루투스 어댑터가 있는지 확인하세요."
             },
             "calibration1_global": {
                 "title": "보정 1: 전역 설정",
@@ -117,7 +117,7 @@
     "issues": {
         "scanner_without_area": {
             "title": "일부 블루투스 프록시에 '구역(AREA)'이 없습니다",
-            "description": "Bermuda가 올바르게 작동하려면 모든 블루투스 프록시에 유효한 구역이 할당되어야 합니다. 각 프록시의 장치 페이지(`설정 > 장치 및 서비스` 경유)를 방문하여 오른쪽 상단의 연필 아이콘을 클릭해 구역을 할당하세요. 다음 프록시에 구역 할당이 누락되었습니다:\n\n{scannerlist}"
+            "description": "BLE Trilateration가 올바르게 작동하려면 모든 블루투스 프록시에 유효한 구역이 할당되어야 합니다. 각 프록시의 장치 페이지(`설정 > 장치 및 서비스` 경유)를 방문하여 오른쪽 상단의 연필 아이콘을 클릭해 구역을 할당하세요. 다음 프록시에 구역 할당이 누락되었습니다:\n\n{scannerlist}"
         }
     }
 }

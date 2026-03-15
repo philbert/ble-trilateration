@@ -1,4 +1,4 @@
-"""Tests for Bermuda calibration sample capture and management."""
+"""Tests for BLE Trilateration calibration sample capture and management."""
 
 from __future__ import annotations
 
@@ -15,13 +15,13 @@ from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import floor_registry as fr
 from homeassistant.helpers import issue_registry as ir
 
-from custom_components.bermuda.bermuda_device import BermudaDevice
-from custom_components.bermuda.const import (
+from custom_components.ble_trilateration.bermuda_device import BermudaDevice
+from custom_components.ble_trilateration.const import (
     CALIBRATION_EVENT_SAMPLE_CAPTURED,
     DOMAIN,
     REPAIR_CALIBRATION_LAYOUT_MISMATCH,
 )
-from custom_components.bermuda.repairs import async_create_fix_flow
+from custom_components.ble_trilateration.repairs import async_create_fix_flow
 
 
 async def test_record_calibration_sample_service(hass: HomeAssistant, setup_bermuda_entry):
@@ -63,7 +63,7 @@ async def test_record_calibration_sample_service(hass: HomeAssistant, setup_berm
 
     unsub = hass.bus.async_listen(CALIBRATION_EVENT_SAMPLE_CAPTURED, _capture_event)
     try:
-        with patch("custom_components.bermuda.calibration.persistent_notification.async_create") as notify_mock:
+        with patch("custom_components.ble_trilateration.calibration.persistent_notification.async_create") as notify_mock:
             response = await hass.services.async_call(
                 DOMAIN,
                 "record_calibration_sample",
@@ -100,8 +100,8 @@ async def test_record_calibration_sample_service(hass: HomeAssistant, setup_berm
             start_call = notify_mock.call_args_list[0]
             finish_call = notify_mock.call_args_list[1]
 
-            assert "Bermuda calibration sample" == start_call.kwargs["title"]
-            assert start_call.kwargs["notification_id"] == f"bermuda_calibration_{session_id}"
+            assert "BLE Trilateration calibration sample" == start_call.kwargs["title"]
+            assert start_call.kwargs["notification_id"] == f"ble_trilateration_calibration_{session_id}"
             start_message = start_call.args[1]
             assert "Room: Living Room" in start_message
             assert "Position: x=4.200, y=1.800, z=1.100" in start_message
@@ -109,8 +109,8 @@ async def test_record_calibration_sample_service(hass: HomeAssistant, setup_berm
             assert "Expected complete at:" in start_message
             assert "Notes: Near sofa" in start_message
 
-            assert "Bermuda calibration sample" == finish_call.kwargs["title"]
-            assert finish_call.kwargs["notification_id"] == f"bermuda_calibration_{session_id}"
+            assert "BLE Trilateration calibration sample" == finish_call.kwargs["title"]
+            assert finish_call.kwargs["notification_id"] == f"ble_trilateration_calibration_{session_id}"
             finish_message = finish_call.args[1]
             assert "Position: x=4.200, y=1.800, z=1.100" in finish_message
             assert "Status: accepted" in finish_message
@@ -417,7 +417,7 @@ async def test_record_transition_sample_service_updates_persistent_notification(
             rssi=-65.0 - idx,
         )
 
-    with patch("custom_components.bermuda.calibration.persistent_notification.async_create") as notify_mock:
+    with patch("custom_components.ble_trilateration.calibration.persistent_notification.async_create") as notify_mock:
         response = await hass.services.async_call(
             DOMAIN,
             "record_transition_sample",
@@ -438,8 +438,8 @@ async def test_record_transition_sample_service_updates_persistent_notification(
         assert notify_mock.call_count == 1
 
         start_call = notify_mock.call_args_list[0]
-        assert start_call.kwargs["title"] == "Bermuda transition sample"
-        assert start_call.kwargs["notification_id"] == f"bermuda_transition_{session_id}"
+        assert start_call.kwargs["title"] == "BLE Trilateration transition sample"
+        assert start_call.kwargs["notification_id"] == f"ble_trilateration_transition_{session_id}"
         start_message = start_call.args[1]
         assert "Room: Entrance" in start_message
         assert "Room floor: Ground floor" in start_message
@@ -458,9 +458,9 @@ async def test_record_transition_sample_service_updates_persistent_notification(
 
         assert notify_mock.call_count == 2
         finish_call = notify_mock.call_args_list[1]
-        assert finish_call.kwargs["notification_id"] == f"bermuda_transition_{session_id}"
+        assert finish_call.kwargs["notification_id"] == f"ble_trilateration_transition_{session_id}"
 
-        assert finish_call.kwargs["title"] == "Bermuda transition sample"
+        assert finish_call.kwargs["title"] == "BLE Trilateration transition sample"
         finish_message = finish_call.args[1]
         assert "Position: x=1.000, y=2.000, z=3.000" in finish_message
         assert "Radius: 1.000 m" in finish_message
@@ -609,9 +609,9 @@ async def test_calibration_store_management(hass: HomeAssistant, setup_bermuda_e
 
 
 async def test_calibration_store_uses_stable_shared_key(hass: HomeAssistant, setup_bermuda_entry):
-    """Calibration samples should use the stable shared Bermuda storage key."""
+    """Calibration samples should use the integration storage key."""
     coordinator = setup_bermuda_entry.runtime_data.coordinator
-    assert coordinator.calibration_store._store.key == "bermuda/calibration_samples"
+    assert coordinator.calibration_store._store.key == "ble_trilateration/calibration_samples"
 
 
 async def test_calibration_layout_mismatch_can_update_samples(hass: HomeAssistant, setup_bermuda_entry):

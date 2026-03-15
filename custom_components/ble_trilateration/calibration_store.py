@@ -1,4 +1,4 @@
-"""Persistent storage for Bermuda calibration samples."""
+"""Persistent storage for BLE Trilateration calibration samples."""
 
 from __future__ import annotations
 

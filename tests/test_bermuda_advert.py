@@ -4,9 +4,9 @@ Tests for BermudaAdvert class in bermuda_advert.py.
 
 import pytest
 from unittest.mock import MagicMock, patch
-from custom_components.bermuda.bermuda_advert import BermudaAdvert
-from custom_components.bermuda.bermuda_device import BermudaDevice
-from custom_components.bermuda.const import (
+from custom_components.ble_trilateration.bermuda_advert import BermudaAdvert
+from custom_components.ble_trilateration.bermuda_device import BermudaDevice
+from custom_components.ble_trilateration.const import (
     CONF_MAX_VELOCITY,
     CONF_SMOOTHING_SAMPLES,
 )

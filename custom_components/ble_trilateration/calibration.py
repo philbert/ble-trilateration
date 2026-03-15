@@ -1122,7 +1122,7 @@ class BermudaCalibrationManager:
         quality_reason: str | None = None,
     ) -> None:
         """Create or update the persistent notification for one calibration session."""
-        title = "Bermuda calibration sample"
+        title = "BLE Trilateration calibration sample"
         message = (
             f"Device: {session.device_name}\n"
             f"Room: {session.room_name}\n"
@@ -1155,7 +1155,7 @@ class BermudaCalibrationManager:
             self.hass,
             message,
             title=title,
-            notification_id=f"bermuda_calibration_{session.session_id}",
+            notification_id=f"ble_trilateration_calibration_{session.session_id}",
         )
 
     def _update_transition_session_notification(
@@ -1204,8 +1204,8 @@ class BermudaCalibrationManager:
         persistent_notification.async_create(
             self.hass,
             message,
-            title="Bermuda transition sample",
-            notification_id=f"bermuda_transition_{session.session_id}",
+            title="BLE Trilateration transition sample",
+            notification_id=f"ble_trilateration_transition_{session.session_id}",
         )
 
     def _floor_name_for_id(self, floor_id: str | None) -> str:

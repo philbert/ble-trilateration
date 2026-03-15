@@ -5,8 +5,8 @@ Tests for BermudaDevice class in bermuda_device.py.
 import pytest
 from unittest.mock import MagicMock, patch
 from homeassistant.components.bluetooth import BaseHaScanner, BaseHaRemoteScanner
-from custom_components.bermuda.bermuda_device import BermudaDevice
-from custom_components.bermuda.const import ICON_DEFAULT_AREA, ICON_DEFAULT_FLOOR
+from custom_components.ble_trilateration.bermuda_device import BermudaDevice
+from custom_components.ble_trilateration.const import ICON_DEFAULT_AREA, ICON_DEFAULT_FLOOR
 
 
 @pytest.fixture
@@ -51,7 +51,7 @@ def bermuda_scanner(mock_coordinator):
 def test_bermuda_device_initialization(bermuda_device):
     """Test BermudaDevice initialization."""
     assert bermuda_device.address == "aa:bb:cc:dd:ee:ff"
-    assert bermuda_device.name.startswith("bermuda_")
+    assert bermuda_device.name.startswith("ble_trilateration_")
     assert bermuda_device.area_icon == ICON_DEFAULT_AREA
     assert bermuda_device.floor_icon == ICON_DEFAULT_FLOOR
     assert bermuda_device.zone == "not_home"
@@ -115,14 +115,14 @@ def test_timestamp_sync_recovered_returns_to_synchronized_after_cooldown(bermuda
     bermuda_scanner._is_scanner = True  # noqa: SLF001 - test helper
     bermuda_scanner._is_remote_scanner = True  # noqa: SLF001 - test helper
 
-    with patch("custom_components.bermuda.bermuda_device.monotonic_time_coarse", return_value=1000.0):
+    with patch("custom_components.ble_trilateration.bermuda_device.monotonic_time_coarse", return_value=1000.0):
         bermuda_scanner.record_scanner_timestamp_regression(1.2)
 
-    with patch("custom_components.bermuda.bermuda_device.monotonic_time_coarse", return_value=1600.0):
+    with patch("custom_components.ble_trilateration.bermuda_device.monotonic_time_coarse", return_value=1600.0):
         diagnostics = bermuda_scanner.timestamp_sync_diagnostics()
         assert diagnostics["state"] == "recovered"
 
-    with patch("custom_components.bermuda.bermuda_device.monotonic_time_coarse", return_value=1901.0):
+    with patch("custom_components.ble_trilateration.bermuda_device.monotonic_time_coarse", return_value=1901.0):
         diagnostics = bermuda_scanner.timestamp_sync_diagnostics()
         assert diagnostics["state"] == "synchronized"
 

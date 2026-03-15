@@ -9,13 +9,13 @@ from unittest.mock import patch
 
 import pytest
 
-from custom_components.bermuda.const import (
+from custom_components.ble_trilateration.const import (
     CONF_TRILAT_SOFT_INCLUDE_OTHER_FLOOR_ANCHORS,
     DISTANCE_TIMEOUT,
 )
-from custom_components.bermuda.coordinator import BermudaDataUpdateCoordinator
-from custom_components.bermuda.room_classifier import GlobalFingerprintResult, RoomClassification
-from custom_components.bermuda.trilat_bootstrap_store import TrilatBootstrapRecord
+from custom_components.ble_trilateration.coordinator import BermudaDataUpdateCoordinator
+from custom_components.ble_trilateration.room_classifier import GlobalFingerprintResult, RoomClassification
+from custom_components.ble_trilateration.trilat_bootstrap_store import TrilatBootstrapRecord
 
 
 class _DummyScanner(SimpleNamespace):
@@ -260,8 +260,8 @@ def test_trilat_low_confidence_logs_anchor_status_counts():
     device.adverts = {("dev-low-log", scanner.address): advert}
 
     with (
-        patch("custom_components.bermuda.coordinator.debug_device_match", return_value=True),
-        patch("custom_components.bermuda.coordinator._LOGGER_TARGET_SPAM_LESS.debug") as log_debug,
+        patch("custom_components.ble_trilateration.coordinator.debug_device_match", return_value=True),
+        patch("custom_components.ble_trilateration.coordinator._LOGGER_TARGET_SPAM_LESS.debug") as log_debug,
     ):
         coordinator._refresh_trilateration_for_device(device)
 
@@ -389,7 +389,7 @@ def test_floor_challenger_pauses_when_fingerprint_supports_current_floor():
     sc_f2b = _make_scanner(coordinator, "p3h-e", "f2", 6.0, 0.0)
     sc_f2c = _make_scanner(coordinator, "p3h-f", "f2", 0.0, 8.0)
 
-    with patch("custom_components.bermuda.coordinator.monotonic_time_coarse", return_value=100.0):
+    with patch("custom_components.ble_trilateration.coordinator.monotonic_time_coarse", return_value=100.0):
         device.adverts = {
             ("dev-phase3-hold", sc_f1a.address): _make_advert(sc_f1a, 100.0, -70.0, 5.0),
             ("dev-phase3-hold", sc_f1b.address): _make_advert(sc_f1b, 100.0, -70.0, 5.0),
@@ -400,7 +400,7 @@ def test_floor_challenger_pauses_when_fingerprint_supports_current_floor():
     state = coordinator._get_trilat_decision_state(device)
     assert state.floor_id == "f1"
 
-    with patch("custom_components.bermuda.coordinator.monotonic_time_coarse", return_value=120.0):
+    with patch("custom_components.ble_trilateration.coordinator.monotonic_time_coarse", return_value=120.0):
         device.adverts = {
             ("dev-phase3-hold", sc_f1a.address): _make_advert(sc_f1a, 120.0, -82.0, 5.0),
             ("dev-phase3-hold", sc_f1b.address): _make_advert(sc_f1b, 120.0, -82.0, 5.0),
@@ -443,7 +443,7 @@ def test_floor_challenger_pauses_on_moderate_confidence_when_current_floor_score
     sc_f2b = _make_scanner(coordinator, "p3mh-e", "f2", 6.0, 0.0)
     sc_f2c = _make_scanner(coordinator, "p3mh-f", "f2", 0.0, 8.0)
 
-    with patch("custom_components.bermuda.coordinator.monotonic_time_coarse", return_value=100.0):
+    with patch("custom_components.ble_trilateration.coordinator.monotonic_time_coarse", return_value=100.0):
         device.adverts = {
             ("dev-phase3-moderate-hold", sc_f1a.address): _make_advert(sc_f1a, 100.0, -70.0, 5.0),
             ("dev-phase3-moderate-hold", sc_f1b.address): _make_advert(sc_f1b, 100.0, -70.0, 5.0),
@@ -454,7 +454,7 @@ def test_floor_challenger_pauses_on_moderate_confidence_when_current_floor_score
     state = coordinator._get_trilat_decision_state(device)
     assert state.floor_id == "f1"
 
-    with patch("custom_components.bermuda.coordinator.monotonic_time_coarse", return_value=120.0):
+    with patch("custom_components.ble_trilateration.coordinator.monotonic_time_coarse", return_value=120.0):
         device.adverts = {
             ("dev-phase3-moderate-hold", sc_f1a.address): _make_advert(sc_f1a, 120.0, -82.0, 5.0),
             ("dev-phase3-moderate-hold", sc_f1b.address): _make_advert(sc_f1b, 120.0, -82.0, 5.0),
@@ -498,7 +498,7 @@ def test_floor_challenger_does_not_switch_after_hold_ceiling_if_fingerprint_stil
     sc_f2b = _make_scanner(coordinator, "p3v-e", "f2", 6.0, 0.0)
     sc_f2c = _make_scanner(coordinator, "p3v-f", "f2", 0.0, 8.0)
 
-    with patch("custom_components.bermuda.coordinator.monotonic_time_coarse", return_value=100.0):
+    with patch("custom_components.ble_trilateration.coordinator.monotonic_time_coarse", return_value=100.0):
         device.adverts = {
             ("dev-phase3-veto", sc_f1a.address): _make_advert(sc_f1a, 100.0, -70.0, 5.0),
             ("dev-phase3-veto", sc_f1b.address): _make_advert(sc_f1b, 100.0, -70.0, 5.0),
@@ -509,7 +509,7 @@ def test_floor_challenger_does_not_switch_after_hold_ceiling_if_fingerprint_stil
     state = coordinator._get_trilat_decision_state(device)
     assert state.floor_id == "f1"
 
-    with patch("custom_components.bermuda.coordinator.monotonic_time_coarse", return_value=126.0):
+    with patch("custom_components.ble_trilateration.coordinator.monotonic_time_coarse", return_value=126.0):
         device.adverts = {
             ("dev-phase3-veto", sc_f1a.address): _make_advert(sc_f1a, 126.0, -82.0, 5.0),
             ("dev-phase3-veto", sc_f1b.address): _make_advert(sc_f1b, 126.0, -82.0, 5.0),
@@ -557,7 +557,7 @@ def test_floor_challenger_switches_earlier_when_fingerprint_supports_challenger(
     sc_f2b = _make_scanner(coordinator, "p3s-e", "f2", 6.0, 0.0)
     sc_f2c = _make_scanner(coordinator, "p3s-f", "f2", 0.0, 8.0)
 
-    with patch("custom_components.bermuda.coordinator.monotonic_time_coarse", return_value=100.0):
+    with patch("custom_components.ble_trilateration.coordinator.monotonic_time_coarse", return_value=100.0):
         device.adverts = {
             ("dev-phase3-switch", sc_f1a.address): _make_advert(sc_f1a, 100.0, -70.0, 5.0),
             ("dev-phase3-switch", sc_f1b.address): _make_advert(sc_f1b, 100.0, -70.0, 5.0),
@@ -568,7 +568,7 @@ def test_floor_challenger_switches_earlier_when_fingerprint_supports_challenger(
     state = coordinator._get_trilat_decision_state(device)
     assert state.floor_id == "f1"
 
-    with patch("custom_components.bermuda.coordinator.monotonic_time_coarse", return_value=109.0):
+    with patch("custom_components.ble_trilateration.coordinator.monotonic_time_coarse", return_value=109.0):
         device.adverts = {
             ("dev-phase3-switch", sc_f1a.address): _make_advert(sc_f1a, 109.0, -82.0, 5.0),
             ("dev-phase3-switch", sc_f1b.address): _make_advert(sc_f1b, 109.0, -82.0, 5.0),
@@ -605,7 +605,7 @@ def test_floor_challenger_switches_earlier_when_transition_supports_challenger()
     sc_f2b = _make_scanner(coordinator, "p5s-e", "f2", 6.0, 0.0)
     sc_f2c = _make_scanner(coordinator, "p5s-f", "f2", 0.0, 8.0)
 
-    with patch("custom_components.bermuda.coordinator.monotonic_time_coarse", return_value=100.0):
+    with patch("custom_components.ble_trilateration.coordinator.monotonic_time_coarse", return_value=100.0):
         device.adverts = {
             ("dev-phase5-transition-switch", sc_f1a.address): _make_advert(sc_f1a, 100.0, -70.0, 5.0),
             ("dev-phase5-transition-switch", sc_f1b.address): _make_advert(sc_f1b, 100.0, -70.0, 5.0),
@@ -616,7 +616,7 @@ def test_floor_challenger_switches_earlier_when_transition_supports_challenger()
     state = coordinator._get_trilat_decision_state(device)
     assert state.floor_id == "f1"
 
-    with patch("custom_components.bermuda.coordinator.monotonic_time_coarse", return_value=109.0):
+    with patch("custom_components.ble_trilateration.coordinator.monotonic_time_coarse", return_value=109.0):
         device.adverts = {
             ("dev-phase5-transition-switch", sc_f1a.address): _make_advert(sc_f1a, 109.0, -82.0, 5.0),
             ("dev-phase5-transition-switch", sc_f1b.address): _make_advert(sc_f1b, 109.0, -82.0, 5.0),
@@ -661,8 +661,8 @@ def test_restart_bootstrap_holds_restored_floor_until_fingerprint_is_ready():
     sc_f2c = _make_scanner(coordinator, "boot-f", "f2", 0.0, 8.0, 2.0)
 
     with (
-        patch("custom_components.bermuda.coordinator.monotonic_time_coarse", return_value=100.0),
-        patch("custom_components.bermuda.coordinator.now", return_value=datetime.fromisoformat("2026-03-15T03:00:20+00:00")),
+        patch("custom_components.ble_trilateration.coordinator.monotonic_time_coarse", return_value=100.0),
+        patch("custom_components.ble_trilateration.coordinator.now", return_value=datetime.fromisoformat("2026-03-15T03:00:20+00:00")),
     ):
         device.adverts = {
             ("dev-bootstrap", sc_f1a.address): _make_advert(sc_f1a, 100.0, -82.0, 5.0),
@@ -699,7 +699,11 @@ def test_restart_bootstrap_restores_floor_even_when_layout_hash_differs():
         schedule_save=lambda *_args, **_kwargs: None,
     )
     device = _DummyDevice("dev-bootstrap-layout-mismatch")
-    state = coordinator._get_trilat_decision_state(device)
+    with patch(
+        "custom_components.ble_trilateration.coordinator.now",
+        return_value=datetime.fromisoformat("2026-03-15T03:00:20+00:00"),
+    ):
+        state = coordinator._get_trilat_decision_state(device)
 
     assert state.floor_id == "f1"
     assert state.bootstrap_restored_at > 0.0
@@ -752,7 +756,7 @@ def test_floor_challenger_does_not_reduce_dwell_on_weak_transition_support():
     sc_f2b = _make_scanner(coordinator, "p5w-e", "f2", 6.0, 0.0)
     sc_f2c = _make_scanner(coordinator, "p5w-f", "f2", 0.0, 8.0)
 
-    with patch("custom_components.bermuda.coordinator.monotonic_time_coarse", return_value=100.0):
+    with patch("custom_components.ble_trilateration.coordinator.monotonic_time_coarse", return_value=100.0):
         device.adverts = {
             ("dev-phase5-transition-weak", sc_f1a.address): _make_advert(sc_f1a, 100.0, -70.0, 5.0),
             ("dev-phase5-transition-weak", sc_f1b.address): _make_advert(sc_f1b, 100.0, -70.0, 5.0),
@@ -763,7 +767,7 @@ def test_floor_challenger_does_not_reduce_dwell_on_weak_transition_support():
     state = coordinator._get_trilat_decision_state(device)
     assert state.floor_id == "f1"
 
-    with patch("custom_components.bermuda.coordinator.monotonic_time_coarse", return_value=107.0):
+    with patch("custom_components.ble_trilateration.coordinator.monotonic_time_coarse", return_value=107.0):
         device.adverts = {
             ("dev-phase5-transition-weak", sc_f1a.address): _make_advert(sc_f1a, 107.0, -82.0, 5.0),
             ("dev-phase5-transition-weak", sc_f1b.address): _make_advert(sc_f1b, 107.0, -82.0, 5.0),
@@ -832,7 +836,7 @@ def test_floor_challenger_switches_despite_lacking_transition_route_when_gate_di
     sc_f2b = _make_scanner(coordinator, "tv-e", "f2", 6.0, 0.0)
     sc_f2c = _make_scanner(coordinator, "tv-f", "f2", 0.0, 8.0)
 
-    with patch("custom_components.bermuda.coordinator.monotonic_time_coarse", return_value=100.0):
+    with patch("custom_components.ble_trilateration.coordinator.monotonic_time_coarse", return_value=100.0):
         device.adverts = {
             ("dev-transition-veto", sc_f1a.address): _make_advert(sc_f1a, 100.0, -70.0, 5.0),
             ("dev-transition-veto", sc_f1b.address): _make_advert(sc_f1b, 100.0, -70.0, 5.0),
@@ -843,7 +847,7 @@ def test_floor_challenger_switches_despite_lacking_transition_route_when_gate_di
     state = coordinator._get_trilat_decision_state(device)
     assert state.floor_id == "f1"
 
-    with patch("custom_components.bermuda.coordinator.monotonic_time_coarse", return_value=126.0):
+    with patch("custom_components.ble_trilateration.coordinator.monotonic_time_coarse", return_value=126.0):
         device.adverts = {
             ("dev-transition-veto", sc_f1a.address): _make_advert(sc_f1a, 126.0, -82.0, 5.0),
             ("dev-transition-veto", sc_f1b.address): _make_advert(sc_f1b, 126.0, -82.0, 5.0),
@@ -912,7 +916,7 @@ def test_floor_challenger_can_use_recent_transition_memory_when_room_context_lag
     sc_f2b = _make_scanner(coordinator, "tm-e", "f2", 6.0, 0.0)
     sc_f2c = _make_scanner(coordinator, "tm-f", "f2", 0.0, 8.0)
 
-    with patch("custom_components.bermuda.coordinator.monotonic_time_coarse", return_value=100.0):
+    with patch("custom_components.ble_trilateration.coordinator.monotonic_time_coarse", return_value=100.0):
         device.adverts = {
             ("dev-transition-memory", sc_f1a.address): _make_advert(sc_f1a, 100.0, -70.0, 5.0),
             ("dev-transition-memory", sc_f1b.address): _make_advert(sc_f1b, 100.0, -70.0, 5.0),
@@ -925,7 +929,7 @@ def test_floor_challenger_can_use_recent_transition_memory_when_room_context_lag
     assert state.recent_transition_name == "stairwell"
     assert state.recent_transition_floor_ids == ("f2",)
 
-    with patch("custom_components.bermuda.coordinator.monotonic_time_coarse", return_value=126.0):
+    with patch("custom_components.ble_trilateration.coordinator.monotonic_time_coarse", return_value=126.0):
         device.adverts = {
             ("dev-transition-memory", sc_f1a.address): _make_advert(sc_f1a, 126.0, -82.0, 5.0),
             ("dev-transition-memory", sc_f1b.address): _make_advert(sc_f1b, 126.0, -82.0, 5.0),
@@ -1225,7 +1229,7 @@ def test_area_switch_requires_room_dwell_before_switching():
         ),
     )
 
-    with patch("custom_components.bermuda.coordinator.monotonic_time_coarse", side_effect=[100.0, 101.0, 103.0]):
+    with patch("custom_components.ble_trilateration.coordinator.monotonic_time_coarse", side_effect=[100.0, 101.0, 103.0]):
         coordinator._refresh_area_from_trilat(device, "layout-a")
         assert device.area_id == "kitchen"
         assert "hold=room_switch_dwell" in device.diag_area_switch
@@ -1265,7 +1269,7 @@ def test_area_switch_requires_extra_dwell_for_weak_transition():
         transition_strength=lambda **_kwargs: 0.2,
     )
 
-    with patch("custom_components.bermuda.coordinator.monotonic_time_coarse", side_effect=[100.0, 102.0, 104.0, 104.6]):
+    with patch("custom_components.ble_trilateration.coordinator.monotonic_time_coarse", side_effect=[100.0, 102.0, 104.0, 104.6]):
         coordinator._refresh_area_from_trilat(device, "layout-a")
         assert device.area_id == "kitchen"
         assert "transition=0.20" in device.diag_area_switch
@@ -1310,9 +1314,9 @@ def test_area_switch_emits_target_room_diag_logging():
     )
 
     with (
-        patch("custom_components.bermuda.coordinator.debug_device_match", return_value=True),
-        patch("custom_components.bermuda.coordinator._LOGGER_TARGET_SPAM_LESS.debug") as log_debug,
-        patch("custom_components.bermuda.coordinator.monotonic_time_coarse", return_value=100.0),
+        patch("custom_components.ble_trilateration.coordinator.debug_device_match", return_value=True),
+        patch("custom_components.ble_trilateration.coordinator._LOGGER_TARGET_SPAM_LESS.debug") as log_debug,
+        patch("custom_components.ble_trilateration.coordinator.monotonic_time_coarse", return_value=100.0),
     ):
         coordinator._refresh_area_from_trilat(device, "layout-a")
 
@@ -1506,7 +1510,7 @@ def test_trilat_motion_filter_caps_unphysical_xy_jump():
     device = _DummyDevice("dev-motion-cap")
     sc_a, sc_b, sc_c = _right_triangle_anchors(coordinator, "dev-motion-cap", "f1")
 
-    with patch("custom_components.bermuda.coordinator.monotonic_time_coarse", return_value=100.0):
+    with patch("custom_components.ble_trilateration.coordinator.monotonic_time_coarse", return_value=100.0):
         device.adverts = {
             ("dev-motion-cap", sc_a.address): _make_advert(sc_a, 100.0, -70.0, 5.0),
             ("dev-motion-cap", sc_b.address): _make_advert(sc_b, 100.0, -70.0, 5.0),
@@ -1536,7 +1540,7 @@ def test_trilat_motion_filter_caps_unphysical_xy_jump():
         ("dev-motion-cap", sc_c.address): adv_c,
     }
 
-    with patch("custom_components.bermuda.coordinator.monotonic_time_coarse", return_value=101.0):
+    with patch("custom_components.ble_trilateration.coordinator.monotonic_time_coarse", return_value=101.0):
         coordinator._refresh_trilateration_for_device(device)
 
     dx = float(device.trilat_x_m) - float(first_xy[0])
@@ -1557,7 +1561,7 @@ def test_trilat_motion_filter_caps_unphysical_xy_jump_after_long_gap():
     device = _DummyDevice("dev-motion-gap")
     sc_a, sc_b, sc_c = _right_triangle_anchors(coordinator, "dev-motion-gap", "f1")
 
-    with patch("custom_components.bermuda.coordinator.monotonic_time_coarse", return_value=100.0):
+    with patch("custom_components.ble_trilateration.coordinator.monotonic_time_coarse", return_value=100.0):
         device.adverts = {
             ("dev-motion-gap", sc_a.address): _make_advert(sc_a, 100.0, -70.0, 5.0),
             ("dev-motion-gap", sc_b.address): _make_advert(sc_b, 100.0, -70.0, 5.0),
@@ -1585,7 +1589,7 @@ def test_trilat_motion_filter_caps_unphysical_xy_jump_after_long_gap():
         ("dev-motion-gap", sc_c.address): adv_c,
     }
 
-    with patch("custom_components.bermuda.coordinator.monotonic_time_coarse", return_value=106.0):
+    with patch("custom_components.ble_trilateration.coordinator.monotonic_time_coarse", return_value=106.0):
         coordinator._refresh_trilateration_for_device(device)
 
     dx = float(device.trilat_x_m) - first_xy[0]
@@ -1609,7 +1613,7 @@ def test_trilat_holds_previous_z_through_same_floor_2d_gap():
     sc_c = _make_scanner(coordinator, "zh-c", "f1", 0.0, 2.0, z_m=0.0)
     sc_d = _make_scanner(coordinator, "zh-d", "f1", 0.0, 0.0, z_m=2.0)
 
-    with patch("custom_components.bermuda.coordinator.monotonic_time_coarse", return_value=200.0):
+    with patch("custom_components.ble_trilateration.coordinator.monotonic_time_coarse", return_value=200.0):
         dist = 3.0**0.5
         device.adverts = {
             ("dev-z-hold", sc_a.address): _make_advert(sc_a, 200.0, -70.0, dist),
@@ -1623,7 +1627,7 @@ def test_trilat_holds_previous_z_through_same_floor_2d_gap():
     first_z = device.trilat_z_m
 
     sc_d.anchor_z_m = None
-    with patch("custom_components.bermuda.coordinator.monotonic_time_coarse", return_value=201.0):
+    with patch("custom_components.ble_trilateration.coordinator.monotonic_time_coarse", return_value=201.0):
         dist_2d = 2.0**0.5
         device.adverts = {
             ("dev-z-hold", sc_a.address): _make_advert(sc_a, 201.0, -70.0, dist_2d),

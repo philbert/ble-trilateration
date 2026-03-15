@@ -1,4 +1,4 @@
-"""Test Bermuda BLE Trilateration config flow."""
+"""Test BLE Trilateration config flow."""
 
 from __future__ import annotations
 
@@ -11,8 +11,8 @@ from homeassistant.helpers import area_registry as ar
 from homeassistant.data_entry_flow import FlowResultType
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.bermuda.config_flow import BermudaOptionsFlowHandler
-from custom_components.bermuda.const import (
+from custom_components.ble_trilateration.config_flow import BermudaOptionsFlowHandler
+from custom_components.ble_trilateration.const import (
     CONF_TRILAT_SOFT_INCLUDE_OTHER_FLOOR_ANCHORS,
     DOMAIN,
     NAME,
@@ -74,6 +74,7 @@ async def test_options_flow(hass: HomeAssistant, setup_bermuda_entry: MockConfig
     assert result.get("menu_options") == {
         "selectdevices": "Select Devices",
         "experimental": "Experimental",
+        "floor_heights": "Floor Heights",
         "calibration_samples": "Calibration Samples",
         "transition_samples": "Transition Samples",
     }

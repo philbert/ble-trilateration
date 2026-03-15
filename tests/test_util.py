@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from custom_components.bermuda import util
+from custom_components.ble_trilateration import util
 
 
 def test_mac_math_offset():

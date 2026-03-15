@@ -297,5 +297,5 @@ class BermudaGlobalEntity(CoordinatorEntity):
         """Implementing this creates an entry in the device registry."""
         return {
             "identifiers": {(DOMAIN, "BERMUDA_GLOBAL")},
-            "name": "Bermuda Global",
+            "name": "BLE Trilateration Global",
         }

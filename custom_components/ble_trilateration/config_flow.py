@@ -1,4 +1,4 @@
-"""Adds config flow for Bermuda BLE Trilateration."""
+"""Adds config flow for BLE Trilateration."""
 
 from __future__ import annotations
 
@@ -128,14 +128,14 @@ class BermudaOptionsFlowHandler(OptionsFlowWithConfigEntry):
 
         if len(self.coordinator.scanner_list) == 0:
             messages["status"] = (
-                "You need to configure some bluetooth scanners before Bermuda will have anything to work with. "
+                "You need to configure some bluetooth scanners before BLE Trilateration will have anything to work with. "
                 "Any one of esphome bluetooth_proxy, Shelly bluetooth proxy or local bluetooth adaptor should get "
                 "you started."
             )
         elif active_devices == 0:
             messages["status"] = (
                 "No bluetooth devices are actively being reported from your scanners. "
-                "You will need to solve this before Bermuda can be of much help."
+                "You will need to solve this before BLE Trilateration can be of much help."
             )
         else:
             messages["status"] = "You have at least some active devices, this is good."

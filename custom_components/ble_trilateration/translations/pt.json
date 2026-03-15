@@ -2,8 +2,8 @@
   "config": {
     "step": {
       "user": {
-        "title": "Bermuda BLE Trilateration",
-        "description": "Se precisar de ajuda com a configuração, consulte a nossa [página no GitHub](https://github.com/agittins/bermuda)",
+        "title": "BLE Trilateration",
+        "description": "Se precisar de ajuda com a configuração, consulte a nossa [página no GitHub](https://github.com/philbert/ble-trilateration)",
         "data": {
           "username": "Nome de utilizador",
           "password": "Palavra-passe"
@@ -20,13 +20,13 @@
   "options": {
     "error": {
       "some_active": "Tem pelo menos alguns dispositivos ativos, isso é bom.",
-      "no_scanners": "Precisa de configurar alguns scanners Bluetooth antes de o Bermuda poder funcionar. Pode começar com dispositivos como esphome bluetooth_proxy, Shelly bluetooth proxy ou um adaptador Bluetooth local.",
-      "no_devices": "Nenhum dispositivo Bluetooth está a ser reportado ativamente pelos seus scanners. Resolva esta questão antes de o Bermuda ser útil."
+      "no_scanners": "Precisa de configurar alguns scanners Bluetooth antes de o BLE Trilateration poder funcionar. Pode começar com dispositivos como esphome bluetooth_proxy, Shelly bluetooth proxy ou um adaptador Bluetooth local.",
+      "no_devices": "Nenhum dispositivo Bluetooth está a ser reportado ativamente pelos seus scanners. Resolva esta questão antes de o BLE Trilateration ser útil."
     },
     "step": {
       "init": {
-        "title": "Configurar o Bermuda",
-        "description": "Atualmente, o Bermuda consegue ver:\n- {device_counter_active} de {device_counter_devices} dispositivos Bluetooth ativos.\n- {scanner_counter_active} de {scanner_counter_scanners} scanners Bluetooth ativos.\n\n{status}"
+        "title": "Configurar o BLE Trilateration",
+        "description": "Atualmente, o BLE Trilateration consegue ver:\n- {device_counter_active} de {device_counter_devices} dispositivos Bluetooth ativos.\n- {scanner_counter_active} de {scanner_counter_scanners} scanners Bluetooth ativos.\n\n{status}"
       },
       "globalopts": {
         "title": "Definições globais",
@@ -52,7 +52,7 @@
       },
       "selectdevices": {
         "title": "Selecionar dispositivos",
-        "description": "Escolha quais dispositivos deseja monitorizar. Se nenhum dispositivo aparecer abaixo, o Bermuda não está a receber dados de scanners Bluetooth. Certifique-se de que possui um dispositivo esphome ble_proxy, dispositivos Shelly configurados como proxy Bluetooth ou um adaptador Bluetooth local."
+        "description": "Escolha quais dispositivos deseja monitorizar. Se nenhum dispositivo aparecer abaixo, o BLE Trilateration não está a receber dados de scanners Bluetooth. Certifique-se de que possui um dispositivo esphome ble_proxy, dispositivos Shelly configurados como proxy Bluetooth ou um adaptador Bluetooth local."
       },
       "calibration1_global": {
         "title": "Calibração 1: Global",

@@ -2,8 +2,8 @@
   "config": {
     "step": {
       "user": {
-        "title": "Bermuda BLE Trilateration",
-        "description": "Αν χρειάζεστε βοήθεια για τη διαμόρφωση, ρίξτε μια ματιά στη σελίδα [GitHub](https://github.com/agittins/bermuda)",
+        "title": "BLE Trilateration",
+        "description": "Αν χρειάζεστε βοήθεια για τη διαμόρφωση, ρίξτε μια ματιά στη σελίδα [GitHub](https://github.com/philbert/ble-trilateration)",
         "data": {
           "username": "Όνομα Χρήστη",
           "password": "Κωδικός Πρόσβασης"
@@ -20,13 +20,13 @@
   "options": {
     "error": {
       "some_active": "You have at least some active devices, this is good.",
-      "no_scanners": "You need to configure some bluetooth scanners before Bermuda will have anything to work with. \nAny one of esphome bluetooth_proxy, Shelly bluetooth proxy or local bluetooth adaptor should get you started.",
-      "no_devices": "No bluetooth devices are actively being reported from your scanners. \nYou will need to solve this before Bermuda can be of much help."
+      "no_scanners": "You need to configure some bluetooth scanners before BLE Trilateration will have anything to work with. \nAny one of esphome bluetooth_proxy, Shelly bluetooth proxy or local bluetooth adaptor should get you started.",
+      "no_devices": "No bluetooth devices are actively being reported from your scanners. \nYou will need to solve this before BLE Trilateration can be of much help."
     },
     "step": {
       "init": {
-        "title": "Bermuda configuration",
-        "description": "Το Bermuda βλέπει επί του παρόντος:\n- {device_counter_active} ενεργή στις {device_counter_devices} συσκευές Bluetooth.\n- {scanner_counter_active} ενεργή στις {scanner_counter_scanners} συσκευές ανιχνευτή Bluetooth.\n\n{status}"
+        "title": "BLE Trilateration configuration",
+        "description": "Το BLE Trilateration βλέπει επί του παρόντος:\n- {device_counter_active} ενεργή στις {device_counter_devices} συσκευές Bluetooth.\n- {scanner_counter_active} ενεργή στις {scanner_counter_scanners} συσκευές ανιχνευτή Bluetooth.\n\n{status}"
       },
       "globalopts": {
         "title": "Global settings",
@@ -52,7 +52,7 @@
       },
       "selectdevices": {
         "title": "Επιλέξτε Συσκευές",
-        "description": "Επιλέξτε ποιες συσκευές θέλετε να παρακολουθήσετε. Αν δεν εμφανίζονται συσκευές παρακάτω, τότε το Bermuda δεν βλέπει δεδομένα που έρχονται από ανιχνευτές Bluetooth. Βεβαιωθείτε ότι έχετε μια συσκευή esphome ble_proxy, συσκευές Shelly με διαμορφωμένη proxy Bluetooth ή έναν τοπικό προσαρμογέα Bluetooth."
+        "description": "Επιλέξτε ποιες συσκευές θέλετε να παρακολουθήσετε. Αν δεν εμφανίζονται συσκευές παρακάτω, τότε το BLE Trilateration δεν βλέπει δεδομένα που έρχονται από ανιχνευτές Bluetooth. Βεβαιωθείτε ότι έχετε μια συσκευή esphome ble_proxy, συσκευές Shelly με διαμορφωμένη proxy Bluetooth ή έναν τοπικό προσαρμογέα Bluetooth."
       },
       "calibration1_global": {
         "title": "Διαμόρφωση 1: Καθολική",

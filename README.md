@@ -47,7 +47,7 @@ The key design principle is that **topology and physical reachability are first-
 
 Install via HACS by adding this repository as a custom repository, then search for **BLE Trilateration**.
 
-Alternatively, copy the `custom_components/bermuda/` directory into your HA `custom_components/` folder and restart Home Assistant.
+Alternatively, copy the `custom_components/ble_trilateration/` directory into your HA `custom_components/` folder and restart Home Assistant.
 
 After installation, add the integration in **Settings → Devices & Services → Add Integration** and search for **BLE Trilateration**.
 
@@ -171,7 +171,7 @@ This means a legitimate floor change — where the user actually walked up or do
 
 ## Developer / Diagnostic Tools
 
-The `bermuda.dump_devices` service returns the full internal state of the integration as JSON/YAML. This is useful for:
+The `ble_trilateration.dump_devices` service returns the full internal state of the integration as JSON/YAML. This is useful for:
 - Inspecting raw RSSI readings per scanner
 - Checking position estimates and geometry quality scores
 - Debugging room classification and floor inference
