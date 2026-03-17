@@ -33,6 +33,7 @@ from .const import (
     DOMAIN_PRIVATE_BLE_DEVICE,
 )
 from .trilateration import AnchorMeasurement, solve_quality_metrics_2d, solve_quality_metrics_3d
+from .util import mac_norm
 
 if TYPE_CHECKING:
     from .bermuda_advert import BermudaAdvert
@@ -220,14 +221,92 @@ class BermudaCalibrationManager:
             }
         return geometry
 
+    def _current_anchor_identity_index(
+        self,
+    ) -> dict[str, tuple[dict[str, float | None], str | None]]:
+        """Return current anchor geometry keyed by every known scanner identity alias."""
+        index: dict[str, tuple[dict[str, float | None], str | None]] = {}
+        stored_scanners = self._coordinator.scanner_anchor_store.scanners
+
+        for scanner_address in sorted(self._coordinator.scanner_list):
+            scanner = self._coordinator.devices.get(scanner_address)
+            if scanner is None:
+                continue
+
+            anchor_x = getattr(scanner, "anchor_x_m", None)
+            anchor_y = getattr(scanner, "anchor_y_m", None)
+            if anchor_x is None or anchor_y is None:
+                continue
+
+            current_anchor = {
+                "x_m": float(anchor_x),
+                "y_m": float(anchor_y),
+                "z_m": float(getattr(scanner, "anchor_z_m", 0.0) or 0.0),
+            }
+            aliases = {
+                mac_norm(alias)
+                for alias in (
+                    scanner.address,
+                    scanner.address_ble_mac,
+                    scanner.address_wifi_mac,
+                    scanner.unique_id,
+                )
+                if alias
+            }
+            for storage_key, payload in stored_scanners.items():
+                record_aliases = {mac_norm(storage_key)}
+                record_aliases.update(mac_norm(alias) for alias in payload.get("aliases", []) if alias)
+                if aliases & record_aliases:
+                    aliases.update(record_aliases)
+                    break
+            for alias in aliases:
+                index[alias] = (current_anchor, scanner.name)
+
+        return index
+
+    def _layout_changed_anchor_lines(
+        self,
+        layout_samples: list[dict[str, Any]],
+        current_anchor_index: dict[str, tuple[dict[str, float | None], str | None]],
+    ) -> list[str]:
+        """Return human-readable anchor deltas for one saved layout."""
+        changed_anchors: dict[str, float] = {}
+
+        for sample in layout_samples:
+            for scanner_address, anchor in (sample.get("anchors") or {}).items():
+                resolved = current_anchor_index.get(mac_norm(str(scanner_address)))
+                if resolved is None:
+                    continue
+
+                current_anchor, current_name = resolved
+                sample_position = anchor.get("anchor_position") or {}
+                sample_x = sample_position.get("x_m")
+                sample_y = sample_position.get("y_m")
+                sample_z = sample_position.get("z_m")
+                if sample_x is None or sample_y is None or sample_z is None:
+                    continue
+
+                delta_m = math.sqrt(
+                    ((float(current_anchor["x_m"]) - float(sample_x)) ** 2)
+                    + ((float(current_anchor["y_m"]) - float(sample_y)) ** 2)
+                    + ((float(current_anchor["z_m"]) - float(sample_z)) ** 2)
+                )
+                if delta_m < 0.01:
+                    continue
+
+                label = str(anchor.get("scanner_name") or current_name or scanner_address)
+                changed_anchors[label] = max(changed_anchors.get(label, 0.0), delta_m)
+
+        return [f"- {label}: moved {delta_m:.2f} m" for label, delta_m in sorted(changed_anchors.items())]
+
     def get_layout_mismatch_summary(self) -> dict[str, Any] | None:
         """Describe a sample/layout mismatch that requires user confirmation."""
         samples = self.samples()
         if not samples:
             return None
 
-        current_geometry = self.current_anchor_geometry()
-        if not current_geometry:
+        current_anchor_index = self._current_anchor_identity_index()
+        if not current_anchor_index:
             return None
 
         current_layout_hash = self.current_anchor_layout_hash
@@ -240,46 +319,29 @@ class BermudaCalibrationManager:
         if current_layout_samples:
             return None
 
-        by_layout: dict[str, int] = {}
+        by_layout: dict[str, list[dict[str, Any]]] = {}
         for sample in samples:
             layout_hash = str(sample.get("anchor_layout_hash") or "unknown")
-            by_layout[layout_hash] = by_layout.get(layout_hash, 0) + 1
-        dominant_layout_hash, dominant_layout_count = max(by_layout.items(), key=lambda row: row[1])
-        representative_sample = next(
-            (sample for sample in samples if str(sample.get("anchor_layout_hash") or "unknown") == dominant_layout_hash),
-            samples[0],
-        )
+            by_layout.setdefault(layout_hash, []).append(sample)
 
-        changed_anchor_lines: list[str] = []
-        for scanner_address, anchor in sorted((representative_sample.get("anchors") or {}).items()):
-            current_anchor = current_geometry.get(str(scanner_address).lower())
-            sample_position = anchor.get("anchor_position") or {}
-            sample_x = sample_position.get("x_m")
-            sample_y = sample_position.get("y_m")
-            sample_z = sample_position.get("z_m")
-            if current_anchor is None or sample_x is None or sample_y is None or sample_z is None:
+        for dominant_layout_hash, layout_samples in sorted(
+            by_layout.items(),
+            key=lambda row: len(row[1]),
+            reverse=True,
+        ):
+            changed_anchor_lines = self._layout_changed_anchor_lines(layout_samples, current_anchor_index)
+            if not changed_anchor_lines:
                 continue
-            delta_m = math.sqrt(
-                ((float(current_anchor["x_m"]) - float(sample_x)) ** 2)
-                + ((float(current_anchor["y_m"]) - float(sample_y)) ** 2)
-                + ((float(current_anchor["z_m"]) - float(sample_z)) ** 2)
-            )
-            if delta_m < 0.01:
-                continue
-            changed_anchor_lines.append(
-                f"- {anchor.get('scanner_name') or scanner_address}: moved {delta_m:.2f} m"
-            )
 
-        if not changed_anchor_lines:
-            changed_anchor_lines.append("- No direct coordinate delta detected; layout fingerprint changed.")
+            return {
+                "sample_count": len(layout_samples),
+                "current_layout_hash": current_layout_hash,
+                "dominant_layout_hash": dominant_layout_hash,
+                "dominant_layout_count": len(layout_samples),
+                "changed_anchor_lines": "\n".join(changed_anchor_lines[:8]),
+            }
 
-        return {
-            "sample_count": len(samples),
-            "current_layout_hash": current_layout_hash,
-            "dominant_layout_hash": dominant_layout_hash,
-            "dominant_layout_count": dominant_layout_count,
-            "changed_anchor_lines": "\n".join(changed_anchor_lines[:8]),
-        }
+        return None
 
     def get_device_samples(self) -> dict[str, dict[str, str]]:
         """Return a map of device ids present in storage."""

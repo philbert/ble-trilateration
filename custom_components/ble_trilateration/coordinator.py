@@ -2457,6 +2457,14 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         if signature == self._calibration_layout_mismatch_signature:
             return
 
+        _LOGGER.warning(
+            "Calibration layout mismatch detected; %s saved sample(s) match layout %s but current anchors are %s. "
+            "Anchor coordinate changes:\n%s",
+            mismatch["sample_count"],
+            mismatch["dominant_layout_hash"][:8],
+            mismatch["current_layout_hash"][:8],
+            mismatch["changed_anchor_lines"],
+        )
         ir.async_delete_issue(self.hass, DOMAIN, REPAIR_CALIBRATION_LAYOUT_MISMATCH)
         ir.async_create_issue(
             self.hass,

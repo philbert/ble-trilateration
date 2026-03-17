@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -708,7 +709,9 @@ async def test_calibration_layout_mismatch_can_be_acknowledged(hass: HomeAssista
     assert coordinator.calibration.get_layout_mismatch_summary() is None
 
 
-async def test_calibration_layout_mismatch_raises_repair(hass: HomeAssistant, setup_bermuda_entry):
+async def test_calibration_layout_mismatch_raises_repair(
+    hass: HomeAssistant, setup_bermuda_entry, caplog
+):
     """A layout mismatch should create a fixable repair issue."""
     coordinator = setup_bermuda_entry.runtime_data.coordinator
 
@@ -743,11 +746,14 @@ async def test_calibration_layout_mismatch_raises_repair(hass: HomeAssistant, se
         }
     )
 
-    await coordinator.async_handle_calibration_samples_changed()
+    with caplog.at_level(logging.WARNING, logger="custom_components.ble_trilateration"):
+        await coordinator.async_handle_calibration_samples_changed()
 
     issue = ir.async_get(hass).async_get_issue(DOMAIN, REPAIR_CALIBRATION_LAYOUT_MISMATCH)
     assert issue is not None
     assert issue.is_fixable is True
+    assert "Calibration layout mismatch detected" in caplog.text
+    assert "Garage Proxy: moved 0.50 m" in caplog.text
 
 
 async def test_calibration_layout_mismatch_not_raised_without_current_anchor_geometry(
@@ -775,6 +781,51 @@ async def test_calibration_layout_mismatch_not_raised_without_current_anchor_geo
 
     await coordinator.async_handle_calibration_samples_changed()
 
+    issue = ir.async_get(hass).async_get_issue(DOMAIN, REPAIR_CALIBRATION_LAYOUT_MISMATCH)
+    assert issue is None
+
+
+async def test_calibration_layout_mismatch_not_raised_for_hash_only_alias_change(
+    hass: HomeAssistant, setup_bermuda_entry
+):
+    """Do not raise a mismatch repair when only the scanner identity alias changes."""
+    coordinator = setup_bermuda_entry.runtime_data.coordinator
+
+    scanner = BermudaDevice("aa:bb:cc:dd:10:0e", coordinator)
+    scanner.name = "Fridge Proxy"
+    scanner.address_ble_mac = "aa:bb:cc:dd:10:0c"
+    scanner.anchor_x_m = 8.0
+    scanner.anchor_y_m = 2.0
+    scanner.anchor_z_m = 1.0
+    coordinator.devices[scanner.address] = scanner
+    coordinator._scanner_list.add(scanner.address)
+
+    await coordinator.calibration_store.async_add_sample(
+        {
+            "id": "sample_layout_alias_only",
+            "created_at": "2026-03-06T12:00:00+00:00",
+            "device_id": "device_one",
+            "device_name": "Device One",
+            "device_address": "aa:bb:cc:dd:ee:01",
+            "room_area_id": "garage",
+            "room_name": "Garage",
+            "position": {"x_m": 1.0, "y_m": 2.0, "z_m": 1.0},
+            "sample_radius_m": 1.0,
+            "anchor_layout_hash": "old_layout_hash",
+            "anchors": {
+                "aa:bb:cc:dd:10:0c": {
+                    "scanner_name": scanner.name,
+                    "anchor_position": {"x_m": 8.0, "y_m": 2.0, "z_m": 1.0},
+                    "rssi_median": -70.0,
+                }
+            },
+            "quality": {"status": "accepted", "eligible_anchor_count": 1, "reason": None},
+        }
+    )
+
+    await coordinator.async_handle_calibration_samples_changed()
+
+    assert coordinator.calibration.get_layout_mismatch_summary() is None
     issue = ir.async_get(hass).async_get_issue(DOMAIN, REPAIR_CALIBRATION_LAYOUT_MISMATCH)
     assert issue is None
 
