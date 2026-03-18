@@ -260,9 +260,9 @@ async def test_per_scanner_ble_status_sensors_expose_structured_status(hass) -> 
         "aa:bb:cc:dd:ee:09": {
             "scanner_address": "AA:BB:CC:DD:EE:09",
             "scanner_name": "Kitchen Proxy",
-            "status": "rejected_wrong_floor",
+            "status": "valid_other_floor",
             "sync_state": "drifting",
-            "affects_position": False,
+            "affects_position": True,
         }
     }
     coordinator.devices[tracked.address] = tracked
@@ -273,21 +273,21 @@ async def test_per_scanner_ble_status_sensors_expose_structured_status(hass) -> 
     tracked_side = BermudaSensorScannerAdvertStatus(coordinator, entry, tracked.address, scanner.address)
     scanner_side = BermudaSensorTrackedDeviceAdvertStatus(coordinator, entry, tracked.address, scanner.address)
 
-    assert tracked_side.native_value == "rejected_wrong_floor"
+    assert tracked_side.native_value == "valid_other_floor"
     assert tracked_side.extra_state_attributes == {
         "scanner_address": "AA:BB:CC:DD:EE:09",
         "scanner_name": "Kitchen Proxy",
-        "status": "rejected_wrong_floor",
+        "status": "valid_other_floor",
         "sync_state": "drifting",
-        "affects_position": False,
+        "affects_position": True,
     }
-    assert scanner_side.native_value == "rejected_wrong_floor"
+    assert scanner_side.native_value == "valid_other_floor"
     assert scanner_side.extra_state_attributes == {
         "scanner_address": "AA:BB:CC:DD:EE:09",
         "scanner_name": "Kitchen Proxy",
-        "status": "rejected_wrong_floor",
+        "status": "valid_other_floor",
         "sync_state": "drifting",
-        "affects_position": False,
+        "affects_position": True,
         "tracked_device_name": tracked.name,
         "tracked_device_address": tracked.address,
     }
@@ -339,7 +339,7 @@ async def test_trilat_anchor_count_sensor_exposes_anchor_status_lines(hass) -> N
         "Oven: rejected_no_range (sync=drifting)",
     ]
     device.trilat_cross_floor_anchor_diagnostics = [
-        "Garage proxy: rejected_wrong_floor (selected=ground_floor, scanner=street_level, soft_sigma=6.40m)",
+        "Garage proxy: valid_other_floor (selected=ground_floor, scanner=street_level, other_floor_sigma=6.40m)",
     ]
     coordinator.devices[device.address] = device
 
@@ -350,7 +350,7 @@ async def test_trilat_anchor_count_sensor_exposes_anchor_status_lines(hass) -> N
         "used_anchors": 2,
         "cross_floor_candidate_count": 1,
         "cross_floor_candidates": [
-            "Garage proxy: rejected_wrong_floor (selected=ground_floor, scanner=street_level, soft_sigma=6.40m)",
+            "Garage proxy: valid_other_floor (selected=ground_floor, scanner=street_level, other_floor_sigma=6.40m)",
         ],
         "1": "Living room light switch 1: valid",
         "2": "Oven: rejected_no_range (sync=drifting)",

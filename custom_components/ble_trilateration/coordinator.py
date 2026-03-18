@@ -77,7 +77,6 @@ from .const import (
     CONF_DEVTRACK_TIMEOUT,
     CONF_MAX_VELOCITY,
     CONF_TRILAT_CROSS_FLOOR_PENALTY_DB,
-    CONF_TRILAT_SOFT_INCLUDE_OTHER_FLOOR_ANCHORS,
     CONF_TRILAT_REACHABILITY_GATE,
     CONF_SMOOTHING_SAMPLES,
     CONF_UPDATE_INTERVAL,
@@ -86,7 +85,6 @@ from .const import (
     DEFAULT_SAMPLE_RADIUS_M,
     DEFAULT_SMOOTHING_SAMPLES,
     DEFAULT_TRILAT_CROSS_FLOOR_PENALTY_DB,
-    DEFAULT_TRILAT_SOFT_INCLUDE_OTHER_FLOOR_ANCHORS,
     DEFAULT_TRILAT_REACHABILITY_GATE,
     DEFAULT_UPDATE_INTERVAL,
     DISTANCE_TIMEOUT,
@@ -307,7 +305,6 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         self.options[CONF_SMOOTHING_SAMPLES] = DEFAULT_SMOOTHING_SAMPLES
         self.options[CONF_UPDATE_INTERVAL] = DEFAULT_UPDATE_INTERVAL
         self.options[CONF_TRILAT_CROSS_FLOOR_PENALTY_DB] = DEFAULT_TRILAT_CROSS_FLOOR_PENALTY_DB
-        self.options[CONF_TRILAT_SOFT_INCLUDE_OTHER_FLOOR_ANCHORS] = DEFAULT_TRILAT_SOFT_INCLUDE_OTHER_FLOOR_ANCHORS
 
         if hasattr(entry, "options"):
             # Firstly, on some calls (specifically during reload after settings changes)
@@ -321,7 +318,6 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                     CONF_MAX_VELOCITY,
                     CONF_SMOOTHING_SAMPLES,
                     CONF_TRILAT_CROSS_FLOOR_PENALTY_DB,
-                    CONF_TRILAT_SOFT_INCLUDE_OTHER_FLOOR_ANCHORS,
                 ):
                     self.options[key] = val
 
@@ -560,15 +556,6 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             self.options.get(
                 CONF_TRILAT_CROSS_FLOOR_PENALTY_DB,
                 DEFAULT_TRILAT_CROSS_FLOOR_PENALTY_DB,
-            )
-        )
-
-    def trilat_soft_include_other_floor_anchors_enabled(self) -> bool:
-        """Return whether Phase-2 other-floor soft inclusion is enabled."""
-        return bool(
-            self.options.get(
-                CONF_TRILAT_SOFT_INCLUDE_OTHER_FLOOR_ANCHORS,
-                DEFAULT_TRILAT_SOFT_INCLUDE_OTHER_FLOOR_ANCHORS,
             )
         )
 
@@ -1962,18 +1949,16 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         sync_state = entry.get("sync_state")
         if sync_state not in (None, "synchronized", "local", "not_scanner"):
             details.append(f"sync={sync_state}")
-        if entry.get("status") == "rejected_wrong_floor":
+        if entry.get("status") == "valid_other_floor":
             selected_floor_id = entry.get("selected_floor_id")
             scanner_floor_id = entry.get("scanner_floor_id")
             if selected_floor_id is not None:
                 details.append(f"selected={selected_floor_id}")
             if scanner_floor_id is not None:
                 details.append(f"scanner={scanner_floor_id}")
-        soft_sigma_m = entry.get("soft_include_sigma_m")
-        if soft_sigma_m is not None:
-            details.append(f"soft_sigma={float(soft_sigma_m):.2f}m")
-        if entry.get("soft_include_active"):
-            details.append("soft_included")
+        other_floor_sigma_m = entry.get("other_floor_sigma_m")
+        if other_floor_sigma_m is not None:
+            details.append(f"other_floor_sigma={float(other_floor_sigma_m):.2f}m")
         if details:
             line += f" ({', '.join(details)})"
         return line
@@ -2627,7 +2612,6 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         latest = self._latest_adverts_by_scanner(device)
         state = self._get_trilat_decision_state(device)
         policy = self._trilat_mobility_policy(device.get_mobility_type())
-        soft_include_other_floor_anchors = self.trilat_soft_include_other_floor_anchors_enabled()
         _debug_this_device = debug_device_match(
             device.name,
             device.prefname,
@@ -2766,7 +2750,6 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 "bootstrap_restored": bootstrap_restored,
                 "bootstrap_hold_active": bootstrap_hold_active,
                 "bootstrap_hold_remaining_s": bootstrap_hold_remaining_s,
-                "soft_include_other_floor_anchors_enabled": soft_include_other_floor_anchors,
                 "cross_floor_anchor_count": device.trilat_cross_floor_anchor_count,
                 "floor_switch_count": getattr(device, "trilat_floor_switch_count", 0),
                 "floor_switch_last_at": getattr(device, "trilat_floor_switch_last_at", None),
@@ -2831,8 +2814,6 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                     status = "no_advert"
                 elif advert.stamp < nowstamp - DISTANCE_TIMEOUT:
                     status = "rejected_stale"
-                elif selected_floor_id is not None and scanner.floor_id != selected_floor_id:
-                    status = "rejected_wrong_floor"
                 elif (
                     anchor_x is None
                     or anchor_y is None
@@ -2840,20 +2821,13 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                     status = "rejected_missing_anchor"
                 elif advert.rssi_distance_raw is None or advert.rssi_distance is None:
                     status = "rejected_no_range"
+                elif selected_floor_id is not None and scanner.floor_id != selected_floor_id:
+                    status = "valid_other_floor"
                 else:
                     status = "valid"
-                soft_include_sigma_m = None
-                soft_include_eligible = False
-                soft_include_active = False
-                if (
-                    status == "rejected_wrong_floor"
-                    and advert is not None
-                    and anchor_x is not None
-                    and anchor_y is not None
-                ):
-                    soft_include_sigma_m = _anchor_effective_sigma_m(advert, other_floor=True)
-                    soft_include_eligible = soft_include_sigma_m is not None
-                    soft_include_active = soft_include_other_floor_anchors and soft_include_eligible
+                other_floor_sigma_m = None
+                if status == "valid_other_floor" and advert is not None and anchor_x is not None and anchor_y is not None:
+                    other_floor_sigma_m = _anchor_effective_sigma_m(advert, other_floor=True)
                 entries.append(
                     {
                         "scanner_address": scanner.address,
@@ -2862,10 +2836,8 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                         "selected_floor_id": selected_floor_id,
                         "status": status,
                         "sync_state": sync_state,
-                        "affects_position": (status == "valid") or soft_include_active,
-                        "soft_include_sigma_m": soft_include_sigma_m,
-                        "soft_include_eligible": soft_include_eligible,
-                        "soft_include_active": soft_include_active,
+                        "affects_position": status in ("valid", "valid_other_floor"),
+                        "other_floor_sigma_m": other_floor_sigma_m,
                     }
                 )
             return entries
@@ -2877,7 +2849,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 for entry in entries
             }
             device.trilat_anchor_diagnostics = [self._format_anchor_status_entry(entry) for entry in entries]
-            cross_floor_entries = [entry for entry in entries if entry.get("soft_include_eligible")]
+            cross_floor_entries = [entry for entry in entries if entry.get("status") == "valid_other_floor"]
             device.trilat_cross_floor_anchor_count = len(cross_floor_entries)
             device.trilat_cross_floor_anchor_diagnostics = [
                 self._format_anchor_status_entry(entry)
@@ -3447,8 +3419,6 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 continue
             scanner = advert.scanner_device
             other_floor = scanner.floor_id != selected_floor_id
-            if other_floor and not soft_include_other_floor_anchors:
-                continue
             anchor_x = self.get_scanner_anchor_x(scanner.address)
             anchor_y = self.get_scanner_anchor_y(scanner.address)
             if anchor_x is None or anchor_y is None:

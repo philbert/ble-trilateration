@@ -262,8 +262,6 @@ DOCS[CONF_DEVTRACK_TIMEOUT] = "Timeout in seconds for setting devices as `Not Ho
 CONF_SAVE_AND_CLOSE = "save_and_close"
 CONF_SCANNER_INFO = "scanner_info"
 CONF_TRILAT_CROSS_FLOOR_PENALTY_DB, DEFAULT_TRILAT_CROSS_FLOOR_PENALTY_DB = "trilat_cross_floor_penalty_db", 8.0
-CONF_TRILAT_SOFT_INCLUDE_OTHER_FLOOR_ANCHORS = "trilat_soft_include_other_floor_anchors"
-DEFAULT_TRILAT_SOFT_INCLUDE_OTHER_FLOOR_ANCHORS = False
 CONF_TRILAT_REACHABILITY_GATE: Final = "trilat_reachability_gate"
 DEFAULT_TRILAT_REACHABILITY_GATE: Final = False
 
@@ -271,9 +269,6 @@ CONF_UPDATE_INTERVAL, DEFAULT_UPDATE_INTERVAL = "update_interval", 10
 DOCS[CONF_UPDATE_INTERVAL] = (
     "Maximum time between sensor updates in seconds. Smaller intervals",
     "means more data, bigger database.",  # fmt: skip
-)
-DOCS[CONF_TRILAT_SOFT_INCLUDE_OTHER_FLOOR_ANCHORS] = (
-    "Experimental: include other-floor anchors in the trilateration solve with inflated uncertainty.",
 )
 
 CONF_SMOOTHING_SAMPLES, DEFAULT_SMOOTHING_SAMPLES = "smoothing_samples", 20

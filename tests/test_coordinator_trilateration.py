@@ -10,7 +10,6 @@ from unittest.mock import patch
 import pytest
 
 from custom_components.ble_trilateration.const import (
-    CONF_TRILAT_SOFT_INCLUDE_OTHER_FLOOR_ANCHORS,
     DISTANCE_TIMEOUT,
 )
 from custom_components.ble_trilateration.coordinator import BermudaDataUpdateCoordinator
@@ -303,7 +302,7 @@ def test_floor_evidence_cross_floor_penalty_selects_correct_floor():
 
 
 def test_floor_diagnostics_capture_evidence_and_cross_floor_candidates():
-    """Phase-0 diagnostics should expose floor evidence and soft-inclusion candidates."""
+    """Diagnostics should expose floor evidence and valid cross-floor anchors."""
     coordinator = _make_coordinator()
     device = _DummyDevice("dev-floor-diag")
 
@@ -327,16 +326,15 @@ def test_floor_diagnostics_capture_evidence_and_cross_floor_candidates():
     assert device.trilat_floor_evidence["f1"] > device.trilat_floor_evidence["f2"]
     assert device.trilat_cross_floor_anchor_count == 1
     status_entry = device.trilat_anchor_statuses["fd-d"]
-    assert status_entry["status"] == "rejected_wrong_floor"
-    assert status_entry["soft_include_eligible"] is True
-    assert status_entry["soft_include_sigma_m"] > 0.0
-    assert any("soft_sigma=" in line for line in device.trilat_cross_floor_anchor_diagnostics)
+    assert status_entry["status"] == "valid_other_floor"
+    assert status_entry["affects_position"] is True
+    assert status_entry["other_floor_sigma_m"] > 0.0
+    assert any("other_floor_sigma=" in line for line in device.trilat_cross_floor_anchor_diagnostics)
 
 
-def test_phase2_soft_includes_other_floor_anchors_when_enabled():
-    """Phase-2 flag should let a wrong-floor anchor participate in the solve."""
+def test_other_floor_anchors_always_participate_in_the_solve():
+    """A valid other-floor anchor should always participate in the solve."""
     coordinator = _make_coordinator()
-    coordinator.options[CONF_TRILAT_SOFT_INCLUDE_OTHER_FLOOR_ANCHORS] = True
     device = _DummyDevice("dev-phase2-soft")
 
     sc_a = _make_scanner(coordinator, "p2-a", "f1", 0.0, 0.0)
@@ -355,10 +353,9 @@ def test_phase2_soft_includes_other_floor_anchors_when_enabled():
     assert device.trilat_status == "ok"
     assert device.trilat_anchor_count == 3
     status_entry = device.trilat_anchor_statuses["p2-c"]
-    assert status_entry["status"] == "rejected_wrong_floor"
-    assert status_entry["soft_include_active"] is True
+    assert status_entry["status"] == "valid_other_floor"
     assert status_entry["affects_position"] is True
-    assert any("soft_included" in line for line in device.trilat_cross_floor_anchor_diagnostics)
+    assert any("valid_other_floor" in line for line in device.trilat_cross_floor_anchor_diagnostics)
 
 
 def test_floor_challenger_pauses_when_fingerprint_supports_current_floor():
@@ -948,9 +945,8 @@ def test_floor_challenger_can_use_recent_transition_memory_when_room_context_lag
 
 
 def test_phase2_keeps_mean_sigma_and_z_bounds_same_floor_only():
-    """Phase-2 should exclude other-floor anchors from confidence sigma and z bounds."""
+    """Other-floor anchors should be excluded from confidence sigma and z bounds."""
     coordinator = _make_coordinator()
-    coordinator.options[CONF_TRILAT_SOFT_INCLUDE_OTHER_FLOOR_ANCHORS] = True
     device = _DummyDevice("dev-phase2-bounds")
 
     sc_a = _make_scanner(coordinator, "p2b-a", "f1", 0.0, 0.0, z_m=0.0)
@@ -982,9 +978,8 @@ def test_phase2_keeps_mean_sigma_and_z_bounds_same_floor_only():
 
 
 def test_phase2_cross_floor_xy_inclusion_preserves_same_floor_z():
-    """Other-floor soft inclusion should not drag z away from a solvable same-floor 3D result."""
+    """Other-floor anchors should not drag z away from a solvable same-floor 3D result."""
     coordinator = _make_coordinator()
-    coordinator.options[CONF_TRILAT_SOFT_INCLUDE_OTHER_FLOOR_ANCHORS] = True
     device = _DummyDevice("dev-phase2-z")
 
     sc_a = _make_scanner(coordinator, "p2z-a", "f1", 0.0, 0.0, z_m=0.0)
@@ -1020,7 +1015,6 @@ def test_phase2_cross_floor_xy_inclusion_preserves_same_floor_z():
 def test_phase2_clears_anchor_ewma_when_floor_role_changes():
     """Changing an anchor from same-floor to other-floor should reset its EWMA range."""
     coordinator = _make_coordinator()
-    coordinator.options[CONF_TRILAT_SOFT_INCLUDE_OTHER_FLOOR_ANCHORS] = True
     device = _DummyDevice("dev-phase2-ewma")
 
     sc_a = _make_scanner(coordinator, "p2e-a", "f1", 0.0, 0.0, z_m=0.0)
@@ -1112,7 +1106,7 @@ def test_trilat_anchor_diagnostics_describe_scanner_statuses():
     coordinator._refresh_trilateration_for_device(device)
 
     assert any(line.endswith(": valid") for line in device.trilat_anchor_diagnostics)
-    assert any(": rejected_wrong_floor" in line for line in device.trilat_anchor_diagnostics)
+    assert any(": valid_other_floor" in line for line in device.trilat_anchor_diagnostics)
     assert any(": rejected_no_range" in line for line in device.trilat_anchor_diagnostics)
 
 

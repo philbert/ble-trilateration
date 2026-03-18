@@ -23,8 +23,6 @@ from .const import (
     ADDR_TYPE_PRIVATE_BLE_DEVICE,
     BDADDR_TYPE_RANDOM_RESOLVABLE,
     CONF_DEVICES,
-    CONF_TRILAT_SOFT_INCLUDE_OTHER_FLOOR_ANCHORS,
-    DEFAULT_TRILAT_SOFT_INCLUDE_OTHER_FLOOR_ANCHORS,
     DISTANCE_INFINITE,
     DOMAIN,
     NAME,
@@ -164,7 +162,6 @@ class BermudaOptionsFlowHandler(OptionsFlowWithConfigEntry):
             step_id="init",
             menu_options={
                 "selectdevices": "Select Devices",
-                "experimental": "Experimental",
                 "floor_heights": "Floor Heights",
                 "calibration_samples": "Calibration Samples",
                 "transition_samples": "Transition Samples",
@@ -301,37 +298,6 @@ class BermudaOptionsFlowHandler(OptionsFlowWithConfigEntry):
             step_id="transition_samples",
             menu_options=menu_options,
             description_placeholders={"summary": description},
-        )
-
-    async def async_step_experimental(self, user_input=None):
-        """Manage experimental trilateration settings."""
-        if user_input is not None:
-            self.options.update(user_input)
-            return await self._update_options()
-
-        enabled = bool(
-            self.options.get(
-                CONF_TRILAT_SOFT_INCLUDE_OTHER_FLOOR_ANCHORS,
-                DEFAULT_TRILAT_SOFT_INCLUDE_OTHER_FLOOR_ANCHORS,
-            )
-        )
-        return self.async_show_form(
-            step_id="experimental",
-            data_schema=vol.Schema(
-                {
-                    vol.Required(
-                        CONF_TRILAT_SOFT_INCLUDE_OTHER_FLOOR_ANCHORS,
-                        default=enabled,
-                    ): vol.Coerce(bool)
-                }
-            ),
-            description_placeholders={
-                "summary": (
-                    "Experimental trilateration flags.\n\n"
-                    "- Soft-include other-floor anchors: keep other-floor anchors in the solve with inflated sigma.\n"
-                    "  This does not change floor evidence scoring."
-                )
-            },
         )
 
     async def async_step_floor_heights(self, user_input=None):
