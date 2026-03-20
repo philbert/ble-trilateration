@@ -30,6 +30,18 @@ class FloorBand:
     max_z_m: float
 
 
+@dataclass(frozen=True)
+class CalibrationSample:
+    """One persisted room calibration sample."""
+
+    room_area_id: str
+    room_name: str
+    x_m: float
+    y_m: float
+    z_m: float
+    radius_m: float
+
+
 def _load_anchors(path: Path) -> list[Anchor]:
     payload = json.loads(path.read_text())
     scanners = payload.get("data", {}).get("scanners", {})
@@ -48,6 +60,30 @@ def _load_anchors(path: Path) -> list[Anchor]:
         except (KeyError, TypeError, ValueError):
             continue
     return anchors
+
+
+def _load_samples(path: Path) -> list[CalibrationSample]:
+    payload = json.loads(path.read_text())
+    samples = payload.get("data", {}).get("samples", [])
+    loaded: list[CalibrationSample] = []
+    for sample in samples:
+        if (sample.get("quality") or {}).get("status") == "rejected":
+            continue
+        position = sample.get("position") or {}
+        try:
+            loaded.append(
+                CalibrationSample(
+                    room_area_id=str(sample.get("room_area_id") or ""),
+                    room_name=str(sample.get("room_name") or sample.get("room_area_id") or "room"),
+                    x_m=float(position["x_m"]),
+                    y_m=float(position["y_m"]),
+                    z_m=float(position["z_m"]),
+                    radius_m=max(float(sample.get("sample_radius_m") or 1.0), 0.1),
+                )
+            )
+        except (KeyError, TypeError, ValueError):
+            continue
+    return loaded
 
 
 def _auto_floor_bands(anchors: list[Anchor], gap_m: float) -> list[FloorBand]:
@@ -133,28 +169,85 @@ def _grid_points(min_value: float, max_value: float, step_m: float) -> list[floa
     return points
 
 
+def _floor_samples(
+    samples: list[CalibrationSample],
+    *,
+    floor: FloorBand,
+) -> list[CalibrationSample]:
+    return [sample for sample in samples if floor.min_z_m <= sample.z_m <= floor.max_z_m]
+
+
+def _point_in_sample_footprint(
+    x_m: float,
+    y_m: float,
+    *,
+    samples: list[CalibrationSample],
+    clip_margin_m: float,
+) -> bool:
+    if not samples:
+        return True
+    for sample in samples:
+        if math.hypot(x_m - sample.x_m, y_m - sample.y_m) <= sample.radius_m + clip_margin_m:
+            return True
+    return False
+
+
+def _bounds_from_anchors(anchors: list[Anchor], padding_m: float) -> tuple[float, float, float, float]:
+    return (
+        min(anchor.x_m for anchor in anchors) - padding_m,
+        max(anchor.x_m for anchor in anchors) + padding_m,
+        min(anchor.y_m for anchor in anchors) - padding_m,
+        max(anchor.y_m for anchor in anchors) + padding_m,
+    )
+
+
+def _bounds_from_samples(
+    samples: list[CalibrationSample],
+    padding_m: float,
+) -> tuple[float, float, float, float]:
+    return (
+        min(sample.x_m - sample.radius_m for sample in samples) - padding_m,
+        max(sample.x_m + sample.radius_m for sample in samples) + padding_m,
+        min(sample.y_m - sample.radius_m for sample in samples) - padding_m,
+        max(sample.y_m + sample.radius_m for sample in samples) + padding_m,
+    )
+
+
 def _build_floor_map(
     anchors: list[Anchor],
+    samples: list[CalibrationSample],
     *,
     floor: FloorBand,
     step_m: float,
     padding_m: float,
     risk_threshold: float,
+    bounds_source: str,
+    clip_to_samples: bool,
+    clip_margin_m: float,
 ) -> dict:
     floor_anchors = [anchor for anchor in anchors if floor.min_z_m <= anchor.z_m <= floor.max_z_m]
+    floor_samples = _floor_samples(samples, floor=floor)
     if not floor_anchors:
         return {
             "name": floor.name,
             "min_z_m": floor.min_z_m,
             "max_z_m": floor.max_z_m,
             "anchor_count": 0,
+            "sample_count": len(floor_samples),
             "grid": [],
         }
 
-    x_min = min(anchor.x_m for anchor in floor_anchors) - padding_m
-    x_max = max(anchor.x_m for anchor in floor_anchors) + padding_m
-    y_min = min(anchor.y_m for anchor in floor_anchors) - padding_m
-    y_max = max(anchor.y_m for anchor in floor_anchors) + padding_m
+    anchor_bounds = _bounds_from_anchors(floor_anchors, padding_m)
+    sample_bounds = _bounds_from_samples(floor_samples, padding_m) if floor_samples else None
+    if bounds_source == "samples" and sample_bounds is not None:
+        x_min, x_max, y_min, y_max = sample_bounds
+    elif bounds_source == "combined" and sample_bounds is not None:
+        x_min = min(anchor_bounds[0], sample_bounds[0])
+        x_max = max(anchor_bounds[1], sample_bounds[1])
+        y_min = min(anchor_bounds[2], sample_bounds[2])
+        y_max = max(anchor_bounds[3], sample_bounds[3])
+    else:
+        x_min, x_max, y_min, y_max = anchor_bounds
     x_points = _grid_points(x_min, x_max, step_m)
     y_points = _grid_points(y_min, y_max, step_m)
 
@@ -163,16 +256,27 @@ def _build_floor_map(
     x_risk = 0
     y_risk = 0
     undefined = 0
+    masked = 0
     ascii_rows: list[str] = []
     for y_m in reversed(y_points):
         row_chars: list[str] = []
         for x_m in x_points:
+            if clip_to_samples and floor_samples and not _point_in_sample_footprint(
+                x_m,
+                y_m,
+                samples=floor_samples,
+                clip_margin_m=clip_margin_m,
+            ):
+                masked += 1
+                row_chars.append("-")
+                cells.append({"x_m": x_m, "y_m": y_m, "anisotropy_ratio": None, "weak_axis": None, "masked": True})
+                continue
             covariance_xy = _xy_covariance(floor_anchors, x_m, y_m)
             ratio, weak_axis = _anisotropy(covariance_xy)
             if ratio is None:
                 undefined += 1
                 row_chars.append("?")
-                cells.append({"x_m": x_m, "y_m": y_m, "anisotropy_ratio": None, "weak_axis": None})
+                cells.append({"x_m": x_m, "y_m": y_m, "anisotropy_ratio": None, "weak_axis": None, "masked": False})
                 continue
             ratios.append(ratio)
             if ratio >= risk_threshold and weak_axis == "x":
@@ -190,6 +294,7 @@ def _build_floor_map(
                     "y_m": y_m,
                     "anisotropy_ratio": round(ratio, 3),
                     "weak_axis": weak_axis,
+                    "masked": False,
                 }
             )
         ascii_rows.append(f"{y_m:6.2f} " + "".join(row_chars))
@@ -200,19 +305,24 @@ def _build_floor_map(
         "min_z_m": floor.min_z_m,
         "max_z_m": floor.max_z_m,
         "anchor_count": len(floor_anchors),
+        "sample_count": len(floor_samples),
         "anchors": [
             {"name": anchor.name, "x_m": anchor.x_m, "y_m": anchor.y_m, "z_m": anchor.z_m}
             for anchor in floor_anchors
         ],
+        "rooms": sorted({sample.room_name for sample in floor_samples}),
         "bounds": {"x_min_m": x_min, "x_max_m": x_max, "y_min_m": y_min, "y_max_m": y_max},
         "grid_step_m": step_m,
         "risk_threshold": risk_threshold,
+        "bounds_source": bounds_source if sample_bounds is not None else "anchors",
+        "clip_to_samples": bool(clip_to_samples and floor_samples),
         "summary": {
             "median_anisotropy_ratio": round(median(ratios), 3) if ratios else None,
             "max_anisotropy_ratio": round(max(ratios), 3) if ratios else None,
             "x_weak_risk_fraction": round(x_risk / total_defined, 3),
             "y_weak_risk_fraction": round(y_risk / total_defined, 3),
             "undefined_fraction": round(undefined / max(len(cells), 1), 3),
+            "masked_fraction": round(masked / max(len(cells), 1), 3),
         },
         "ascii_map": ascii_rows,
         "grid": cells,
@@ -222,15 +332,20 @@ def _build_floor_map(
 def _format_text(result: dict) -> str:
     lines = [
         f"Input: {result['input_path']}",
+        (
+            f"Samples: {result['samples_path']}"
+            if result["samples_path"] is not None
+            else "Samples: none"
+        ),
         f"Legend: '.' = ratio<{result['risk_threshold']}, 'x' = x-weak risk, "
-        f"'y' = y-weak risk, '?' = degenerate",
+        f"'y' = y-weak risk, '?' = degenerate, '-' = outside calibration footprint",
     ]
     for floor in result["floors"]:
         lines.extend(
             [
                 "",
                 f"[{floor['name']}] z={floor['min_z_m']:.2f}..{floor['max_z_m']:.2f} "
-                f"anchors={floor['anchor_count']}",
+                f"anchors={floor['anchor_count']} samples={floor['sample_count']}",
             ]
         )
         if floor["anchor_count"] == 0:
@@ -242,13 +357,16 @@ def _format_text(result: dict) -> str:
             [
                 "  bounds: "
                 f"x={bounds['x_min_m']:.2f}..{bounds['x_max_m']:.2f} "
-                f"y={bounds['y_min_m']:.2f}..{bounds['y_max_m']:.2f}",
+                f"y={bounds['y_min_m']:.2f}..{bounds['y_max_m']:.2f} "
+                f"(source={floor['bounds_source']}, clip_to_samples={floor['clip_to_samples']})",
                 "  summary: "
                 f"median_ratio={summary['median_anisotropy_ratio']} "
                 f"max_ratio={summary['max_anisotropy_ratio']} "
                 f"x_weak={summary['x_weak_risk_fraction']:.3f} "
                 f"y_weak={summary['y_weak_risk_fraction']:.3f} "
-                f"undefined={summary['undefined_fraction']:.3f}",
+                f"undefined={summary['undefined_fraction']:.3f} "
+                f"masked={summary['masked_fraction']:.3f}",
+                "  rooms: " + (", ".join(floor["rooms"]) if floor["rooms"] else "none"),
                 "  anchors: "
                 + ", ".join(
                     f"{anchor['name']}({anchor['x_m']:.1f},{anchor['y_m']:.1f},{anchor['z_m']:.1f})"
@@ -270,6 +388,11 @@ def main() -> int:
         help="Path to persisted scanner anchors JSON (default: bermuda.scanner_anchors)",
     )
     parser.add_argument(
+        "--samples",
+        default="bermuda.calibration_samples.sparse",
+        help="Path to persisted calibration samples JSON; set to '' to disable sample-aware bounds",
+    )
+    parser.add_argument(
         "--floor",
         action="append",
         type=_parse_floor_band,
@@ -283,6 +406,23 @@ def main() -> int:
     )
     parser.add_argument("--step", type=float, default=1.0, help="Grid step in metres")
     parser.add_argument("--padding", type=float, default=1.0, help="XY padding around anchors in metres")
+    parser.add_argument(
+        "--bounds-source",
+        choices=("anchors", "samples", "combined"),
+        default="samples",
+        help="How to derive XY bounds when calibration samples are available",
+    )
+    parser.add_argument(
+        "--no-clip-to-samples",
+        action="store_true",
+        help="Do not mask out cells that fall outside the calibrated sample footprint",
+    )
+    parser.add_argument(
+        "--clip-margin",
+        type=float,
+        default=0.5,
+        help="Extra XY margin in metres around each sample radius when clipping to the calibrated footprint",
+    )
     parser.add_argument(
         "--risk-threshold",
         type=float,
@@ -301,21 +441,35 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    anchors = _load_anchors(Path(args.input))
+    anchors_path = Path(args.input)
+    anchors = _load_anchors(anchors_path)
     if not anchors:
         raise SystemExit(f"No anchors loaded from {args.input}")
 
+    samples: list[CalibrationSample] = []
+    samples_path: Path | None = None
+    if args.samples:
+        candidate_samples_path = Path(args.samples)
+        if candidate_samples_path.exists():
+            samples_path = candidate_samples_path
+            samples = _load_samples(candidate_samples_path)
+
     floors = args.floor or _auto_floor_bands(anchors, args.auto_gap)
     result = {
-        "input_path": str(Path(args.input).resolve()),
+        "input_path": str(anchors_path.resolve()),
+        "samples_path": str(samples_path.resolve()) if samples_path is not None else None,
         "risk_threshold": args.risk_threshold,
         "floors": [
             _build_floor_map(
                 anchors,
+                samples,
                 floor=floor,
                 step_m=args.step,
                 padding_m=args.padding,
                 risk_threshold=args.risk_threshold,
+                bounds_source=args.bounds_source,
+                clip_to_samples=not args.no_clip_to_samples,
+                clip_margin_m=args.clip_margin,
             )
             for floor in floors
         ],
