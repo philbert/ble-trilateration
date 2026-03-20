@@ -376,6 +376,108 @@ async def test_missing_weak_scanner_does_not_overwhelm_strong_fingerprint_match(
     assert room_scores["living_room"] > room_scores["bedroom"]
 
 
+def test_adaptive_fingerprint_weight_only_rises_with_good_coverage_and_confidence() -> None:
+    """Weak fingerprint support should cap the adaptive blend at the normal weight."""
+    classifier = BermudaRoomClassifier(_FakeCalibration([]), _FakeAreaRegistry())
+
+    low_geometry_high_fp = classifier._adaptive_fingerprint_weight(
+        geometry_quality_01=0.10,
+        fingerprint_coverage=1.0,
+        fingerprint_confidence=0.20,
+    )
+    low_geometry_low_coverage = classifier._adaptive_fingerprint_weight(
+        geometry_quality_01=0.10,
+        fingerprint_coverage=0.25,
+        fingerprint_confidence=0.20,
+    )
+    low_geometry_low_confidence = classifier._adaptive_fingerprint_weight(
+        geometry_quality_01=0.10,
+        fingerprint_coverage=1.0,
+        fingerprint_confidence=0.01,
+    )
+
+    assert low_geometry_high_fp > 0.65
+    assert low_geometry_low_coverage == pytest.approx(0.65)
+    assert low_geometry_low_confidence == pytest.approx(0.65)
+
+
+@pytest.mark.asyncio
+async def test_low_geometry_shifts_room_ranking_toward_fingerprint_evidence(monkeypatch) -> None:
+    """Poor geometry should raise the fingerprint blend weight enough to change the best room."""
+    classifier = BermudaRoomClassifier(
+        _FakeCalibration(
+            [
+                {
+                    "anchor_layout_hash": "layout-a",
+                    "room_area_id": "living_room",
+                    "position": {"x_m": 0.0, "y_m": 0.0, "z_m": 0.0},
+                    "sample_radius_m": 1.0,
+                    "quality": {"status": "accepted"},
+                    "anchors": {
+                        "scanner_a": {"rssi_median": -52.0},
+                        "scanner_b": {"rssi_median": -77.0},
+                    },
+                },
+                {
+                    "anchor_layout_hash": "layout-a",
+                    "room_area_id": "bedroom",
+                    "position": {"x_m": 1.0, "y_m": 0.0, "z_m": 0.0},
+                    "sample_radius_m": 1.0,
+                    "quality": {"status": "accepted"},
+                    "anchors": {
+                        "scanner_a": {"rssi_median": -77.0},
+                        "scanner_b": {"rssi_median": -52.0},
+                    },
+                },
+            ]
+        ),
+        _FakeAreaRegistry(),
+    )
+
+    await classifier.async_rebuild()
+
+    monkeypatch.setattr(
+        classifier,
+        "_geometry_room_scores",
+        lambda *_args, **_kwargs: (
+            {"living_room": 0.10, "bedroom": 1.00},
+            {"living_room": 1, "bedroom": 1},
+        ),
+    )
+    monkeypatch.setattr(
+        classifier,
+        "_fingerprint_room_scores",
+        lambda *_args, **_kwargs: (
+            {"living_room": 0.82, "bedroom": 0.60},
+            {"living_room": 1, "bedroom": 1},
+            {"living_room": 1.0, "bedroom": 1.0},
+        ),
+    )
+
+    good_geometry = classifier.classify(
+        layout_hash="layout-a",
+        floor_id="ground",
+        x_m=0.0,
+        y_m=0.0,
+        z_m=0.0,
+        live_rssi_by_scanner={"scanner_a": -53.0, "scanner_b": -75.0},
+        geometry_quality_01=0.50,
+    )
+    poor_geometry = classifier.classify(
+        layout_hash="layout-a",
+        floor_id="ground",
+        x_m=0.0,
+        y_m=0.0,
+        z_m=0.0,
+        live_rssi_by_scanner={"scanner_a": -53.0, "scanner_b": -75.0},
+        geometry_quality_01=0.10,
+    )
+
+    assert good_geometry.area_id == "bedroom"
+    assert poor_geometry.best_area_id == "living_room"
+    assert poor_geometry.fingerprint_blend_weight > good_geometry.fingerprint_blend_weight
+
+
 @pytest.mark.asyncio
 async def test_noisy_low_count_scanners_are_treated_as_softer_fingerprint_evidence() -> None:
     """Mismatches on noisy low-count scanners should hurt less than mismatches on stable scanners."""

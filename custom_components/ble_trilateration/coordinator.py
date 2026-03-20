@@ -1607,6 +1607,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             y_m=device.trilat_y_m,
             z_m=device.trilat_z_m,
             live_rssi_by_scanner=live_rssi_by_scanner,
+            geometry_quality_01=geometry_quality_01,
         )
         device.diag_area_switch = (
             "Hybrid room classification: "
@@ -1620,6 +1621,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             f"fp_best={classification.fingerprint_best_area_id or 'none'} "
             f"fp_margin={classification.fingerprint_confidence:.2f} "
             f"fp_cov={classification.fingerprint_coverage:.2f} "
+            f"fp_blend={classification.fingerprint_blend_weight:.2f} "
             f"samples={classification.sample_count} "
             f"geom_q={geometry_quality_01:.2f} "
             f"aniso={anisotropy_ratio:.2f} "

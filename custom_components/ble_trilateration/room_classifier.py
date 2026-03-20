@@ -21,7 +21,12 @@ ROOM_KERNEL_Z_WEIGHT = 0.15
 ROOM_SCORE_MIN = 0.15
 ROOM_SCORE_RATIO_MIN = 1.25
 K_CAP = 3
-FINGERPRINT_WEIGHT = 0.65
+FINGERPRINT_WEIGHT_NORMAL = 0.65
+FINGERPRINT_WEIGHT_HIGH = 0.85
+FINGERPRINT_BLEND_GEOMETRY_LOW = 0.15
+FINGERPRINT_BLEND_GEOMETRY_HIGH = 0.40
+FINGERPRINT_BLEND_COVERAGE_FLOOR = 0.50
+FINGERPRINT_BLEND_CONFIDENCE_FLOOR = 0.05
 FINGERPRINT_K_CAP = 5
 FINGERPRINT_SIGMA_DB = 7.0
 FINGERPRINT_SIGMA_DB_MIN = 4.0
@@ -52,6 +57,7 @@ class RoomClassification:
     fingerprint_second_score: float = 0.0
     fingerprint_confidence: float = 0.0
     fingerprint_coverage: float = 0.0
+    fingerprint_blend_weight: float = FINGERPRINT_WEIGHT_NORMAL
     sample_count: int = 0
 
 
@@ -276,6 +282,7 @@ class BermudaRoomClassifier:
         y_m: float,
         z_m: float | None,
         live_rssi_by_scanner: dict[str, float] | None = None,
+        geometry_quality_01: float | None = None,
     ) -> RoomClassification:
         """Classify one solved position using geometry and optional RSSI fingerprints."""
         if floor_id is None:
@@ -301,10 +308,18 @@ class BermudaRoomClassifier:
             else max(0.0, fingerprint_best_score - fingerprint_second_score)
         )
 
+        room_blend_weights: dict[str, float] = {}
         if geometry_scores:
             room_scores = {
-                area_id: (FINGERPRINT_WEIGHT * fingerprint_scores.get(area_id, 0.0))
-                + ((1.0 - FINGERPRINT_WEIGHT) * geometry_scores.get(area_id, 0.0))
+                area_id: (room_blend_weights.setdefault(
+                    area_id,
+                    self._adaptive_fingerprint_weight(
+                        geometry_quality_01=geometry_quality_01,
+                        fingerprint_coverage=fingerprint_coverage.get(area_id, 0.0),
+                        fingerprint_confidence=fingerprint_confidence,
+                    ),
+                ) * fingerprint_scores.get(area_id, 0.0))
+                + ((1.0 - room_blend_weights[area_id]) * geometry_scores.get(area_id, 0.0))
                 if fingerprint_scores and live_rssi_by_scanner
                 else geometry_scores.get(area_id, 0.0)
                 for area_id in (set(geometry_scores) | set(fingerprint_scores))
@@ -328,6 +343,7 @@ class BermudaRoomClassifier:
         fingerprint_score = fingerprint_scores.get(best_area_id, 0.0)
         sample_count = self.room_sample_count(layout_hash, floor_id, best_area_id)
         candidate_fingerprint_coverage = fingerprint_coverage.get(best_area_id, 0.0)
+        candidate_fingerprint_blend_weight = room_blend_weights.get(best_area_id, FINGERPRINT_WEIGHT_NORMAL)
 
         if best_score < ROOM_SCORE_MIN:
             return RoomClassification(
@@ -344,6 +360,7 @@ class BermudaRoomClassifier:
                 fingerprint_second_score=fingerprint_second_score,
                 fingerprint_confidence=fingerprint_confidence,
                 fingerprint_coverage=candidate_fingerprint_coverage,
+                fingerprint_blend_weight=candidate_fingerprint_blend_weight,
                 sample_count=sample_count,
             )
         if len(ranked_rooms) > 1 and (best_score / max(second_score, 1e-9)) < ROOM_SCORE_RATIO_MIN:
@@ -361,6 +378,7 @@ class BermudaRoomClassifier:
                 fingerprint_second_score=fingerprint_second_score,
                 fingerprint_confidence=fingerprint_confidence,
                 fingerprint_coverage=candidate_fingerprint_coverage,
+                fingerprint_blend_weight=candidate_fingerprint_blend_weight,
                 sample_count=sample_count,
             )
         return RoomClassification(
@@ -377,6 +395,7 @@ class BermudaRoomClassifier:
             fingerprint_second_score=fingerprint_second_score,
             fingerprint_confidence=fingerprint_confidence,
             fingerprint_coverage=candidate_fingerprint_coverage,
+            fingerprint_blend_weight=candidate_fingerprint_blend_weight,
             sample_count=sample_count,
         )
 
@@ -555,6 +574,37 @@ class BermudaRoomClassifier:
         packet_weight = min(1.0, float(feature.packet_count) / FINGERPRINT_PACKET_COUNT_REFERENCE)
         stability_weight = max(FINGERPRINT_RELIABILITY_FLOOR, min(1.0, 1.0 - (spread_db / 10.0)))
         return max(FINGERPRINT_RELIABILITY_FLOOR, packet_weight * stability_weight)
+
+    def _adaptive_fingerprint_weight(
+        self,
+        *,
+        geometry_quality_01: float | None,
+        fingerprint_coverage: float,
+        fingerprint_confidence: float,
+    ) -> float:
+        """Return per-room fingerprint blend weight from live geometry quality."""
+        if geometry_quality_01 is None:
+            base_weight = FINGERPRINT_WEIGHT_NORMAL
+        else:
+            geometry_quality = max(0.0, min(1.0, float(geometry_quality_01)))
+            if geometry_quality <= FINGERPRINT_BLEND_GEOMETRY_LOW:
+                base_weight = FINGERPRINT_WEIGHT_HIGH
+            elif geometry_quality >= FINGERPRINT_BLEND_GEOMETRY_HIGH:
+                base_weight = FINGERPRINT_WEIGHT_NORMAL
+            else:
+                fraction = (
+                    (geometry_quality - FINGERPRINT_BLEND_GEOMETRY_LOW)
+                    / (FINGERPRINT_BLEND_GEOMETRY_HIGH - FINGERPRINT_BLEND_GEOMETRY_LOW)
+                )
+                base_weight = FINGERPRINT_WEIGHT_HIGH + (
+                    fraction * (FINGERPRINT_WEIGHT_NORMAL - FINGERPRINT_WEIGHT_HIGH)
+                )
+
+        if fingerprint_coverage < FINGERPRINT_BLEND_COVERAGE_FLOOR:
+            return FINGERPRINT_WEIGHT_NORMAL
+        if fingerprint_confidence < FINGERPRINT_BLEND_CONFIDENCE_FLOOR:
+            return FINGERPRINT_WEIGHT_NORMAL
+        return base_weight
 
     def _build_transition_strengths(
         self,
