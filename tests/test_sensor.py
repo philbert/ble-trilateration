@@ -16,6 +16,8 @@ from custom_components.ble_trilateration.const import DOMAIN, NAME
 from custom_components.ble_trilateration.sensor import (
     BermudaSensorGeometryQuality,
     BermudaSensorHorizontalSpeed,
+    BermudaSensorPositionUncertaintyXBand,
+    BermudaSensorPositionUncertaintyYBand,
     BermudaSensorPositionConfidence,
     BermudaSensorResidualConsistency,
     BermudaSensorScannerAdvertStatus,
@@ -166,6 +168,41 @@ async def test_promoted_trilat_sensors_are_normal_sensors(hass) -> None:
     assert trilat_x.native_unit_of_measurement == UnitOfLength.METERS
     assert trilat_y.native_unit_of_measurement == UnitOfLength.METERS
     assert trilat_z.native_unit_of_measurement == UnitOfLength.METERS
+
+
+async def test_position_uncertainty_band_sensors_expose_band_widths(hass) -> None:
+    """Tracked devices should expose empirical XY uncertainty bands with correction attrs."""
+    entry = await setup_integration(hass)
+    coordinator = entry.runtime_data.coordinator
+
+    device = BermudaDevice("AA:BB:CC:DD:EE:6B", coordinator)
+    device.create_sensor = True
+    device.position_uncertainty_x_band_m = 5.4321
+    device.position_uncertainty_y_band_m = 3.2109
+    device.position_uncertainty_source = "mixed"
+    device.trilat_position_correction_x_m = 0.3456
+    device.trilat_position_correction_y_m = -0.1234
+    device.trilat_x_raw_m = 1.2345
+    device.trilat_y_raw_m = 6.7891
+    coordinator.devices[device.address] = device
+
+    sensor_x = BermudaSensorPositionUncertaintyXBand(coordinator, entry, device.address)
+    sensor_y = BermudaSensorPositionUncertaintyYBand(coordinator, entry, device.address)
+
+    assert sensor_x.native_value == 5.432
+    assert sensor_y.native_value == 3.211
+    assert sensor_x.entity_category == EntityCategory.DIAGNOSTIC
+    assert sensor_y.entity_category == EntityCategory.DIAGNOSTIC
+    assert sensor_x.extra_state_attributes == {
+        "source": "mixed",
+        "correction_m": 0.3456,
+        "raw_trilat_x_m": 1.2345,
+    }
+    assert sensor_y.extra_state_attributes == {
+        "source": "mixed",
+        "correction_m": -0.1234,
+        "raw_trilat_y_m": 6.7891,
+    }
 
 
 async def test_trilat_floor_sensor_exposes_phase0_diagnostics(hass) -> None:

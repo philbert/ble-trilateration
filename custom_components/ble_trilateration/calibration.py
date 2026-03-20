@@ -32,7 +32,13 @@ from .const import (
     DISTANCE_TIMEOUT,
     DOMAIN_PRIVATE_BLE_DEVICE,
 )
-from .trilateration import AnchorMeasurement, solve_quality_metrics_2d, solve_quality_metrics_3d
+from .trilateration import (
+    AnchorMeasurement,
+    solve_2d_soft_l1,
+    solve_3d_soft_l1,
+    solve_quality_metrics_2d,
+    solve_quality_metrics_3d,
+)
 from .util import mac_norm
 
 if TYPE_CHECKING:
@@ -40,6 +46,7 @@ if TYPE_CHECKING:
     from .bermuda_device import BermudaDevice
     from .calibration_store import BermudaCalibrationStore
     from .coordinator import BermudaDataUpdateCoordinator
+    from .ranging_model import BermudaRangingModel
 
 
 @dataclass
@@ -75,6 +82,45 @@ class _CaptureSession:
     transition_name: str | None = None
     transition_floor_ids: list[str] = field(default_factory=list)
     anchors: dict[str, _AnchorObservationAccumulator] = field(default_factory=dict)
+    trilat_x_values: list[float] = field(default_factory=list)
+    trilat_y_values: list[float] = field(default_factory=list)
+    trilat_z_values: list[float] = field(default_factory=list)
+    trilat_residual_values: list[float] = field(default_factory=list)
+    trilat_geometry_quality_values: list[float] = field(default_factory=list)
+    trilat_tracking_confidence_values: list[float] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class _TrilatCorrectionSample:
+    """One calibration-derived local XY correction reference."""
+
+    layout_hash: str
+    floor_id: str | None
+    room_area_id: str
+    x_m: float
+    y_m: float
+    z_m: float
+    sample_radius_m: float
+    bias_x_m: float
+    bias_y_m: float
+    half_width_x_m: float
+    half_width_y_m: float
+    reference_residual_m: float | None
+    quality_weight: float
+    source: str
+
+
+@dataclass(frozen=True)
+class TrilatPositionAdjustment:
+    """Local XY correction and band estimate for a live trilat point."""
+
+    correction_x_m: float
+    correction_y_m: float
+    uncertainty_x_band_m: float | None
+    uncertainty_y_band_m: float | None
+    source: str
+    sample_count: int
+    reference_residual_m: float | None = None
 
 
 class BermudaCalibrationManager:
@@ -93,6 +139,7 @@ class BermudaCalibrationManager:
         self._sessions: dict[str, _CaptureSession] = {}
         self._session_tasks: dict[str, asyncio.Task[None]] = {}
         self._change_callbacks: list = []
+        self._trilat_correction_samples: dict[str, list[_TrilatCorrectionSample]] = {}
 
     async def async_initialize(self) -> None:
         """Load persistent calibration data."""
@@ -404,6 +451,99 @@ class BermudaCalibrationManager:
             details["count"] = int(details["count"]) + 1
         return room_map
 
+    def rebuild_trilat_position_model(self, ranging_model: BermudaRangingModel) -> None:
+        """Rebuild cached local XY correction samples from stored calibration captures."""
+        grouped: dict[str, list[_TrilatCorrectionSample]] = {}
+        for sample in self.samples():
+            if sample.get("quality", {}).get("status") == CALIBRATION_QUALITY_REJECTED:
+                continue
+            built = self._build_trilat_correction_sample(sample, ranging_model)
+            if built is None:
+                continue
+            grouped.setdefault(built.layout_hash, []).append(built)
+        self._trilat_correction_samples = grouped
+
+    def trilat_position_adjustment(
+        self,
+        *,
+        layout_hash: str,
+        floor_id: str | None,
+        x_m: float,
+        y_m: float,
+        residual_m: float | None,
+    ) -> TrilatPositionAdjustment | None:
+        """Return weighted local XY correction and empirical uncertainty bands."""
+        candidates = [
+            sample
+            for sample in self._trilat_correction_samples.get(layout_hash, [])
+            if sample.floor_id == floor_id
+        ]
+        if not candidates:
+            return None
+
+        total_weight = 0.0
+        weighted_bias_x = 0.0
+        weighted_bias_y = 0.0
+        weighted_half_width_x = 0.0
+        weighted_half_width_y = 0.0
+        weighted_residual_ref = 0.0
+        residual_ref_weight = 0.0
+        capture_count = 0
+        bootstrap_count = 0
+        used_count = 0
+        for sample in candidates:
+            distance_xy = math.hypot(x_m - sample.x_m, y_m - sample.y_m)
+            support_sigma_m = max(sample.sample_radius_m * 1.75, 0.75)
+            if distance_xy > (support_sigma_m * 3.0):
+                continue
+            weight = sample.quality_weight * math.exp(-0.5 * ((distance_xy / support_sigma_m) ** 2))
+            if weight <= 1e-6:
+                continue
+            total_weight += weight
+            weighted_bias_x += weight * sample.bias_x_m
+            weighted_bias_y += weight * sample.bias_y_m
+            weighted_half_width_x += weight * sample.half_width_x_m
+            weighted_half_width_y += weight * sample.half_width_y_m
+            if sample.reference_residual_m is not None:
+                weighted_residual_ref += weight * sample.reference_residual_m
+                residual_ref_weight += weight
+            if sample.source == "capture":
+                capture_count += 1
+            else:
+                bootstrap_count += 1
+            used_count += 1
+
+        if total_weight <= 0.0 or used_count <= 0:
+            return None
+
+        correction_x_m = weighted_bias_x / total_weight
+        correction_y_m = weighted_bias_y / total_weight
+        half_width_x_m = weighted_half_width_x / total_weight
+        half_width_y_m = weighted_half_width_y / total_weight
+        reference_residual_m = (
+            weighted_residual_ref / residual_ref_weight if residual_ref_weight > 0.0 else None
+        )
+        residual_factor = 1.0
+        if residual_m is not None and reference_residual_m is not None and reference_residual_m > 0.0:
+            residual_factor = max(1.0, float(residual_m) / reference_residual_m)
+
+        if capture_count and bootstrap_count:
+            source = "mixed"
+        elif capture_count:
+            source = "capture"
+        else:
+            source = "bootstrap"
+
+        return TrilatPositionAdjustment(
+            correction_x_m=correction_x_m,
+            correction_y_m=correction_y_m,
+            uncertainty_x_band_m=max(0.2, 2.0 * half_width_x_m * residual_factor),
+            uncertainty_y_band_m=max(0.2, 2.0 * half_width_y_m * residual_factor),
+            source=source,
+            sample_count=used_count,
+            reference_residual_m=reference_residual_m,
+        )
+
     @staticmethod
     def _sample_quality_level(sample: dict[str, Any]) -> str:
         """Return the persisted quality level or derive a fallback."""
@@ -670,6 +810,7 @@ class BermudaCalibrationManager:
             device = self._coordinator.devices.get(session.device_address)
             if device is None:
                 continue
+            self._record_trilat_observation(session, device)
             for scanner_address in sorted(self._coordinator.scanner_list):
                 advert = device.get_scanner(scanner_address)
                 if advert is None or not self._advert_is_usable(advert, nowstamp):
@@ -764,6 +905,32 @@ class BermudaCalibrationManager:
         accumulator.last_seen_at = observed_at
 
     @staticmethod
+    def _record_trilat_observation(session: _CaptureSession, device: BermudaDevice) -> None:
+        """Capture the current raw filtered trilat solution for calibration summaries."""
+        x_val = getattr(device, "trilat_x_raw_m", None)
+        y_val = getattr(device, "trilat_y_raw_m", None)
+        z_val = getattr(device, "trilat_z_raw_m", None)
+        if x_val is None or y_val is None:
+            x_val = getattr(device, "trilat_x_m", None)
+            y_val = getattr(device, "trilat_y_m", None)
+            z_val = getattr(device, "trilat_z_m", None)
+        if x_val is None or y_val is None:
+            return
+        session.trilat_x_values.append(float(x_val))
+        session.trilat_y_values.append(float(y_val))
+        if z_val is not None:
+            session.trilat_z_values.append(float(z_val))
+        residual_m = getattr(device, "trilat_residual_m", None)
+        if residual_m is not None:
+            session.trilat_residual_values.append(float(residual_m))
+        geometry_quality = getattr(device, "trilat_geometry_quality", None)
+        if geometry_quality is not None:
+            session.trilat_geometry_quality_values.append(float(geometry_quality))
+        tracking_confidence = getattr(device, "trilat_tracking_confidence", None)
+        if tracking_confidence is not None:
+            session.trilat_tracking_confidence_values.append(float(tracking_confidence))
+
+    @staticmethod
     def _advert_is_usable(advert: BermudaAdvert, nowstamp: float) -> bool:
         """Check whether an advert is fresh enough for calibration capture."""
         if advert.rssi is None or advert.stamp is None:
@@ -823,6 +990,80 @@ class BermudaCalibrationManager:
             quality_status=quality["status"],
             quality_reason=quality["reason"],
         )
+
+    @staticmethod
+    def _p95_abs_error(values: list[float], target: float) -> float:
+        """Return a simple 95th-percentile absolute error estimate."""
+        if not values:
+            return 0.0
+        errors = sorted(abs(value - target) for value in values)
+        if len(errors) == 1:
+            return float(errors[0])
+        index = max(0, min(len(errors) - 1, math.ceil(0.95 * len(errors)) - 1))
+        return float(errors[index])
+
+    @staticmethod
+    def _series_stddev(values: list[float]) -> float:
+        """Return population stddev for a capture series."""
+        if len(values) < 2:
+            return 0.0
+        return float(statistics.pstdev(values))
+
+    def _build_trilat_capture_summary(self, session: _CaptureSession) -> dict[str, Any] | None:
+        """Summarise the raw filtered trilat path observed during a capture."""
+        observed_count = min(len(session.trilat_x_values), len(session.trilat_y_values))
+        if observed_count <= 0:
+            return None
+
+        target_x = float(session.position["x_m"])
+        target_y = float(session.position["y_m"])
+        target_z = float(session.position["z_m"])
+        x_values = session.trilat_x_values[:observed_count]
+        y_values = session.trilat_y_values[:observed_count]
+        z_values = session.trilat_z_values
+
+        x_rmse = math.sqrt(sum((value - target_x) ** 2 for value in x_values) / observed_count)
+        y_rmse = math.sqrt(sum((value - target_y) ** 2 for value in y_values) / observed_count)
+        z_summary: dict[str, float | int | str | None] = {}
+        if z_values:
+            z_count = len(z_values)
+            z_rmse = math.sqrt(sum((value - target_z) ** 2 for value in z_values) / z_count)
+            z_summary = {
+                "z_mean_m": round(float(statistics.fmean(z_values)), 4),
+                "z_stddev_m": round(self._series_stddev(z_values), 4),
+                "z_rmse_from_target_m": round(z_rmse, 4),
+                "z_p95_abs_error_m": round(self._p95_abs_error(z_values, target_z), 4),
+            }
+
+        summary: dict[str, Any] = {
+            "position_source": "raw_filtered",
+            "observed_count": observed_count,
+            "x_mean_m": round(float(statistics.fmean(x_values)), 4),
+            "y_mean_m": round(float(statistics.fmean(y_values)), 4),
+            "x_stddev_m": round(self._series_stddev(x_values), 4),
+            "y_stddev_m": round(self._series_stddev(y_values), 4),
+            "x_rmse_from_target_m": round(x_rmse, 4),
+            "y_rmse_from_target_m": round(y_rmse, 4),
+            "x_p95_abs_error_m": round(self._p95_abs_error(x_values, target_x), 4),
+            "y_p95_abs_error_m": round(self._p95_abs_error(y_values, target_y), 4),
+            "residual_mean_m": (
+                round(float(statistics.fmean(session.trilat_residual_values)), 4)
+                if session.trilat_residual_values
+                else None
+            ),
+            "geometry_quality_mean": (
+                round(float(statistics.fmean(session.trilat_geometry_quality_values)), 4)
+                if session.trilat_geometry_quality_values
+                else None
+            ),
+            "tracking_confidence_mean": (
+                round(float(statistics.fmean(session.trilat_tracking_confidence_values)), 4)
+                if session.trilat_tracking_confidence_values
+                else None
+            ),
+        }
+        summary.update(z_summary)
+        return summary
 
     def _build_capture_quality(self, session: _CaptureSession) -> dict[str, Any]:
         """Build shared anchor and quality payload for a completed capture session."""
@@ -956,6 +1197,7 @@ class BermudaCalibrationManager:
     def _build_calibration_sample(self, session: _CaptureSession) -> dict[str, Any]:
         """Build the persisted calibration-sample payload for a completed session."""
         shared = self._build_capture_quality(session)
+        trilat_capture = self._build_trilat_capture_summary(session)
         return {
             "id": f"sample_{uuid4().hex[:12]}",
             "created_at": shared["created_at"],
@@ -966,17 +1208,20 @@ class BermudaCalibrationManager:
             "device_address": session.device_address,
             "room_area_id": session.room_area_id,
             "room_name": session.room_name,
+            "room_floor_id": session.room_floor_id,
             "position": deepcopy(session.position),
             "sample_radius_m": session.sample_radius_m,
             "anchor_layout_hash": self.current_anchor_layout_hash,
             "notes": session.notes,
             "anchors": shared["anchors"],
             "quality": shared["quality"],
+            "trilat_capture": trilat_capture,
         }
 
     def _build_transition_sample(self, session: _CaptureSession) -> dict[str, Any]:
         """Build the persisted transition-sample payload for a completed session."""
         shared = self._build_capture_quality(session)
+        trilat_capture = self._build_trilat_capture_summary(session)
         return {
             "id": f"transition_sample_{uuid4().hex[:12]}",
             "created_at": shared["created_at"],
@@ -996,7 +1241,203 @@ class BermudaCalibrationManager:
             "anchor_layout_hash": self.current_anchor_layout_hash,
             "anchors": shared["anchors"],
             "quality": shared["quality"],
+            "trilat_capture": trilat_capture,
         }
+
+    @staticmethod
+    def _sample_floor_id(
+        sample: dict[str, Any],
+        coordinator: BermudaDataUpdateCoordinator,
+    ) -> str | None:
+        """Resolve the floor id for one stored calibration sample."""
+        room_floor_id = sample.get("room_floor_id")
+        if room_floor_id:
+            return str(room_floor_id)
+        room_area_id = sample.get("room_area_id")
+        if not room_area_id:
+            return None
+        area = coordinator.ar.async_get_area(str(room_area_id))
+        return area.floor_id if area is not None else None
+
+    @staticmethod
+    def _solve_covariance_xy(
+        anchors: list[AnchorMeasurement],
+        *,
+        x_m: float,
+        y_m: float,
+    ) -> tuple[float, float, float] | None:
+        """Return a simple XY covariance estimate for a solved anchor set."""
+        info_00 = 0.0
+        info_01 = 0.0
+        info_11 = 0.0
+        contributing = 0
+        for anchor in anchors:
+            dx = float(x_m) - float(anchor.x_m)
+            dy = float(y_m) - float(anchor.y_m)
+            distance = max(math.hypot(dx, dy), 1e-6)
+            sigma = max(float(anchor.sigma_m or 1.0), 0.05)
+            grad_x = dx / distance / sigma
+            grad_y = dy / distance / sigma
+            info_00 += grad_x * grad_x
+            info_01 += grad_x * grad_y
+            info_11 += grad_y * grad_y
+            contributing += 1
+
+        if contributing < 2:
+            return None
+
+        info_00 += 1e-6
+        info_11 += 1e-6
+        det = (info_00 * info_11) - (info_01 * info_01)
+        if det <= 1e-12 or not math.isfinite(det):
+            return None
+        cov_xx = info_11 / det
+        cov_xy = -info_01 / det
+        cov_yy = info_00 / det
+        if not all(math.isfinite(value) for value in (cov_xx, cov_xy, cov_yy)):
+            return None
+        return max(cov_xx, 0.0), cov_xy, max(cov_yy, 0.0)
+
+    def _build_trilat_correction_sample(
+        self,
+        sample: dict[str, Any],
+        ranging_model: BermudaRangingModel,
+    ) -> _TrilatCorrectionSample | None:
+        """Build one local XY correction sample from persisted calibration data."""
+        layout_hash = str(sample.get("anchor_layout_hash") or "")
+        room_area_id = str(sample.get("room_area_id") or "")
+        position = sample.get("position") or {}
+        sample_x = position.get("x_m")
+        sample_y = position.get("y_m")
+        sample_z = position.get("z_m")
+        if not layout_hash or not room_area_id or sample_x is None or sample_y is None or sample_z is None:
+            return None
+
+        sample_radius_m = max(float(sample.get("sample_radius_m") or DEFAULT_SAMPLE_RADIUS_M), 0.1)
+        floor_id = self._sample_floor_id(sample, self._coordinator)
+        trilat_capture = sample.get("trilat_capture") or {}
+        observed_count = int(trilat_capture.get("observed_count") or 0)
+        quality_score = max(0.0, min(1.0, float(sample.get("quality", {}).get("score_01") or 0.0)))
+
+        if (
+            observed_count > 0
+            and trilat_capture.get("x_mean_m") is not None
+            and trilat_capture.get("y_mean_m") is not None
+        ):
+            half_width_x_m = max(
+                float(trilat_capture.get("x_p95_abs_error_m") or 0.0),
+                float(trilat_capture.get("x_rmse_from_target_m") or 0.0),
+                0.1,
+            )
+            half_width_y_m = max(
+                float(trilat_capture.get("y_p95_abs_error_m") or 0.0),
+                float(trilat_capture.get("y_rmse_from_target_m") or 0.0),
+                0.1,
+            )
+            return _TrilatCorrectionSample(
+                layout_hash=layout_hash,
+                floor_id=floor_id,
+                room_area_id=room_area_id,
+                x_m=float(sample_x),
+                y_m=float(sample_y),
+                z_m=float(sample_z),
+                sample_radius_m=sample_radius_m,
+                bias_x_m=float(sample_x) - float(trilat_capture["x_mean_m"]),
+                bias_y_m=float(sample_y) - float(trilat_capture["y_mean_m"]),
+                half_width_x_m=half_width_x_m,
+                half_width_y_m=half_width_y_m,
+                reference_residual_m=(
+                    float(trilat_capture["residual_mean_m"])
+                    if trilat_capture.get("residual_mean_m") is not None
+                    else None
+                ),
+                quality_weight=max(0.35, min(1.0, 0.5 + (min(observed_count, 10) * 0.05) + (0.15 * quality_score))),
+                source="capture",
+            )
+
+        anchors: list[AnchorMeasurement] = []
+        device_id = str(sample.get("device_id") or "")
+        for scanner_address, anchor in (sample.get("anchors") or {}).items():
+            anchor_position = anchor.get("anchor_position") or {}
+            anchor_x = anchor_position.get("x_m")
+            anchor_y = anchor_position.get("y_m")
+            anchor_z = anchor_position.get("z_m")
+            rssi_median = anchor.get("rssi_median")
+            if anchor_x is None or anchor_y is None or rssi_median is None:
+                continue
+            range_estimate = ranging_model.estimate_range(
+                layout_hash=layout_hash,
+                scanner_address=str(scanner_address),
+                device_id=device_id or None,
+                filtered_rssi=float(rssi_median),
+                live_rssi_dispersion=(
+                    float(anchor.get("rssi_mad"))
+                    if anchor.get("rssi_mad") is not None
+                    else None
+                ),
+                live_packet_count=int(anchor.get("packet_count") or 1),
+            )
+            if range_estimate is None:
+                continue
+            anchors.append(
+                AnchorMeasurement(
+                    scanner_address=str(scanner_address),
+                    x_m=float(anchor_x),
+                    y_m=float(anchor_y),
+                    z_m=(float(anchor_z) if anchor_z is not None else None),
+                    range_m=range_estimate.range_m,
+                    sigma_m=range_estimate.sigma_m,
+                )
+            )
+
+        can_solve_3d = len(anchors) >= 4 and all(anchor.z_m is not None for anchor in anchors)
+        if can_solve_3d:
+            solve_result = solve_3d_soft_l1(
+                anchors,
+                initial_guess=(float(sample_x), float(sample_y), float(sample_z)),
+            )
+        elif len(anchors) >= 3:
+            solve_result = solve_2d_soft_l1(
+                anchors,
+                initial_guess=(float(sample_x), float(sample_y)),
+            )
+        else:
+            return None
+
+        if (
+            not solve_result.ok
+            or solve_result.x_m is None
+            or solve_result.y_m is None
+            or (can_solve_3d and solve_result.z_m is None)
+        ):
+            return None
+
+        covariance_xy = self._solve_covariance_xy(
+            anchors,
+            x_m=solve_result.x_m,
+            y_m=solve_result.y_m,
+        )
+        sigma_x_m = math.sqrt(covariance_xy[0]) if covariance_xy is not None else 0.0
+        sigma_y_m = math.sqrt(covariance_xy[2]) if covariance_xy is not None else 0.0
+        bias_x_m = float(sample_x) - solve_result.x_m
+        bias_y_m = float(sample_y) - solve_result.y_m
+        min_half_width = max(0.25, sample_radius_m * 0.5)
+        return _TrilatCorrectionSample(
+            layout_hash=layout_hash,
+            floor_id=floor_id,
+            room_area_id=room_area_id,
+            x_m=float(sample_x),
+            y_m=float(sample_y),
+            z_m=float(sample_z),
+            sample_radius_m=sample_radius_m,
+            bias_x_m=bias_x_m,
+            bias_y_m=bias_y_m,
+            half_width_x_m=max(abs(bias_x_m), sigma_x_m, min_half_width),
+            half_width_y_m=max(abs(bias_y_m), sigma_y_m, min_half_width),
+            reference_residual_m=solve_result.residual_rms_m,
+            quality_weight=max(0.2, min(0.75, 0.25 + (0.45 * quality_score))),
+            source="bootstrap",
+        )
 
     @staticmethod
     def _quality_level_from_metrics(

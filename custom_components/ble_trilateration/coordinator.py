@@ -432,6 +432,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
     async def async_handle_calibration_samples_changed(self) -> None:
         """Rebuild sample-derived runtime helpers after calibration data changes."""
         await self.ranging_model.async_rebuild()
+        self.calibration.rebuild_trilat_position_model(self.ranging_model)
         await self.room_classifier.async_rebuild()
         self._async_manage_repair_calibration_layout_mismatch()
 
@@ -2168,6 +2169,54 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         device.trilat_tracking_confidence = clamped
         device.trilat_tracking_confidence_level = self._trilat_confidence_band(clamped)
 
+    def _apply_trilat_position_adjustment(
+        self,
+        device: BermudaDevice,
+        *,
+        layout_hash: str,
+        selected_floor_id: str | None,
+        raw_xy: tuple[float, float],
+        raw_z: float | None,
+        residual_m: float | None,
+    ) -> tuple[float, float]:
+        """Apply calibration-derived XY bias correction and uncertainty bands."""
+        device.trilat_x_raw_m = raw_xy[0]
+        device.trilat_y_raw_m = raw_xy[1]
+        device.trilat_z_raw_m = raw_z
+        device.trilat_position_correction_x_m = 0.0
+        device.trilat_position_correction_y_m = 0.0
+        device.position_uncertainty_x_band_m = None
+        device.position_uncertainty_y_band_m = None
+        device.position_uncertainty_source = None
+
+        if not layout_hash or selected_floor_id is None:
+            return raw_xy
+
+        adjustment_lookup = getattr(self.calibration, "trilat_position_adjustment", None)
+        if adjustment_lookup is None:
+            return raw_xy
+
+        adjustment = adjustment_lookup(
+            layout_hash=layout_hash,
+            floor_id=selected_floor_id,
+            x_m=raw_xy[0],
+            y_m=raw_xy[1],
+            residual_m=residual_m,
+        )
+        if adjustment is None:
+            return raw_xy
+
+        corrected_xy = (
+            raw_xy[0] + adjustment.correction_x_m,
+            raw_xy[1] + adjustment.correction_y_m,
+        )
+        device.trilat_position_correction_x_m = adjustment.correction_x_m
+        device.trilat_position_correction_y_m = adjustment.correction_y_m
+        device.position_uncertainty_x_band_m = adjustment.uncertainty_x_band_m
+        device.position_uncertainty_y_band_m = adjustment.uncertainty_y_band_m
+        device.position_uncertainty_source = adjustment.source
+        return corrected_xy
+
     def _compute_trilat_confidence(
         self,
         anchor_count: int,
@@ -2345,8 +2394,8 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         if (
             device.trilat_status != "ok"
             or device.trilat_floor_id is None
-            or device.trilat_x_m is None
-            or device.trilat_y_m is None
+            or getattr(device, "trilat_x_raw_m", device.trilat_x_m) is None
+            or getattr(device, "trilat_y_raw_m", device.trilat_y_m) is None
         ):
             return
         geometry_quality_01 = max(0.0, min(1.0, float(device.trilat_geometry_quality or 0.0) / 10.0))
@@ -2367,9 +2416,13 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 saved_at=now().isoformat(),
                 floor_id=device.trilat_floor_id,
                 area_id=stable_area_id,
-                x_m=float(device.trilat_x_m),
-                y_m=float(device.trilat_y_m),
-                z_m=float(device.trilat_z_m) if device.trilat_z_m is not None else None,
+                x_m=float(getattr(device, "trilat_x_raw_m", device.trilat_x_m)),
+                y_m=float(getattr(device, "trilat_y_raw_m", device.trilat_y_m)),
+                z_m=(
+                    float(getattr(device, "trilat_z_raw_m", device.trilat_z_m))
+                    if getattr(device, "trilat_z_raw_m", device.trilat_z_m) is not None
+                    else None
+                ),
                 layout_hash=layout_hash,
                 floor_confidence=float(state.floor_confidence),
                 geometry_quality_01=geometry_quality_01,
@@ -3787,10 +3840,18 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 fallback_xy = anchor_centroid(anchors) if anchor_count > 0 else (0.0, 0.0)
             if fallback_z is None and anchor_count > 0 and all(anchor.z_m is not None for anchor in anchors):
                 fallback_z = anchor_centroid_3d(anchors)[2]
+            corrected_xy = self._apply_trilat_position_adjustment(
+                device,
+                layout_hash=layout_hash,
+                selected_floor_id=selected_floor_id,
+                raw_xy=fallback_xy,
+                raw_z=fallback_z,
+                residual_m=state.last_residual_m if state.last_residual_m is not None else 0.0,
+            )
 
             device.set_trilat_solution(
-                x_m=fallback_xy[0],
-                y_m=fallback_xy[1],
+                x_m=corrected_xy[0],
+                y_m=corrected_xy[1],
                 z_m=fallback_z,
                 floor_id=selected_floor_id,
                 floor_name=selected_floor_name,
@@ -3870,9 +3931,17 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         )
 
         if not inputs_changed and state.last_solution_xy is not None and state.last_residual_m is not None:
+            corrected_xy = self._apply_trilat_position_adjustment(
+                device,
+                layout_hash=layout_hash,
+                selected_floor_id=selected_floor_id,
+                raw_xy=state.last_solution_xy,
+                raw_z=state.last_solution_z,
+                residual_m=state.last_residual_m,
+            )
             device.set_trilat_solution(
-                x_m=state.last_solution_xy[0],
-                y_m=state.last_solution_xy[1],
+                x_m=corrected_xy[0],
+                y_m=corrected_xy[1],
                 z_m=state.last_solution_z,
                 floor_id=selected_floor_id,
                 floor_name=selected_floor_name,
@@ -4037,10 +4106,18 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 residual_m=fallback_residual,
                 mean_sigma_m=mean_sigma_m,
             )
+            corrected_xy = self._apply_trilat_position_adjustment(
+                device,
+                layout_hash=layout_hash,
+                selected_floor_id=selected_floor_id,
+                raw_xy=filtered_xy,
+                raw_z=(filtered_z if solver_dimension == "3d" or filtered_z is not None else None),
+                residual_m=fallback_residual,
+            )
 
             device.set_trilat_solution(
-                x_m=filtered_xy[0],
-                y_m=filtered_xy[1],
+                x_m=corrected_xy[0],
+                y_m=corrected_xy[1],
                 z_m=filtered_z if solver_dimension == "3d" or filtered_z is not None else None,
                 floor_id=selected_floor_id,
                 floor_name=selected_floor_name,
@@ -4107,10 +4184,18 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             residual_m=solve_result.residual_rms_m,
             mean_sigma_m=mean_sigma_m,
         )
+        corrected_xy = self._apply_trilat_position_adjustment(
+            device,
+            layout_hash=layout_hash,
+            selected_floor_id=selected_floor_id,
+            raw_xy=filtered_xy,
+            raw_z=(filtered_z if solver_dimension == "3d" or filtered_z is not None else None),
+            residual_m=solve_result.residual_rms_m,
+        )
 
         device.set_trilat_solution(
-            x_m=filtered_xy[0],
-            y_m=filtered_xy[1],
+            x_m=corrected_xy[0],
+            y_m=corrected_xy[1],
             z_m=filtered_z if solver_dimension == "3d" or filtered_z is not None else None,
             floor_id=selected_floor_id,
             floor_name=selected_floor_name,

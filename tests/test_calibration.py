@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import math
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -203,6 +204,176 @@ async def test_record_calibration_sample_service_accepts_legacy_room_radius(hass
     sample = coordinator.calibration.samples()[0]
     assert sample["sample_radius_m"] == 1.4
     assert "room_radius_m" not in sample
+
+
+async def test_calibration_sample_records_trilat_capture_summary(
+    hass: HomeAssistant, setup_bermuda_entry
+):
+    """Calibration captures should persist compact raw-trilat behavior summaries."""
+    coordinator = setup_bermuda_entry.runtime_data.coordinator
+
+    floor = fr.async_get(hass).async_create("Ground floor", level=0)
+    area = ar.async_get(hass).async_create("Living Room", floor_id=floor.floor_id)
+    devreg = dr.async_get(hass)
+    device_entry = devreg.async_get_or_create(
+        config_entry_id=setup_bermuda_entry.entry_id,
+        connections={(dr.CONNECTION_BLUETOOTH, "AA:BB:CC:DD:EE:13")},
+        name="Phil Phone",
+    )
+
+    target = BermudaDevice("aa:bb:cc:dd:ee:13", coordinator)
+    target.name = "Phil Phone"
+    coordinator.devices[target.address] = target
+
+    for idx in range(3):
+        scanner = BermudaDevice(f"aa:bb:cc:dd:10:1{idx}", coordinator)
+        scanner.name = f"Scanner {idx}"
+        scanner.anchor_enabled = True
+        scanner.anchor_x_m = float(idx)
+        scanner.anchor_y_m = float(idx + 1)
+        scanner.anchor_z_m = 2.0
+        coordinator.devices[scanner.address] = scanner
+        coordinator._scanner_list.add(scanner.address)
+        target.adverts[(target.address, scanner.address)] = SimpleNamespace(
+            scanner_address=scanner.address,
+            stamp=monotonic_time_coarse(),
+            rssi=-65.0 - idx,
+        )
+
+    response = await coordinator.calibration.async_start_session(
+        device_id=device_entry.id,
+        room_area_id=area.id,
+        x_m=4.2,
+        y_m=1.8,
+        z_m=1.1,
+        duration_s=1,
+    )
+    session_id = response["session_id"]
+
+    for x_val, y_val, z_val, residual_m in (
+        (4.0, 2.0, 1.0, 0.40),
+        (4.4, 1.6, 1.1, 0.60),
+        (4.2, 1.8, 1.2, 0.50),
+    ):
+        target.trilat_x_raw_m = x_val
+        target.trilat_y_raw_m = y_val
+        target.trilat_z_raw_m = z_val
+        target.trilat_residual_m = residual_m
+        target.trilat_geometry_quality = 6.0
+        target.trilat_tracking_confidence = 8.0
+        coordinator.calibration.capture_update()
+
+    await coordinator.calibration._async_finalize_session(session_id)
+    task = coordinator.calibration._session_tasks.pop(session_id)
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+    sample = coordinator.calibration.samples()[0]
+    trilat_capture = sample["trilat_capture"]
+    assert sample["room_floor_id"] == floor.floor_id
+    assert trilat_capture["position_source"] == "raw_filtered"
+    assert trilat_capture["observed_count"] == 3
+    assert trilat_capture["x_mean_m"] == 4.2
+    assert trilat_capture["y_mean_m"] == 1.8
+    assert trilat_capture["z_mean_m"] == 1.1
+    assert trilat_capture["x_stddev_m"] > 0.0
+    assert trilat_capture["y_stddev_m"] > 0.0
+    assert trilat_capture["x_rmse_from_target_m"] > 0.0
+    assert trilat_capture["y_rmse_from_target_m"] > 0.0
+    assert trilat_capture["residual_mean_m"] == 0.5
+
+
+async def test_existing_calibration_samples_bootstrap_trilat_position_model(
+    hass: HomeAssistant, setup_bermuda_entry
+):
+    """Existing calibration samples without trilat summaries should still seed correction lookups."""
+    coordinator = setup_bermuda_entry.runtime_data.coordinator
+
+    floor = fr.async_get(hass).async_create("Ground floor", level=0)
+    area = ar.async_get(hass).async_create("Office", floor_id=floor.floor_id)
+
+    scanner_positions = [
+        ("aa:bb:cc:dd:10:31", 0.0, 0.0, 1.0),
+        ("aa:bb:cc:dd:10:32", 4.0, 0.0, 1.0),
+        ("aa:bb:cc:dd:10:33", 0.0, 4.0, 1.0),
+    ]
+    for address, x_m, y_m, z_m in scanner_positions:
+        scanner = BermudaDevice(address, coordinator)
+        scanner.name = address
+        scanner.anchor_enabled = True
+        scanner.anchor_x_m = x_m
+        scanner.anchor_y_m = y_m
+        scanner.anchor_z_m = z_m
+        coordinator.devices[scanner.address] = scanner
+        coordinator._scanner_list.add(scanner.address)
+
+    layout_hash = coordinator.calibration.current_anchor_layout_hash
+
+    def _sample_anchors(sample_x: float, sample_y: float, sample_z: float) -> dict[str, dict[str, object]]:
+        anchors: dict[str, dict[str, object]] = {}
+        for address, anchor_x, anchor_y, anchor_z in scanner_positions:
+            distance = ((sample_x - anchor_x) ** 2 + (sample_y - anchor_y) ** 2 + (sample_z - anchor_z) ** 2) ** 0.5
+            anchors[address] = {
+                "scanner_name": address,
+                "anchor_position": {"x_m": anchor_x, "y_m": anchor_y, "z_m": anchor_z},
+                "packet_count": 5,
+                "rssi_median": -55.0 - (20.0 * math.log10(max(distance, 0.2))),
+                "rssi_mad": 0.5,
+                "rssi_min": -56.0 - (20.0 * math.log10(max(distance, 0.2))),
+                "rssi_max": -54.0 - (20.0 * math.log10(max(distance, 0.2))),
+            }
+        return anchors
+
+    await coordinator.calibration_store.async_add_sample(
+        {
+            "id": "sample_bootstrap_1",
+            "created_at": "2026-03-06T12:00:00+00:00",
+            "device_id": "device_one",
+            "device_name": "Device One",
+            "device_address": "aa:bb:cc:dd:ee:41",
+            "room_area_id": area.id,
+            "room_name": area.name,
+            "room_floor_id": floor.floor_id,
+            "position": {"x_m": 1.0, "y_m": 1.0, "z_m": 1.0},
+            "sample_radius_m": 1.0,
+            "anchor_layout_hash": layout_hash,
+            "anchors": _sample_anchors(1.0, 1.0, 1.0),
+            "quality": {"status": "accepted", "score_01": 0.8, "eligible_anchor_count": 3, "reason": None},
+        }
+    )
+    await coordinator.calibration_store.async_add_sample(
+        {
+            "id": "sample_bootstrap_2",
+            "created_at": "2026-03-06T12:05:00+00:00",
+            "device_id": "device_one",
+            "device_name": "Device One",
+            "device_address": "aa:bb:cc:dd:ee:41",
+            "room_area_id": area.id,
+            "room_name": area.name,
+            "room_floor_id": floor.floor_id,
+            "position": {"x_m": 2.0, "y_m": 1.0, "z_m": 1.0},
+            "sample_radius_m": 1.0,
+            "anchor_layout_hash": layout_hash,
+            "anchors": _sample_anchors(2.0, 1.0, 1.0),
+            "quality": {"status": "accepted", "score_01": 0.8, "eligible_anchor_count": 3, "reason": None},
+        }
+    )
+
+    await coordinator.async_handle_calibration_samples_changed()
+
+    adjustment = coordinator.calibration.trilat_position_adjustment(
+        layout_hash=layout_hash,
+        floor_id=floor.floor_id,
+        x_m=1.0,
+        y_m=1.0,
+        residual_m=0.5,
+    )
+    assert adjustment is not None
+    assert adjustment.source == "bootstrap"
+    assert adjustment.sample_count >= 1
+    assert adjustment.uncertainty_x_band_m is not None
+    assert adjustment.uncertainty_y_band_m is not None
 
 
 async def test_record_calibration_sample_service_accepts_split_xyz(hass: HomeAssistant, setup_bermuda_entry):

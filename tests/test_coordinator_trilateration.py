@@ -40,9 +40,17 @@ class _DummyDevice:
         self.trilat_floor_id = None
         self.trilat_floor_name = None
         self.trilat_anchor_count = 0
+        self.trilat_x_raw_m = None
+        self.trilat_y_raw_m = None
+        self.trilat_z_raw_m = None
         self.trilat_x_m = None
         self.trilat_y_m = None
         self.trilat_z_m = None
+        self.trilat_position_correction_x_m = 0.0
+        self.trilat_position_correction_y_m = 0.0
+        self.position_uncertainty_x_band_m = None
+        self.position_uncertainty_y_band_m = None
+        self.position_uncertainty_source = None
         self.trilat_residual_m = None
         self.trilat_confidence = 0.0
         self.trilat_confidence_level = "low"
@@ -87,6 +95,14 @@ class _DummyDevice:
         self.trilat_floor_id = floor_id
         self.trilat_floor_name = floor_name
         self.trilat_anchor_count = anchor_count
+        self.trilat_x_raw_m = None
+        self.trilat_y_raw_m = None
+        self.trilat_z_raw_m = None
+        self.trilat_position_correction_x_m = 0.0
+        self.trilat_position_correction_y_m = 0.0
+        self.position_uncertainty_x_band_m = None
+        self.position_uncertainty_y_band_m = None
+        self.position_uncertainty_source = None
         self.trilat_x_m = None
         self.trilat_y_m = None
         self.trilat_z_m = None
@@ -152,6 +168,8 @@ def _make_coordinator():
     coordinator.calibration = SimpleNamespace(
         current_anchor_layout_hash="layout-a",
         transition_support_diagnostics=lambda **_kwargs: {},
+        trilat_position_adjustment=lambda **_kwargs: None,
+        rebuild_trilat_position_model=lambda *_args, **_kwargs: None,
     )
     coordinator.fr = SimpleNamespace(async_get_floor=lambda floor_id: SimpleNamespace(name=f"Floor {floor_id}"))
     coordinator.ar = SimpleNamespace(async_get_area=lambda _area_id: None)
@@ -237,6 +255,40 @@ def test_trilat_low_confidence_with_insufficient_anchors():
     assert device.trilat_anchor_count == 1
     assert device.trilat_x_m is not None
     assert device.trilat_y_m is not None
+
+
+def test_trilat_position_adjustment_is_applied_to_published_coordinates():
+    """Calibration-derived XY corrections should shift published trilat coordinates."""
+    coordinator = _make_coordinator()
+    device = _DummyDevice("dev-c")
+    sc_a, sc_b, sc_c = _right_triangle_anchors(coordinator, device.address, "f1")
+
+    coordinator.calibration.trilat_position_adjustment = lambda **_kwargs: SimpleNamespace(
+        correction_x_m=0.75,
+        correction_y_m=-0.5,
+        uncertainty_x_band_m=3.0,
+        uncertainty_y_band_m=5.0,
+        source="capture",
+    )
+
+    fresh_stamp = time.monotonic()
+    device.adverts = {
+        ("dev-c", sc_a.address): _make_advert(sc_a, fresh_stamp, -70.0, 5.0),
+        ("dev-c", sc_b.address): _make_advert(sc_b, fresh_stamp, -70.0, 5.0),
+        ("dev-c", sc_c.address): _make_advert(sc_c, fresh_stamp, -70.0, 5.0),
+    }
+
+    coordinator._refresh_trilateration_for_device(device)
+
+    assert device.trilat_x_raw_m is not None
+    assert device.trilat_y_raw_m is not None
+    assert abs(float(device.trilat_x_m) - (float(device.trilat_x_raw_m) + 0.75)) < 0.01
+    assert abs(float(device.trilat_y_m) - (float(device.trilat_y_raw_m) - 0.5)) < 0.01
+    assert device.trilat_position_correction_x_m == 0.75
+    assert device.trilat_position_correction_y_m == -0.5
+    assert device.position_uncertainty_x_band_m == 3.0
+    assert device.position_uncertainty_y_band_m == 5.0
+    assert device.position_uncertainty_source == "capture"
 
 
 def test_trilat_low_confidence_logs_anchor_status_counts():

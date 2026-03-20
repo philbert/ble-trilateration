@@ -153,9 +153,17 @@ class BermudaDevice(dict):
         self.anchor_y_m: float | None = None
         self.anchor_z_m: float | None = None
         # Per-device trilateration diagnostics.
+        self.trilat_x_raw_m: float | None = None
+        self.trilat_y_raw_m: float | None = None
+        self.trilat_z_raw_m: float | None = None
         self.trilat_x_m: float | None = None
         self.trilat_y_m: float | None = None
         self.trilat_z_m: float | None = None
+        self.trilat_position_correction_x_m: float = 0.0
+        self.trilat_position_correction_y_m: float = 0.0
+        self.position_uncertainty_x_band_m: float | None = None
+        self.position_uncertainty_y_band_m: float | None = None
+        self.position_uncertainty_source: str | None = None
         self.trilat_floor_id: str | None = None
         self.trilat_floor_name: str | None = None
         self.trilat_anchor_count: int = 0
@@ -811,6 +819,14 @@ class BermudaDevice(dict):
         self.trilat_x_m = None
         self.trilat_y_m = None
         self.trilat_z_m = None
+        self.trilat_x_raw_m = None
+        self.trilat_y_raw_m = None
+        self.trilat_z_raw_m = None
+        self.trilat_position_correction_x_m = 0.0
+        self.trilat_position_correction_y_m = 0.0
+        self.position_uncertainty_x_band_m = None
+        self.position_uncertainty_y_band_m = None
+        self.position_uncertainty_source = None
         self.trilat_floor_id = floor_id
         self.trilat_floor_name = floor_name
         self.trilat_anchor_count = anchor_count

@@ -78,6 +78,8 @@ async def async_setup_entry(
             entities.append(BermudaSensorTrilatX(coordinator, entry, address))
             entities.append(BermudaSensorTrilatY(coordinator, entry, address))
             entities.append(BermudaSensorTrilatZ(coordinator, entry, address))
+            entities.append(BermudaSensorPositionUncertaintyXBand(coordinator, entry, address))
+            entities.append(BermudaSensorPositionUncertaintyYBand(coordinator, entry, address))
             entities.append(BermudaSensorTrilatFloor(coordinator, entry, address))
             entities.append(BermudaSensorTrilatAnchorCount(coordinator, entry, address))
             entities.append(BermudaSensorPositionConfidence(coordinator, entry, address))
@@ -465,6 +467,77 @@ class BermudaSensorTrilatZ(BermudaSensorTrilatX):
         if z_val is None:
             return None
         return round(z_val, 3)
+
+
+class BermudaSensorPositionUncertaintyXBand(BermudaSensorTrilatX):
+    """Diagnostic sensor for empirical X uncertainty band width."""
+
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    @property
+    def unique_id(self):
+        return f"{self._device.unique_id}_position_uncertainty_x_band"
+
+    @property
+    def name(self):
+        return "Position Uncertainty X Band"
+
+    @property
+    def native_value(self):
+        band = getattr(self._device, "position_uncertainty_x_band_m", None)
+        if band is None:
+            return None
+        return round(float(band), 3)
+
+    @property
+    def entity_registry_enabled_default(self) -> bool:
+        return True
+
+    @property
+    def state_class(self):
+        return SensorStateClass.MEASUREMENT
+
+    @property
+    def extra_state_attributes(self) -> Mapping[str, Any] | None:
+        attrs: dict[str, Any] = {}
+        source = getattr(self._device, "position_uncertainty_source", None)
+        if source is not None:
+            attrs["source"] = source
+        correction = getattr(self._device, "trilat_position_correction_x_m", 0.0)
+        attrs["correction_m"] = round(float(correction), 4)
+        raw_val = getattr(self._device, "trilat_x_raw_m", None)
+        if raw_val is not None:
+            attrs["raw_trilat_x_m"] = round(float(raw_val), 4)
+        return attrs
+
+
+class BermudaSensorPositionUncertaintyYBand(BermudaSensorPositionUncertaintyXBand):
+    """Diagnostic sensor for empirical Y uncertainty band width."""
+
+    @property
+    def unique_id(self):
+        return f"{self._device.unique_id}_position_uncertainty_y_band"
+
+    @property
+    def name(self):
+        return "Position Uncertainty Y Band"
+
+    @property
+    def native_value(self):
+        band = getattr(self._device, "position_uncertainty_y_band_m", None)
+        if band is None:
+            return None
+        return round(float(band), 3)
+
+    @property
+    def extra_state_attributes(self) -> Mapping[str, Any] | None:
+        attrs = dict(super().extra_state_attributes or {})
+        attrs["correction_m"] = round(float(getattr(self._device, "trilat_position_correction_y_m", 0.0)), 4)
+        raw_val = getattr(self._device, "trilat_y_raw_m", None)
+        if raw_val is not None:
+            attrs["raw_trilat_y_m"] = round(float(raw_val), 4)
+        attrs.pop("raw_trilat_x_m", None)
+        return attrs
 
 
 class BermudaSensorTrilatFloor(BermudaSensor):
