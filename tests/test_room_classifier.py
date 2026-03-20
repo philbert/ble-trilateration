@@ -317,6 +317,139 @@ async def test_classifier_exposes_room_reference_point_and_sample_count() -> Non
 
 
 @pytest.mark.asyncio
+async def test_missing_weak_scanner_does_not_overwhelm_strong_fingerprint_match() -> None:
+    """A missing flaky scanner should not dominate an otherwise strong room fingerprint match."""
+    classifier = BermudaRoomClassifier(
+        _FakeCalibration(
+            [
+                {
+                    "anchor_layout_hash": "layout-a",
+                    "room_area_id": "living_room",
+                    "position": {"x_m": -0.5, "y_m": 0.0, "z_m": 0.0},
+                    "sample_radius_m": 1.0,
+                    "quality": {"status": "accepted"},
+                    "anchors": {
+                        "scanner_a": {
+                            "rssi_median": -50.0,
+                            "packet_count": 5,
+                            "rssi_mad": 0.5,
+                            "rssi_min": -51.0,
+                            "rssi_max": -49.0,
+                        },
+                        "scanner_b": {
+                            "rssi_median": -85.0,
+                            "packet_count": 1,
+                            "rssi_mad": 8.0,
+                            "rssi_min": -92.0,
+                            "rssi_max": -80.0,
+                        },
+                    },
+                },
+                {
+                    "anchor_layout_hash": "layout-a",
+                    "room_area_id": "bedroom",
+                    "position": {"x_m": 0.5, "y_m": 0.0, "z_m": 0.0},
+                    "sample_radius_m": 1.0,
+                    "quality": {"status": "accepted"},
+                    "anchors": {
+                        "scanner_a": {
+                            "rssi_median": -55.0,
+                            "packet_count": 5,
+                            "rssi_mad": 0.5,
+                            "rssi_min": -56.0,
+                            "rssi_max": -54.0,
+                        },
+                    },
+                },
+            ]
+        ),
+        _FakeAreaRegistry(),
+    )
+
+    await classifier.async_rebuild()
+
+    room_scores, _, _ = classifier._fingerprint_room_scores(
+        classifier._fingerprints["layout-a"],
+        {"scanner_a": -50.0},
+    )
+
+    assert room_scores["living_room"] > room_scores["bedroom"]
+
+
+@pytest.mark.asyncio
+async def test_noisy_low_count_scanners_are_treated_as_softer_fingerprint_evidence() -> None:
+    """Mismatches on noisy low-count scanners should hurt less than mismatches on stable scanners."""
+    classifier = BermudaRoomClassifier(
+        _FakeCalibration(
+            [
+                {
+                    "anchor_layout_hash": "layout-a",
+                    "room_area_id": "living_room",
+                    "position": {"x_m": -0.5, "y_m": 0.0, "z_m": 0.0},
+                    "sample_radius_m": 1.0,
+                    "quality": {"status": "accepted"},
+                    "anchors": {
+                        "scanner_a": {
+                            "rssi_median": -50.0,
+                            "packet_count": 5,
+                            "rssi_mad": 0.5,
+                            "rssi_min": -51.0,
+                            "rssi_max": -49.0,
+                        },
+                        "scanner_b": {
+                            "rssi_median": -70.0,
+                            "packet_count": 5,
+                            "rssi_mad": 0.5,
+                            "rssi_min": -71.0,
+                            "rssi_max": -69.0,
+                        },
+                    },
+                },
+                {
+                    "anchor_layout_hash": "layout-a",
+                    "room_area_id": "bedroom",
+                    "position": {"x_m": 0.5, "y_m": 0.0, "z_m": 0.0},
+                    "sample_radius_m": 1.0,
+                    "quality": {"status": "accepted"},
+                    "anchors": {
+                        "scanner_a": {
+                            "rssi_median": -50.0,
+                            "packet_count": 5,
+                            "rssi_mad": 0.5,
+                            "rssi_min": -51.0,
+                            "rssi_max": -49.0,
+                        },
+                        "scanner_b": {
+                            "rssi_median": -70.0,
+                            "packet_count": 1,
+                            "rssi_mad": 8.0,
+                            "rssi_min": -78.0,
+                            "rssi_max": -62.0,
+                        },
+                    },
+                },
+            ]
+        ),
+        _FakeAreaRegistry(),
+    )
+
+    await classifier.async_rebuild()
+
+    result = classifier.classify(
+        layout_hash="layout-a",
+        floor_id="ground",
+        x_m=0.0,
+        y_m=0.0,
+        z_m=0.0,
+        live_rssi_by_scanner={"scanner_a": -50.0, "scanner_b": -76.0},
+    )
+
+    assert result.area_id == "bedroom"
+    assert result.reason == "ok"
+    assert result.fingerprint_best_area_id == "bedroom"
+
+
+@pytest.mark.asyncio
 async def test_fingerprint_global_can_pick_a_room_on_another_floor() -> None:
     """Cross-floor fingerprint scoring should return the strongest floor-aware room candidate."""
     classifier = BermudaRoomClassifier(

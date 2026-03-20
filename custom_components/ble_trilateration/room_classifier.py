@@ -24,9 +24,14 @@ K_CAP = 3
 FINGERPRINT_WEIGHT = 0.65
 FINGERPRINT_K_CAP = 5
 FINGERPRINT_SIGMA_DB = 7.0
+FINGERPRINT_SIGMA_DB_MIN = 4.0
+FINGERPRINT_SIGMA_DB_MAX = 12.0
 FINGERPRINT_MISSING_PENALTY_DB = 9.0
+FINGERPRINT_MISSING_FEATURE_FLOOR_DB = 6.0
 FINGERPRINT_EXTRA_SCANNER_PENALTY_DB = 4.5
 FINGERPRINT_MIN_COMMON_SCANNERS = 2
+FINGERPRINT_PACKET_COUNT_REFERENCE = 3.0
+FINGERPRINT_RELIABILITY_FLOOR = 0.25
 TRANSITION_GAP_SIGMA_M = 1.5
 
 
@@ -83,6 +88,17 @@ class _SampleFingerprint:
     area_id: str
     floor_id: str | None
     rssi_by_scanner: dict[str, float]
+    features_by_scanner: dict[str, "_FingerprintFeature"]
+
+
+@dataclass(frozen=True)
+class _FingerprintFeature:
+    """Compact per-scanner fingerprint statistics persisted with one sample."""
+
+    rssi_median: float
+    rssi_mad: float
+    packet_count: int
+    rssi_span: float
 
 
 class BermudaRoomClassifier:
@@ -139,17 +155,34 @@ class BermudaRoomClassifier:
                 )
             )
             fingerprint_rssi: dict[str, float] = {}
+            fingerprint_features: dict[str, _FingerprintFeature] = {}
             for scanner_address, anchor in (sample.get("anchors") or {}).items():
                 rssi_median = anchor.get("rssi_median")
                 if rssi_median is None:
                     continue
-                fingerprint_rssi[str(scanner_address).lower()] = float(rssi_median)
+                scanner_key = str(scanner_address).lower()
+                rssi_mad = max(float(anchor.get("rssi_mad") or 0.0), 0.0)
+                packet_count = max(int(anchor.get("packet_count") or 1), 1)
+                rssi_min = anchor.get("rssi_min")
+                rssi_max = anchor.get("rssi_max")
+                if rssi_min is not None and rssi_max is not None:
+                    rssi_span = max(float(rssi_max) - float(rssi_min), 0.0)
+                else:
+                    rssi_span = 0.0
+                fingerprint_rssi[scanner_key] = float(rssi_median)
+                fingerprint_features[scanner_key] = _FingerprintFeature(
+                    rssi_median=float(rssi_median),
+                    rssi_mad=rssi_mad,
+                    packet_count=packet_count,
+                    rssi_span=rssi_span,
+                )
             if fingerprint_rssi:
                 fingerprints[layout_hash].append(
                     _SampleFingerprint(
                         area_id=area_id,
                         floor_id=area.floor_id,
                         rssi_by_scanner=fingerprint_rssi,
+                        features_by_scanner=fingerprint_features,
                     )
                 )
         self._layouts = dict(layouts)
@@ -453,24 +486,46 @@ class BermudaRoomClassifier:
 
         for sample in samples:
             total_samples_by_area[sample.area_id] += 1
-            common_scanners = sorted(set(sample.rssi_by_scanner) & set(live))
+            sample_scanners = set(sample.features_by_scanner)
+            common_scanners = sorted(sample_scanners & set(live))
             if common_scanners:
                 covered_samples_by_area[sample.area_id] += 1
             if len(common_scanners) < min(FINGERPRINT_MIN_COMMON_SCANNERS, len(live)):
                 continue
 
-            total_sq = 0.0
+            total_weighted_sq = 0.0
+            total_weight = 0.0
             for scanner_address in common_scanners:
-                delta = live[scanner_address] - sample.rssi_by_scanner[scanner_address]
-                total_sq += delta * delta
+                feature = sample.features_by_scanner[scanner_address]
+                sigma_db = self._fingerprint_sigma_db(feature)
+                weight = self._fingerprint_reliability_weight(feature)
+                delta = live[scanner_address] - feature.rssi_median
+                total_weighted_sq += weight * ((delta / sigma_db) ** 2)
+                total_weight += weight
 
-            missing_sample_scanners = len(set(sample.rssi_by_scanner) - set(live))
-            extra_live_scanners = len(set(live) - set(sample.rssi_by_scanner))
-            total_sq += missing_sample_scanners * (FINGERPRINT_MISSING_PENALTY_DB**2)
-            total_sq += extra_live_scanners * (FINGERPRINT_EXTRA_SCANNER_PENALTY_DB**2)
-            compared_count = len(common_scanners) + missing_sample_scanners + extra_live_scanners
-            mean_sq = total_sq / max(compared_count, 1)
-            sample_score = math.exp(-0.5 * mean_sq / (FINGERPRINT_SIGMA_DB**2))
+            for scanner_address in sorted(sample_scanners - set(live)):
+                feature = sample.features_by_scanner[scanner_address]
+                sigma_db = self._fingerprint_sigma_db(feature)
+                weight = self._fingerprint_reliability_weight(feature)
+                penalty_db = min(
+                    FINGERPRINT_MISSING_PENALTY_DB,
+                    max(
+                        FINGERPRINT_MISSING_FEATURE_FLOOR_DB,
+                        feature.rssi_mad,
+                        feature.rssi_span / 4.0,
+                    ),
+                )
+                total_weighted_sq += weight * ((penalty_db / sigma_db) ** 2)
+                total_weight += weight
+
+            extra_live_scanners = len(set(live) - sample_scanners)
+            if extra_live_scanners:
+                extra_penalty = (FINGERPRINT_EXTRA_SCANNER_PENALTY_DB / FINGERPRINT_SIGMA_DB) ** 2
+                total_weighted_sq += extra_live_scanners * extra_penalty
+                total_weight += float(extra_live_scanners)
+
+            mean_sq = total_weighted_sq / max(total_weight, 1e-6)
+            sample_score = math.exp(-0.5 * mean_sq)
             room_scores[sample.area_id].append(sample_score)
 
         scored_rooms: dict[str, float] = {}
@@ -485,6 +540,21 @@ class BermudaRoomClassifier:
             scored_rooms[area_id] = sum(top_scores) / len(top_scores)
             topk_by_area[area_id] = len(top_scores)
         return scored_rooms, topk_by_area, coverage_by_area
+
+    def _fingerprint_sigma_db(self, feature: _FingerprintFeature) -> float:
+        """Return expected RSSI spread for one scanner feature."""
+        spread_db = max(feature.rssi_mad, feature.rssi_span / 4.0)
+        return max(
+            FINGERPRINT_SIGMA_DB_MIN,
+            min(FINGERPRINT_SIGMA_DB_MAX, (FINGERPRINT_SIGMA_DB * 0.5) + spread_db),
+        )
+
+    def _fingerprint_reliability_weight(self, feature: _FingerprintFeature) -> float:
+        """Return scanner reliability weight from calibration stability and visibility."""
+        spread_db = max(feature.rssi_mad, feature.rssi_span / 4.0)
+        packet_weight = min(1.0, float(feature.packet_count) / FINGERPRINT_PACKET_COUNT_REFERENCE)
+        stability_weight = max(FINGERPRINT_RELIABILITY_FLOOR, min(1.0, 1.0 - (spread_db / 10.0)))
+        return max(FINGERPRINT_RELIABILITY_FLOOR, packet_weight * stability_weight)
 
     def _build_transition_strengths(
         self,
