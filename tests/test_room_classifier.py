@@ -279,6 +279,41 @@ async def test_fingerprint_score_breaks_geometry_tie() -> None:
     assert result.area_id == "living_room"
     assert result.reason == "ok"
     assert result.fingerprint_score > result.geometry_score
+    assert result.fingerprint_best_area_id == "living_room"
+    assert result.fingerprint_confidence > 0.0
+    assert result.fingerprint_coverage == pytest.approx(1.0)
+    assert result.sample_count == 1
+
+
+@pytest.mark.asyncio
+async def test_classifier_exposes_room_reference_point_and_sample_count() -> None:
+    """Classifier should expose per-room sample count and centroid-like reference point."""
+    classifier = BermudaRoomClassifier(
+        _FakeCalibration(
+            [
+                {
+                    "anchor_layout_hash": "layout-a",
+                    "room_area_id": "living_room",
+                    "position": {"x_m": 0.0, "y_m": 0.0, "z_m": 0.0},
+                    "sample_radius_m": 1.0,
+                    "quality": {"status": "accepted"},
+                },
+                {
+                    "anchor_layout_hash": "layout-a",
+                    "room_area_id": "living_room",
+                    "position": {"x_m": 2.0, "y_m": 4.0, "z_m": 6.0},
+                    "sample_radius_m": 1.0,
+                    "quality": {"status": "accepted"},
+                },
+            ]
+        ),
+        _FakeAreaRegistry(),
+    )
+
+    await classifier.async_rebuild()
+
+    assert classifier.room_sample_count("layout-a", "ground", "living_room") == 2
+    assert classifier.room_reference_point("layout-a", "ground", "living_room") == pytest.approx((1.0, 2.0, 3.0))
 
 
 @pytest.mark.asyncio
@@ -378,7 +413,7 @@ async def test_fingerprint_global_floor_confidence_is_based_on_best_room_per_flo
         live_rssi_by_scanner={"scanner_a": -53.0, "scanner_b": -79.0},
     )
 
-    room_scores, _ = classifier._fingerprint_room_scores(
+    room_scores, _, _ = classifier._fingerprint_room_scores(
         classifier._fingerprints["layout-a"],
         {"scanner_a": -53.0, "scanner_b": -79.0},
     )

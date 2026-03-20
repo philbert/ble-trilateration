@@ -42,6 +42,12 @@ class RoomClassification:
     topk_used: int = 0
     geometry_score: float = 0.0
     fingerprint_score: float = 0.0
+    fingerprint_best_area_id: str | None = None
+    fingerprint_best_score: float = 0.0
+    fingerprint_second_score: float = 0.0
+    fingerprint_confidence: float = 0.0
+    fingerprint_coverage: float = 0.0
+    sample_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -89,6 +95,8 @@ class BermudaRoomClassifier:
         self._layouts: dict[str, list[_SampleKernel]] = {}
         self._fingerprints: dict[str, list[_SampleFingerprint]] = {}
         self._transition_strengths: dict[tuple[str, str | None, str, str], float] = {}
+        self._room_sample_counts: dict[str, dict[tuple[str | None, str], int]] = {}
+        self._room_reference_points: dict[str, dict[tuple[str | None, str], tuple[float, float, float]]] = {}
 
     async def async_rebuild(self) -> None:
         """Rebuild all room kernels from current calibration samples."""
@@ -147,6 +155,25 @@ class BermudaRoomClassifier:
         self._layouts = dict(layouts)
         self._fingerprints = dict(fingerprints)
         self._transition_strengths = self._build_transition_strengths(layouts)
+        room_sample_counts: dict[str, dict[tuple[str | None, str], int]] = {}
+        room_reference_points: dict[str, dict[tuple[str | None, str], tuple[float, float, float]]] = {}
+        for layout_hash, kernels in layouts.items():
+            counts: dict[tuple[str | None, str], int] = defaultdict(int)
+            sums: dict[tuple[str | None, str], list[float]] = defaultdict(lambda: [0.0, 0.0, 0.0])
+            for kernel in kernels:
+                key = (kernel.floor_id, kernel.area_id)
+                counts[key] += 1
+                sums[key][0] += kernel.x_m
+                sums[key][1] += kernel.y_m
+                sums[key][2] += kernel.z_m
+            room_sample_counts[layout_hash] = dict(counts)
+            room_reference_points[layout_hash] = {
+                key: (totals[0] / count, totals[1] / count, totals[2] / count)
+                for key, totals in sums.items()
+                if (count := counts.get(key, 0)) > 0
+            }
+        self._room_sample_counts = room_sample_counts
+        self._room_reference_points = room_reference_points
 
     def transition_strength(
         self,
@@ -168,6 +195,23 @@ class BermudaRoomClassifier:
         return any(sample.floor_id == floor_id for sample in self._layouts.get(layout_hash, [])) or any(
             sample.floor_id == floor_id for sample in self._fingerprints.get(layout_hash, [])
         )
+
+    def room_sample_count(self, layout_hash: str, floor_id: str | None, area_id: str | None) -> int:
+        """Return accepted calibration sample count for one room on a layout/floor."""
+        if not layout_hash or area_id is None:
+            return 0
+        return int(self._room_sample_counts.get(layout_hash, {}).get((floor_id, area_id), 0))
+
+    def room_reference_point(
+        self,
+        layout_hash: str,
+        floor_id: str | None,
+        area_id: str | None,
+    ) -> tuple[float, float, float] | None:
+        """Return centroid-like reference point for one room on a layout/floor."""
+        if not layout_hash or area_id is None:
+            return None
+        return self._room_reference_points.get(layout_hash, {}).get((floor_id, area_id))
 
     def floor_xy_envelope(
         self,
@@ -210,9 +254,18 @@ class BermudaRoomClassifier:
             return RoomClassification(area_id=None, reason="no_trained_rooms")
 
         geometry_scores, geometry_topk = self._geometry_room_scores(samples, x_m=x_m, y_m=y_m, z_m=z_m)
-        fingerprint_scores, fingerprint_topk = self._fingerprint_room_scores(
+        fingerprint_scores, fingerprint_topk, fingerprint_coverage = self._fingerprint_room_scores(
             fingerprints,
             live_rssi_by_scanner or {},
+        )
+        ranked_fingerprints = sorted(fingerprint_scores.items(), key=lambda row: (row[1], row[0]), reverse=True)
+        fingerprint_best_area_id = ranked_fingerprints[0][0] if ranked_fingerprints else None
+        fingerprint_best_score = ranked_fingerprints[0][1] if ranked_fingerprints else 0.0
+        fingerprint_second_score = ranked_fingerprints[1][1] if len(ranked_fingerprints) > 1 else 0.0
+        fingerprint_confidence = (
+            1.0
+            if len(ranked_fingerprints) == 1 and fingerprint_best_score > 0.0
+            else max(0.0, fingerprint_best_score - fingerprint_second_score)
         )
 
         if geometry_scores:
@@ -240,6 +293,8 @@ class BermudaRoomClassifier:
         topk_used = topk_by_area.get(best_area_id, 0)
         geometry_score = geometry_scores.get(best_area_id, 0.0)
         fingerprint_score = fingerprint_scores.get(best_area_id, 0.0)
+        sample_count = self.room_sample_count(layout_hash, floor_id, best_area_id)
+        candidate_fingerprint_coverage = fingerprint_coverage.get(best_area_id, 0.0)
 
         if best_score < ROOM_SCORE_MIN:
             return RoomClassification(
@@ -251,6 +306,12 @@ class BermudaRoomClassifier:
                 topk_used=topk_used,
                 geometry_score=geometry_score,
                 fingerprint_score=fingerprint_score,
+                fingerprint_best_area_id=fingerprint_best_area_id,
+                fingerprint_best_score=fingerprint_best_score,
+                fingerprint_second_score=fingerprint_second_score,
+                fingerprint_confidence=fingerprint_confidence,
+                fingerprint_coverage=candidate_fingerprint_coverage,
+                sample_count=sample_count,
             )
         if len(ranked_rooms) > 1 and (best_score / max(second_score, 1e-9)) < ROOM_SCORE_RATIO_MIN:
             return RoomClassification(
@@ -262,6 +323,12 @@ class BermudaRoomClassifier:
                 topk_used=topk_used,
                 geometry_score=geometry_score,
                 fingerprint_score=fingerprint_score,
+                fingerprint_best_area_id=fingerprint_best_area_id,
+                fingerprint_best_score=fingerprint_best_score,
+                fingerprint_second_score=fingerprint_second_score,
+                fingerprint_confidence=fingerprint_confidence,
+                fingerprint_coverage=candidate_fingerprint_coverage,
+                sample_count=sample_count,
             )
         return RoomClassification(
             area_id=best_area_id,
@@ -272,6 +339,12 @@ class BermudaRoomClassifier:
             topk_used=topk_used,
             geometry_score=geometry_score,
             fingerprint_score=fingerprint_score,
+            fingerprint_best_area_id=fingerprint_best_area_id,
+            fingerprint_best_score=fingerprint_best_score,
+            fingerprint_second_score=fingerprint_second_score,
+            fingerprint_confidence=fingerprint_confidence,
+            fingerprint_coverage=candidate_fingerprint_coverage,
+            sample_count=sample_count,
         )
 
     def fingerprint_global(
@@ -285,7 +358,7 @@ class BermudaRoomClassifier:
         if not fingerprints:
             return GlobalFingerprintResult(area_id=None, floor_id=None, reason="no_trained_rooms")
 
-        fingerprint_scores, _fingerprint_topk = self._fingerprint_room_scores(
+        fingerprint_scores, _fingerprint_topk, _fingerprint_coverage = self._fingerprint_room_scores(
             fingerprints,
             live_rssi_by_scanner or {},
         )
@@ -368,16 +441,21 @@ class BermudaRoomClassifier:
         self,
         samples: list[_SampleFingerprint],
         live_rssi_by_scanner: dict[str, float],
-    ) -> tuple[dict[str, float], dict[str, int]]:
+    ) -> tuple[dict[str, float], dict[str, int], dict[str, float]]:
         """Return per-room RSSI-space fingerprint scores."""
         if not live_rssi_by_scanner:
-            return {}, {}
+            return {}, {}, {}
 
         live = {str(scanner_address).lower(): float(rssi) for scanner_address, rssi in live_rssi_by_scanner.items()}
         room_scores: dict[str, list[float]] = defaultdict(list)
+        total_samples_by_area: dict[str, int] = defaultdict(int)
+        covered_samples_by_area: dict[str, int] = defaultdict(int)
 
         for sample in samples:
+            total_samples_by_area[sample.area_id] += 1
             common_scanners = sorted(set(sample.rssi_by_scanner) & set(live))
+            if common_scanners:
+                covered_samples_by_area[sample.area_id] += 1
             if len(common_scanners) < min(FINGERPRINT_MIN_COMMON_SCANNERS, len(live)):
                 continue
 
@@ -397,11 +475,16 @@ class BermudaRoomClassifier:
 
         scored_rooms: dict[str, float] = {}
         topk_by_area: dict[str, int] = {}
+        coverage_by_area: dict[str, float] = {
+            area_id: (covered_samples_by_area.get(area_id, 0) / count)
+            for area_id, count in total_samples_by_area.items()
+            if count > 0
+        }
         for area_id, scores in room_scores.items():
             top_scores = sorted(scores, reverse=True)[:FINGERPRINT_K_CAP]
             scored_rooms[area_id] = sum(top_scores) / len(top_scores)
             topk_by_area[area_id] = len(top_scores)
-        return scored_rooms, topk_by_area
+        return scored_rooms, topk_by_area, coverage_by_area
 
     def _build_transition_strengths(
         self,

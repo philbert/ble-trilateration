@@ -1279,6 +1279,97 @@ def test_area_switch_requires_extra_dwell_for_weak_transition():
         assert device.area_id == "living_room"
 
 
+def test_area_switch_holds_when_geometry_is_weak_and_fingerprint_is_not_decisive():
+    """Weak geometry should keep the stable room when fingerprint does not clearly back the challenger."""
+    coordinator = _make_coordinator()
+    device = _DummyDevice("dev-room-guard")
+    device.trilat_status = "ok"
+    device.trilat_x_m = 10.0
+    device.trilat_y_m = 2.0
+    device.trilat_z_m = 3.0
+    device.trilat_floor_id = "f1"
+    device.trilat_floor_name = "Floor f1"
+    device.trilat_geometry_quality = 2.0
+    device.area_id = "kitchen"
+    device.area_name = "kitchen"
+    device.area_last_seen_id = "kitchen"
+    coordinator.room_classifier = SimpleNamespace(
+        has_trained_rooms=lambda _layout_hash, _floor_id: True,
+        classify=lambda **_kwargs: RoomClassification(
+            area_id="living_room",
+            reason="ok",
+            best_area_id="living_room",
+            best_score=0.52,
+            second_score=0.46,
+            topk_used=2,
+            geometry_score=0.08,
+            fingerprint_score=0.55,
+            fingerprint_best_area_id="living_room",
+            fingerprint_best_score=0.55,
+            fingerprint_second_score=0.53,
+            fingerprint_confidence=0.02,
+            fingerprint_coverage=0.80,
+            sample_count=3,
+        ),
+        room_reference_point=lambda *_args, **_kwargs: (0.0, 0.0, 0.0),
+    )
+
+    with patch("custom_components.ble_trilateration.coordinator.monotonic_time_coarse", return_value=100.0):
+        coordinator._refresh_area_from_trilat(device, "layout-a")
+
+    state = coordinator._get_trilat_decision_state(device)
+    assert device.area_id == "kitchen"
+    assert state.room_challenger_id is None
+    assert "hold=weak_geometry_guardrail" in device.diag_area_switch
+
+
+def test_area_switch_requires_extra_dwell_for_sparse_room_challenger():
+    """Sparse challenger rooms should need longer dwell before switching."""
+    coordinator = _make_coordinator()
+    device = _DummyDevice("dev-room-sparse")
+    device.trilat_status = "ok"
+    device.trilat_x_m = 10.0
+    device.trilat_y_m = 2.0
+    device.trilat_z_m = 3.0
+    device.trilat_floor_id = "f1"
+    device.trilat_floor_name = "Floor f1"
+    device.trilat_geometry_quality = 5.0
+    device.area_id = "kitchen"
+    device.area_name = "kitchen"
+    device.area_last_seen_id = "kitchen"
+    coordinator.room_classifier = SimpleNamespace(
+        has_trained_rooms=lambda _layout_hash, _floor_id: True,
+        classify=lambda **_kwargs: RoomClassification(
+            area_id="living_room",
+            reason="ok",
+            best_area_id="living_room",
+            best_score=0.62,
+            second_score=0.12,
+            topk_used=3,
+            geometry_score=0.41,
+            fingerprint_score=0.73,
+            fingerprint_best_area_id="living_room",
+            fingerprint_best_score=0.73,
+            fingerprint_second_score=0.48,
+            fingerprint_confidence=0.25,
+            fingerprint_coverage=1.0,
+            sample_count=1,
+        ),
+        room_reference_point=lambda *_args, **_kwargs: (0.0, 0.0, 0.0),
+    )
+
+    with patch("custom_components.ble_trilateration.coordinator.monotonic_time_coarse", side_effect=[100.0, 101.5, 103.1]):
+        coordinator._refresh_area_from_trilat(device, "layout-a")
+        assert device.area_id == "kitchen"
+        assert "hold=room_switch_dwell(3.0s)" in device.diag_area_switch
+
+        coordinator._refresh_area_from_trilat(device, "layout-a")
+        assert device.area_id == "kitchen"
+
+        coordinator._refresh_area_from_trilat(device, "layout-a")
+        assert device.area_id == "living_room"
+
+
 def test_area_switch_emits_target_room_diag_logging():
     """Targeted debug devices should log the room-classifier decision summary."""
     coordinator = _make_coordinator()

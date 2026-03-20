@@ -1583,18 +1583,22 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             return
 
         live_rssi_by_scanner: dict[str, float] = {}
+        live_floor_adverts: list[BermudaAdvert] = []
         for advert in self._latest_adverts_by_scanner(device).values():
             if advert.stamp < nowstamp - DISTANCE_TIMEOUT:
                 continue
             scanner = advert.scanner_device
             if scanner.floor_id != device.trilat_floor_id:
                 continue
+            live_floor_adverts.append(advert)
             window_rssi = getattr(advert, "rssi_window_median", None)
             if window_rssi is None:
                 window_rssi = advert.rssi_filtered
             if window_rssi is None:
                 continue
             live_rssi_by_scanner[advert.scanner_address.lower()] = float(window_rssi)
+        geometry_quality_01 = max(0.0, min(1.0, float(device.trilat_geometry_quality or 0.0) / 10.0))
+        anisotropy_ratio, weak_axis = self._room_live_anisotropy(device, live_floor_adverts)
 
         classification = self.room_classifier.classify(
             layout_hash=layout_hash,
@@ -1612,22 +1616,72 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             f"geom={classification.geometry_score:.2f} "
             f"fp={classification.fingerprint_score:.2f} "
             f"second={classification.second_score:.2f} "
-            f"topk_used={classification.topk_used}"
+            f"topk_used={classification.topk_used} "
+            f"fp_best={classification.fingerprint_best_area_id or 'none'} "
+            f"fp_margin={classification.fingerprint_confidence:.2f} "
+            f"fp_cov={classification.fingerprint_coverage:.2f} "
+            f"samples={classification.sample_count} "
+            f"geom_q={geometry_quality_01:.2f} "
+            f"aniso={anisotropy_ratio:.2f} "
+            f"weak_axis={weak_axis or 'none'}"
         )
         stable_area_id = self._stable_area_id(device)
         if classification.area_id is not None:
             if stable_area_id is not None and stable_area_id != classification.area_id:
+                guardrail_reason = self._room_switch_guardrail_reason(
+                    classification,
+                    geometry_quality_01=geometry_quality_01,
+                )
+                if guardrail_reason is not None:
+                    state.room_challenger_id = None
+                    state.room_challenger_since = 0.0
+                    device.diag_area_switch += f" hold={guardrail_reason}"
+                    device.apply_position_classification(
+                        stable_area_id,
+                        floor_id=device.trilat_floor_id,
+                        floor_name=device.trilat_floor_name,
+                    )
+                    _log_target_room_diag(
+                        stable_area_id=stable_area_id,
+                        candidate_area_id=classification.area_id,
+                    )
+                    return
                 transition_strength = self._room_transition_strength(
                     layout_hash=layout_hash,
                     floor_id=device.trilat_floor_id,
                     from_area_id=stable_area_id,
                     to_area_id=classification.area_id,
                 )
+                weak_axis_aligned = self._room_switch_is_weak_axis_aligned(
+                    layout_hash=layout_hash,
+                    floor_id=device.trilat_floor_id,
+                    from_area_id=stable_area_id,
+                    to_area_id=classification.area_id,
+                    weak_axis=weak_axis,
+                )
                 required_dwell = self._room_switch_dwell_seconds(
                     classification,
                     transition_strength=transition_strength,
+                    weak_axis_aligned=weak_axis_aligned,
                 )
                 device.diag_area_switch += f" transition={transition_strength:.2f}"
+                if weak_axis_aligned:
+                    device.diag_area_switch += " weak_axis_aligned=yes"
+                sample_margin = self._room_switch_min_sample_margin(classification.sample_count)
+                if (classification.best_score - classification.second_score) < sample_margin:
+                    state.room_challenger_id = None
+                    state.room_challenger_since = 0.0
+                    device.diag_area_switch += f" hold=min_sample_margin({sample_margin:.2f})"
+                    device.apply_position_classification(
+                        stable_area_id,
+                        floor_id=device.trilat_floor_id,
+                        floor_name=device.trilat_floor_name,
+                    )
+                    _log_target_room_diag(
+                        stable_area_id=stable_area_id,
+                        candidate_area_id=classification.area_id,
+                    )
+                    return
                 if state.room_challenger_id != classification.area_id:
                     state.room_challenger_id = classification.area_id
                     state.room_challenger_since = nowstamp
@@ -1689,8 +1743,107 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         )
         _log_target_room_diag(stable_area_id=stable_area_id, candidate_area_id=classification.best_area_id)
 
-    @staticmethod
-    def _room_switch_dwell_seconds(classification, *, transition_strength: float = 1.0) -> float:
+    def _room_live_anisotropy(
+        self,
+        device: BermudaDevice,
+        live_floor_adverts: list[BermudaAdvert],
+    ) -> tuple[float, str | None]:
+        """Return lightweight XY anisotropy ratio and weak axis from active same-floor anchors."""
+        if device.trilat_x_m is None or device.trilat_y_m is None:
+            return 1.0, None
+
+        total_weight = 0.0
+        weighted_x_var = 0.0
+        weighted_y_var = 0.0
+        for advert in live_floor_adverts:
+            scanner = advert.scanner_device
+            anchor_x = getattr(scanner, "anchor_x_m", None)
+            anchor_y = getattr(scanner, "anchor_y_m", None)
+            if anchor_x is None or anchor_y is None:
+                continue
+            sigma_m = getattr(advert, "rssi_distance_sigma_m", None)
+            if sigma_m is None:
+                weight = 1.0
+            else:
+                sigma = max(float(sigma_m), 0.5)
+                weight = 1.0 / (sigma * sigma)
+            dx = float(anchor_x) - float(device.trilat_x_m)
+            dy = float(anchor_y) - float(device.trilat_y_m)
+            weighted_x_var += weight * (dx * dx)
+            weighted_y_var += weight * (dy * dy)
+            total_weight += weight
+
+        if total_weight <= 0.0:
+            return 1.0, None
+
+        sigma_x = math.sqrt(max(0.0, weighted_x_var / total_weight))
+        sigma_y = math.sqrt(max(0.0, weighted_y_var / total_weight))
+        min_sigma = max(min(sigma_x, sigma_y), 1e-6)
+        ratio = max(sigma_x, sigma_y) / min_sigma
+        if math.isclose(sigma_x, sigma_y, rel_tol=1e-6, abs_tol=1e-6):
+            weak_axis = None
+        else:
+            weak_axis = "x" if sigma_x < sigma_y else "y"
+        return ratio, weak_axis
+
+    def _room_switch_is_weak_axis_aligned(
+        self,
+        *,
+        layout_hash: str,
+        floor_id: str | None,
+        from_area_id: str | None,
+        to_area_id: str | None,
+        weak_axis: str | None,
+    ) -> bool:
+        """Return whether the candidate room shift is mostly along the weak axis."""
+        if weak_axis is None or from_area_id is None or to_area_id is None:
+            return False
+        from_point = self.room_classifier.room_reference_point(layout_hash, floor_id, from_area_id)
+        to_point = self.room_classifier.room_reference_point(layout_hash, floor_id, to_area_id)
+        if from_point is None or to_point is None:
+            return False
+        dx = abs(to_point[0] - from_point[0])
+        dy = abs(to_point[1] - from_point[1])
+        if weak_axis == "x":
+            return dx > dy
+        return dy > dx
+
+    def _room_switch_guardrail_reason(
+        self,
+        classification,
+        *,
+        geometry_quality_01: float,
+    ) -> str | None:
+        """Return hold reason when same-floor room evidence is not strong enough to form a challenger."""
+        if geometry_quality_01 >= self._ROOM_SWITCH_GEOMETRY_QUALITY_MIN:
+            return None
+        if classification.geometry_score >= self._ROOM_SWITCH_GEOMETRY_SCORE_MIN:
+            return None
+        if classification.fingerprint_coverage < self._ROOM_SWITCH_FP_COVERAGE_FLOOR:
+            return "weak_fp_coverage"
+        challenger_leads_by_fingerprint = classification.best_area_id == classification.fingerprint_best_area_id
+        if (
+            not challenger_leads_by_fingerprint
+            or classification.fingerprint_confidence < self._ROOM_SWITCH_FP_CONFIDENCE_DECISIVE
+        ):
+            return "weak_geometry_guardrail"
+        return None
+
+    def _room_switch_min_sample_margin(self, sample_count: int) -> float:
+        """Return extra blended-score margin for sparse challenger rooms."""
+        if sample_count == 1:
+            return self._ROOM_SWITCH_MIN_SAMPLE_MARGIN_ONE
+        if sample_count == 2:
+            return self._ROOM_SWITCH_MIN_SAMPLE_MARGIN_TWO
+        return 0.0
+
+    def _room_switch_dwell_seconds(
+        self,
+        classification,
+        *,
+        transition_strength: float = 1.0,
+        weak_axis_aligned: bool = False,
+    ) -> float:
         """Return an evidence-based dwell for room switches."""
         margin = max(0.0, classification.best_score - classification.second_score)
         if classification.best_score >= 0.60 and margin >= 0.35:
@@ -1701,10 +1854,21 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             base = 4.0
 
         if transition_strength >= 0.65:
-            return base
-        if transition_strength >= 0.35:
-            return base + 1.5
-        return base + 3.0
+            dwell = base
+        elif transition_strength >= 0.35:
+            dwell = base + 1.5
+        else:
+            dwell = base + 3.0
+
+        if classification.sample_count == 1:
+            dwell *= self._ROOM_SWITCH_MIN_SAMPLE_DWELL_MULTIPLIER_ONE
+        elif classification.sample_count == 2:
+            dwell *= self._ROOM_SWITCH_MIN_SAMPLE_DWELL_MULTIPLIER_TWO
+
+        if weak_axis_aligned:
+            dwell *= self._ROOM_SWITCH_WEAK_AXIS_DWELL_MULTIPLIER
+
+        return min(self._ROOM_SWITCH_DWELL_CEILING_S, dwell)
 
     def _room_transition_strength(
         self,
@@ -1826,6 +1990,16 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
     _ZONE_TRAVERSAL_RECENCY_S: float = 30.0
     _TRILAT_BOOTSTRAP_MAX_AGE_S: float = 6 * 3600.0
     _TRILAT_BOOTSTRAP_HOLD_S: float = 60.0
+    _ROOM_SWITCH_GEOMETRY_QUALITY_MIN: float = 0.30
+    _ROOM_SWITCH_GEOMETRY_SCORE_MIN: float = 0.20
+    _ROOM_SWITCH_FP_CONFIDENCE_DECISIVE: float = 0.05
+    _ROOM_SWITCH_FP_COVERAGE_FLOOR: float = 0.50
+    _ROOM_SWITCH_MIN_SAMPLE_MARGIN_ONE: float = 0.10
+    _ROOM_SWITCH_MIN_SAMPLE_MARGIN_TWO: float = 0.05
+    _ROOM_SWITCH_MIN_SAMPLE_DWELL_MULTIPLIER_ONE: float = 2.0
+    _ROOM_SWITCH_MIN_SAMPLE_DWELL_MULTIPLIER_TWO: float = 1.5
+    _ROOM_SWITCH_WEAK_AXIS_DWELL_MULTIPLIER: float = 1.5
+    _ROOM_SWITCH_DWELL_CEILING_S: float = 180.0
 
     def trilat_max_horizontal_speed_mps(self) -> float:
         """Return the configured horizontal trilat speed limit."""
