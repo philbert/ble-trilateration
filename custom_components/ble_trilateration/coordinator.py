@@ -1599,6 +1599,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             live_rssi_by_scanner[advert.scanner_address.lower()] = float(window_rssi)
         geometry_quality_01 = max(0.0, min(1.0, float(device.trilat_geometry_quality or 0.0) / 10.0))
         anisotropy_ratio, weak_axis = self._room_live_anisotropy(device, live_floor_adverts)
+        solve_covariance_xy = self._room_live_covariance_xy(device, live_floor_adverts)
 
         classification = self.room_classifier.classify(
             layout_hash=layout_hash,
@@ -1608,6 +1609,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             z_m=device.trilat_z_m,
             live_rssi_by_scanner=live_rssi_by_scanner,
             geometry_quality_01=geometry_quality_01,
+            solve_covariance_xy=solve_covariance_xy,
         )
         device.diag_area_switch = (
             "Hybrid room classification: "
@@ -1625,6 +1627,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             f"samples={classification.sample_count} "
             f"geom_q={geometry_quality_01:.2f} "
             f"aniso={anisotropy_ratio:.2f} "
+            f"cov={'yes' if solve_covariance_xy is not None else 'no'} "
             f"weak_axis={weak_axis or 'none'}"
         )
         stable_area_id = self._stable_area_id(device)
@@ -1787,6 +1790,53 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         else:
             weak_axis = "x" if sigma_x < sigma_y else "y"
         return ratio, weak_axis
+
+    def _room_live_covariance_xy(
+        self,
+        device: BermudaDevice,
+        live_floor_adverts: list[BermudaAdvert],
+    ) -> tuple[float, float, float] | None:
+        """Return local XY solve covariance from active same-floor anchor geometry."""
+        if device.trilat_x_m is None or device.trilat_y_m is None:
+            return None
+
+        info_00 = 0.0
+        info_01 = 0.0
+        info_11 = 0.0
+        contributing = 0
+        for advert in live_floor_adverts:
+            scanner = advert.scanner_device
+            anchor_x = getattr(scanner, "anchor_x_m", None)
+            anchor_y = getattr(scanner, "anchor_y_m", None)
+            if anchor_x is None or anchor_y is None:
+                continue
+            dx = float(device.trilat_x_m) - float(anchor_x)
+            dy = float(device.trilat_y_m) - float(anchor_y)
+            distance = max(math.hypot(dx, dy), 1e-6)
+            sigma_m = getattr(advert, "rssi_distance_sigma_m", None)
+            sigma = max(float(sigma_m), 0.5) if sigma_m is not None else 1.0
+            grad_x = dx / distance / sigma
+            grad_y = dy / distance / sigma
+            info_00 += grad_x * grad_x
+            info_01 += grad_x * grad_y
+            info_11 += grad_y * grad_y
+            contributing += 1
+
+        if contributing < 2:
+            return None
+
+        info_00 += 1e-6
+        info_11 += 1e-6
+        det = (info_00 * info_11) - (info_01 * info_01)
+        if det <= 1e-12 or not math.isfinite(det):
+            return None
+
+        cov_xx = info_11 / det
+        cov_xy = -info_01 / det
+        cov_yy = info_00 / det
+        if not all(math.isfinite(value) for value in (cov_xx, cov_xy, cov_yy)):
+            return None
+        return max(cov_xx, 0.0), cov_xy, max(cov_yy, 0.0)
 
     def _room_switch_is_weak_axis_aligned(
         self,

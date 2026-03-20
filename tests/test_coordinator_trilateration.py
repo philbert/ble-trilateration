@@ -1370,6 +1370,28 @@ def test_area_switch_requires_extra_dwell_for_sparse_room_challenger():
         assert device.area_id == "living_room"
 
 
+def test_room_live_covariance_xy_reflects_weak_axis_geometry():
+    """Covariance helper should report larger variance on the weakly observed axis."""
+    coordinator = _make_coordinator()
+    device = _DummyDevice("dev-room-cov")
+    device.trilat_x_m = 0.0
+    device.trilat_y_m = 0.0
+
+    sc_north = _make_scanner(coordinator, "scanner-north", "f1", 0.0, 5.0)
+    sc_south = _make_scanner(coordinator, "scanner-south", "f1", 0.0, -5.0)
+    adverts = [
+        _make_advert(sc_north, time.monotonic(), -70.0, 5.0),
+        _make_advert(sc_south, time.monotonic(), -70.0, 5.0),
+    ]
+
+    covariance = coordinator._room_live_covariance_xy(device, adverts)
+
+    assert covariance is not None
+    cov_xx, cov_xy, cov_yy = covariance
+    assert cov_xx > cov_yy
+    assert abs(cov_xy) < 1e-3
+
+
 def test_area_switch_emits_target_room_diag_logging():
     """Targeted debug devices should log the room-classifier decision summary."""
     coordinator = _make_coordinator()

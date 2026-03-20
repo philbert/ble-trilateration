@@ -283,6 +283,7 @@ class BermudaRoomClassifier:
         z_m: float | None,
         live_rssi_by_scanner: dict[str, float] | None = None,
         geometry_quality_01: float | None = None,
+        solve_covariance_xy: tuple[float, float, float] | None = None,
     ) -> RoomClassification:
         """Classify one solved position using geometry and optional RSSI fingerprints."""
         if floor_id is None:
@@ -293,7 +294,13 @@ class BermudaRoomClassifier:
         if not samples and not fingerprints:
             return RoomClassification(area_id=None, reason="no_trained_rooms")
 
-        geometry_scores, geometry_topk = self._geometry_room_scores(samples, x_m=x_m, y_m=y_m, z_m=z_m)
+        geometry_scores, geometry_topk = self._geometry_room_scores(
+            samples,
+            x_m=x_m,
+            y_m=y_m,
+            z_m=z_m,
+            solve_covariance_xy=solve_covariance_xy,
+        )
         fingerprint_scores, fingerprint_topk, fingerprint_coverage = self._fingerprint_room_scores(
             fingerprints,
             live_rssi_by_scanner or {},
@@ -469,6 +476,7 @@ class BermudaRoomClassifier:
         x_m: float,
         y_m: float,
         z_m: float | None,
+        solve_covariance_xy: tuple[float, float, float] | None = None,
     ) -> tuple[dict[str, float], dict[str, int]]:
         """Return per-room geometry scores from the current solved point."""
         position_z = 0.0 if z_m is None else z_m
@@ -477,8 +485,13 @@ class BermudaRoomClassifier:
             dx = x_m - sample.x_m
             dy = y_m - sample.y_m
             dz = position_z - sample.z_m
-            d2 = (dx * dx) + (dy * dy) + (ROOM_KERNEL_Z_WEIGHT * dz * dz)
-            sample_score = math.exp(-0.5 * d2 / (sample.sigma_m * sample.sigma_m))
+            inv_00, inv_01, inv_11 = self._geometry_inverse_covariance(
+                sample_sigma_m=sample.sigma_m,
+                solve_covariance_xy=solve_covariance_xy,
+            )
+            d2_xy = (inv_00 * dx * dx) + (2.0 * inv_01 * dx * dy) + (inv_11 * dy * dy)
+            d2_z = ROOM_KERNEL_Z_WEIGHT * (dz * dz) / (sample.sigma_m * sample.sigma_m)
+            sample_score = math.exp(-0.5 * (d2_xy + d2_z))
             room_scores[sample.area_id].append(sample_score)
 
         scored_rooms: dict[str, float] = {}
@@ -488,6 +501,28 @@ class BermudaRoomClassifier:
             scored_rooms[area_id] = sum(top_scores) / len(top_scores)
             topk_by_area[area_id] = len(top_scores)
         return scored_rooms, topk_by_area
+
+    def _geometry_inverse_covariance(
+        self,
+        *,
+        sample_sigma_m: float,
+        solve_covariance_xy: tuple[float, float, float] | None,
+    ) -> tuple[float, float, float]:
+        """Return inverse XY covariance for covariance-aware room geometry scoring."""
+        sample_variance = max(sample_sigma_m * sample_sigma_m, 1e-6)
+        if solve_covariance_xy is None:
+            inverse = 1.0 / sample_variance
+            return inverse, 0.0, inverse
+
+        cov_xx, cov_xy, cov_yy = solve_covariance_xy
+        total_xx = max(sample_variance + float(cov_xx), 1e-6)
+        total_xy = float(cov_xy)
+        total_yy = max(sample_variance + float(cov_yy), 1e-6)
+        det = (total_xx * total_yy) - (total_xy * total_xy)
+        if det <= 1e-12 or not math.isfinite(det):
+            inverse = 1.0 / sample_variance
+            return inverse, 0.0, inverse
+        return total_yy / det, -total_xy / det, total_xx / det
 
     def _fingerprint_room_scores(
         self,

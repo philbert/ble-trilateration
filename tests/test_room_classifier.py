@@ -479,6 +479,55 @@ async def test_low_geometry_shifts_room_ranking_toward_fingerprint_evidence(monk
 
 
 @pytest.mark.asyncio
+async def test_covariance_geometry_scoring_downweights_separation_along_weak_axis() -> None:
+    """Covariance-aware geometry should penalize displacement less along the uncertain axis."""
+    classifier = BermudaRoomClassifier(
+        _FakeCalibration(
+            [
+                {
+                    "anchor_layout_hash": "layout-a",
+                    "room_area_id": "living_room",
+                    "position": {"x_m": 2.0, "y_m": 0.0, "z_m": 0.0},
+                    "sample_radius_m": 1.2,
+                    "quality": {"status": "accepted"},
+                },
+                {
+                    "anchor_layout_hash": "layout-a",
+                    "room_area_id": "bedroom",
+                    "position": {"x_m": 0.0, "y_m": 2.0, "z_m": 0.0},
+                    "sample_radius_m": 1.2,
+                    "quality": {"status": "accepted"},
+                },
+            ]
+        ),
+        _FakeAreaRegistry(),
+    )
+
+    await classifier.async_rebuild()
+
+    isotropic = classifier.classify(
+        layout_hash="layout-a",
+        floor_id="ground",
+        x_m=0.0,
+        y_m=0.0,
+        z_m=0.0,
+    )
+    covariance_aware = classifier.classify(
+        layout_hash="layout-a",
+        floor_id="ground",
+        x_m=0.0,
+        y_m=0.0,
+        z_m=0.0,
+        solve_covariance_xy=(0.05, 0.0, 25.0),
+    )
+
+    assert isotropic.area_id is None
+    assert isotropic.reason == "room_ambiguity"
+    assert covariance_aware.area_id == "bedroom"
+    assert covariance_aware.reason == "ok"
+
+
+@pytest.mark.asyncio
 async def test_noisy_low_count_scanners_are_treated_as_softer_fingerprint_evidence() -> None:
     """Mismatches on noisy low-count scanners should hurt less than mismatches on stable scanners."""
     classifier = BermudaRoomClassifier(
