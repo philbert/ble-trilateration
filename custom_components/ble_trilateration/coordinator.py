@@ -251,9 +251,14 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         self._trilat_decision_state: dict[str, BermudaDataUpdateCoordinator.TrilatDecisionState] = {}
         self._trilat_scanners_without_anchors: list[str] | None = None
         self._calibration_layout_mismatch_signature: str | None = None
-        self._calibration_layout_mismatch_grace_active: bool = False
-        self._calibration_layout_mismatch_grace_deadline: float | None = None
+        # Treat the entire initial setup window as startup grace so mismatch repairs
+        # do not flash before anchor restoration and platform restore-state complete.
+        self._calibration_layout_mismatch_grace_active: bool = True
+        self._calibration_layout_mismatch_grace_deadline: float | None = (
+            monotonic_time_coarse() + CALIBRATION_LAYOUT_REPAIR_GRACE_SECONDS
+        )
         self._calibration_layout_mismatch_grace_unsub: Cancellable | None = None
+        self._calibration_layout_mismatch_last_context: str = "coordinator_init"
         self.calibration_store = BermudaCalibrationStore(hass, entry.entry_id)
         self.scanner_anchor_store = BermudaScannerAnchorStore(hass)
         self._transition_zone_store = BermudaTransitionZoneStore(hass)
@@ -434,10 +439,26 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         await self.ranging_model.async_rebuild()
         self.calibration.rebuild_trilat_position_model(self.ranging_model)
         await self.room_classifier.async_rebuild()
+        self._calibration_layout_mismatch_last_context = "calibration_samples_changed"
+        state = self._calibration_layout_debug_state()
+        _LOGGER.debug(
+            "Calibration runtime rebuilt: samples=%d current_layout_samples=%d anchors=%d current_hash=%s "
+            "current_model=%s acknowledged_current=%s context=%s",
+            state["sample_count"],
+            state["current_layout_count"],
+            state["current_anchor_count"],
+            state["current_layout_hash"],
+            state["current_layout_has_ranging_model"],
+            state["acknowledged_current_layout"],
+            self._calibration_layout_mismatch_last_context,
+        )
         self._async_manage_repair_calibration_layout_mismatch()
 
-    async def async_handle_anchor_geometry_changed(self) -> None:
+    async def async_handle_anchor_geometry_changed(self, *, reason: str | None = None) -> None:
         """Re-evaluate repairs that depend on configured anchor geometry."""
+        self._calibration_layout_mismatch_last_context = (
+            f"anchor_geometry_changed:{reason}" if reason is not None else "anchor_geometry_changed"
+        )
         if self._calibration_layout_mismatch_grace_active:
             self._arm_calibration_layout_mismatch_grace()
         self._async_manage_repair_calibration_layout_mismatch()
@@ -476,6 +497,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
 
             self._calibration_layout_mismatch_grace_active = False
             self._calibration_layout_mismatch_grace_deadline = None
+            self._calibration_layout_mismatch_last_context = "startup_grace_expired"
             self._async_manage_repair_calibration_layout_mismatch()
 
         self._calibration_layout_mismatch_grace_unsub = async_call_later(
@@ -503,6 +525,19 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             if scanner is None:
                 continue
             self._restore_scanner_anchor_from_store(scanner)
+
+    def _calibration_layout_debug_state(self) -> dict[str, object]:
+        """Return a compact snapshot of calibration-layout state for debug logs."""
+        summary = self.calibration.get_summary()
+        current_layout_hash = str(summary.get("current_layout_hash") or "")
+        return {
+            "sample_count": int(summary.get("sample_count") or 0),
+            "current_layout_count": int(summary.get("current_layout_count") or 0),
+            "current_anchor_count": len(self.calibration.current_anchor_geometry()),
+            "current_layout_hash": current_layout_hash[:8],
+            "acknowledged_current_layout": current_layout_hash in self.calibration.acknowledged_layout_hashes,
+            "current_layout_has_ranging_model": self.ranging_model.has_model(current_layout_hash),
+        }
 
     @property
     def get_scanners(self) -> set[BermudaDevice]:
@@ -2775,10 +2810,23 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
 
     def _async_manage_repair_calibration_layout_mismatch(self) -> None:
         """Raise or clear repair when stored calibration samples don't match the current anchor layout."""
+        state = self._calibration_layout_debug_state()
         if self._calibration_layout_mismatch_grace_active:
             deadline = self._calibration_layout_mismatch_grace_deadline
             if deadline is not None and monotonic_time_coarse() < deadline:
                 if self._calibration_layout_mismatch_signature is not None:
+                    remaining = max(0.0, deadline - monotonic_time_coarse())
+                    _LOGGER.info(
+                        "Clearing calibration layout mismatch repair during startup grace: context=%s "
+                        "remaining=%.1fs samples=%d current_layout_samples=%d anchors=%d current_hash=%s current_model=%s",
+                        self._calibration_layout_mismatch_last_context,
+                        remaining,
+                        state["sample_count"],
+                        state["current_layout_count"],
+                        state["current_anchor_count"],
+                        state["current_layout_hash"],
+                        state["current_layout_has_ranging_model"],
+                    )
                     ir.async_delete_issue(self.hass, DOMAIN, REPAIR_CALIBRATION_LAYOUT_MISMATCH)
                     self._calibration_layout_mismatch_signature = None
                 return
@@ -2786,6 +2834,16 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         mismatch = self.calibration.get_layout_mismatch_summary()
         if mismatch is None:
             if self._calibration_layout_mismatch_signature is not None:
+                _LOGGER.info(
+                    "Cleared calibration layout mismatch repair: context=%s samples=%d current_layout_samples=%d "
+                    "anchors=%d current_hash=%s current_model=%s",
+                    self._calibration_layout_mismatch_last_context,
+                    state["sample_count"],
+                    state["current_layout_count"],
+                    state["current_anchor_count"],
+                    state["current_layout_hash"],
+                    state["current_layout_has_ranging_model"],
+                )
                 ir.async_delete_issue(self.hass, DOMAIN, REPAIR_CALIBRATION_LAYOUT_MISMATCH)
                 self._calibration_layout_mismatch_signature = None
                 # Mismatch was preventing calibration data from loading; rebuild now that
@@ -2806,8 +2864,15 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
 
         _LOGGER.warning(
             "Calibration anchor mismatch detected; %s saved sample(s) do not match the current anchor geometry. "
+            "context=%s samples=%d current_layout_samples=%d anchors=%d current_hash=%s current_model=%s "
             "Anchor coordinate changes:\n%s",
             mismatch["sample_count"],
+            self._calibration_layout_mismatch_last_context,
+            state["sample_count"],
+            state["current_layout_count"],
+            state["current_anchor_count"],
+            state["current_layout_hash"],
+            state["current_layout_has_ranging_model"],
             mismatch["changed_anchor_lines"],
         )
         ir.async_delete_issue(self.hass, DOMAIN, REPAIR_CALIBRATION_LAYOUT_MISMATCH)
@@ -2884,6 +2949,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
 
     def _refresh_trilateration(self) -> None:
         """Refresh trilateration diagnostics for all tracked devices."""
+        self._calibration_layout_mismatch_last_context = "refresh_trilateration"
         self._async_manage_repair_calibration_layout_mismatch()
         configured_anchor_scanners: list[str] = []
         for scanner in self._scanners:
@@ -4335,6 +4401,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             if bermuda_scanner.area_id is None:
                 _scanners_without_areas.append(f"{bermuda_scanner.name} [{bermuda_scanner.address}]")
         self._async_manage_repair_scanners_without_areas(_scanners_without_areas)
+        self._calibration_layout_mismatch_last_context = "refresh_scanners"
         self._async_manage_repair_calibration_layout_mismatch()
 
     def _async_purge_removed_scanners(self):

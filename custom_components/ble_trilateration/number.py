@@ -131,7 +131,9 @@ class _BermudaScannerAnchorCoordinate(BermudaEntity, RestoreNumber):
         if self.restored_data is not None and self.restored_data.native_value is not None:
             setattr(self.coordinator.devices[self.address], self._coord_attr, self.restored_data.native_value)
             await self.coordinator.scanner_anchor_store.async_save_scanner(self.coordinator.devices[self.address])
-            await self.coordinator.async_handle_anchor_geometry_changed()
+            await self.coordinator.async_handle_anchor_geometry_changed(
+                reason=f"number_restore:{self.address}:{self._coord_suffix}:ha_restore"
+            )
             return
 
         if (
@@ -141,7 +143,9 @@ class _BermudaScannerAnchorCoordinate(BermudaEntity, RestoreNumber):
         ) is not None:
             if (stored_value := stored_coords.get(self._coord_attr)) is not None:
                 setattr(self.coordinator.devices[self.address], self._coord_attr, stored_value)
-                await self.coordinator.async_handle_anchor_geometry_changed()
+                await self.coordinator.async_handle_anchor_geometry_changed(
+                    reason=f"number_restore:{self.address}:{self._coord_suffix}:store"
+                )
 
     @property
     def native_value(self) -> float | None:
@@ -152,7 +156,9 @@ class _BermudaScannerAnchorCoordinate(BermudaEntity, RestoreNumber):
         """Set value."""
         setattr(self.coordinator.devices[self.address], self._coord_attr, value)
         await self.coordinator.scanner_anchor_store.async_save_scanner(self.coordinator.devices[self.address])
-        await self.coordinator.async_handle_anchor_geometry_changed()
+        await self.coordinator.async_handle_anchor_geometry_changed(
+            reason=f"number_set:{self.address}:{self._coord_suffix}"
+        )
         self.async_write_ha_state()
 
     @property
