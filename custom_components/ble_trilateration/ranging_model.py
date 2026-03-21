@@ -76,10 +76,21 @@ class BermudaRangingModel:
         hass.async_add_executor_job.
         """
         grouped_rows: dict[str, list[_TrainingRow]] = {}
+        runtime_layout_hash_for_sample = getattr(self._calibration, "runtime_layout_hash_for_sample", None)
+        current_layout_hash = getattr(self._calibration, "current_anchor_layout_hash", "")
+        current_anchor_index_fn = getattr(self._calibration, "_current_anchor_identity_index", None)
+        current_anchor_index = current_anchor_index_fn() if callable(current_anchor_index_fn) else None
         for sample in self._calibration.samples():
             if sample.get("quality", {}).get("status") == "rejected":
                 continue
-            layout_hash = str(sample.get("anchor_layout_hash") or "")
+            if callable(runtime_layout_hash_for_sample):
+                layout_hash = runtime_layout_hash_for_sample(
+                    sample,
+                    current_anchor_index=current_anchor_index,
+                    current_layout_hash=current_layout_hash,
+                )
+            else:
+                layout_hash = str(sample.get("anchor_layout_hash") or "")
             device_id = str(sample.get("device_id") or "")
             position = sample.get("position") or {}
             sample_x = position.get("x_m")

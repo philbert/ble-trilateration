@@ -1207,6 +1207,56 @@ async def test_calibration_layout_mismatch_not_raised_for_hash_only_same_geometr
     assert issue is None
 
 
+async def test_hash_only_same_geometry_samples_build_current_runtime_models(
+    hass: HomeAssistant, setup_bermuda_entry
+):
+    """Geometry-matching samples should feed the current runtime model even with an old stored hash."""
+    coordinator = setup_bermuda_entry.runtime_data.coordinator
+    area = ar.async_get(hass).async_create("Hall")
+
+    scanner = BermudaDevice("aa:bb:cc:dd:10:10", coordinator)
+    scanner.name = "Hall Proxy"
+    scanner.anchor_x_m = 0.0
+    scanner.anchor_y_m = 0.0
+    scanner.anchor_z_m = 0.0
+    coordinator.devices[scanner.address] = scanner
+    coordinator._scanner_list.add(scanner.address)
+
+    for idx, (distance_m, rssi_dbm) in enumerate(
+        ((1.0, -52.0), (2.0, -58.0), (3.0, -61.0), (4.0, -65.0), (5.0, -68.0)),
+        start=1,
+    ):
+        await coordinator.calibration_store.async_add_sample(
+            {
+                "id": f"sample_layout_same_geometry_runtime_{idx}",
+                "created_at": f"2026-03-06T12:0{idx}:00+00:00",
+                "device_id": "device_one",
+                "device_name": "Device One",
+                "device_address": "aa:bb:cc:dd:ee:01",
+                "room_area_id": area.id,
+                "room_name": area.name,
+                "position": {"x_m": distance_m, "y_m": 0.0, "z_m": 0.0},
+                "sample_radius_m": 1.0,
+                "anchor_layout_hash": "old_layout_hash",
+                "anchors": {
+                    scanner.address: {
+                        "scanner_name": scanner.name,
+                        "anchor_position": {"x_m": 0.0, "y_m": 0.0, "z_m": 0.0},
+                        "rssi_median": rssi_dbm,
+                    }
+                },
+                "quality": {"status": "accepted", "eligible_anchor_count": 1, "reason": None},
+            }
+        )
+
+    await coordinator.async_handle_calibration_samples_changed()
+
+    current_layout_hash = coordinator.calibration.current_anchor_layout_hash
+    assert coordinator.calibration.get_layout_mismatch_summary() is None
+    assert coordinator.ranging_model.has_model(current_layout_hash) is True
+    assert coordinator.room_classifier.has_trained_rooms(current_layout_hash, None) is True
+
+
 async def test_calibration_layout_mismatch_repair_is_suppressed_during_startup_grace(
     hass: HomeAssistant, setup_bermuda_entry
 ):

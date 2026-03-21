@@ -254,6 +254,33 @@ class BermudaCalibrationManager:
             "warn_threshold": CALIBRATION_SAMPLE_WARN_THRESHOLD,
         }
 
+    def runtime_layout_hash_for_sample(
+        self,
+        sample: dict[str, Any],
+        *,
+        current_anchor_index: dict[str, tuple[dict[str, float | None], str | None]] | None = None,
+        current_layout_hash: str | None = None,
+    ) -> str:
+        """Return the effective runtime layout hash for one sample.
+
+        Samples that already match the current anchor geometry should participate
+        in the current runtime model/classifier even if their stored hash is
+        older. This keeps runtime behavior aligned with repair/mismatch logic.
+        """
+        stored_layout_hash = str(sample.get("anchor_layout_hash") or "")
+        if current_layout_hash is None:
+            current_layout_hash = self.current_anchor_layout_hash
+        if current_anchor_index is None:
+            current_anchor_index = self._current_anchor_identity_index()
+        if (
+            stored_layout_hash
+            and current_layout_hash
+            and current_anchor_index
+            and self._sample_matches_current_geometry(sample, current_anchor_index)
+        ):
+            return current_layout_hash
+        return stored_layout_hash
+
     def get_transition_summary(self) -> dict[str, Any]:
         """Return a small in-memory summary for stored transition samples."""
         samples = self.transition_samples()
@@ -1336,7 +1363,7 @@ class BermudaCalibrationManager:
         ranging_model: BermudaRangingModel,
     ) -> _TrilatCorrectionSample | None:
         """Build one local XY correction sample from persisted calibration data."""
-        layout_hash = str(sample.get("anchor_layout_hash") or "")
+        layout_hash = self.runtime_layout_hash_for_sample(sample)
         room_area_id = str(sample.get("room_area_id") or "")
         position = sample.get("position") or {}
         sample_x = position.get("x_m")
