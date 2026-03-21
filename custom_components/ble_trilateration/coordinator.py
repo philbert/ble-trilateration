@@ -3846,7 +3846,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 selected_floor_id=selected_floor_id,
                 raw_xy=fallback_xy,
                 raw_z=fallback_z,
-                residual_m=state.last_residual_m if state.last_residual_m is not None else 0.0,
+                residual_m=state.last_residual_m,
             )
 
             device.set_trilat_solution(
@@ -3856,7 +3856,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 floor_id=selected_floor_id,
                 floor_name=selected_floor_name,
                 anchor_count=anchor_count,
-                residual_m=state.last_residual_m if state.last_residual_m is not None else 0.0,
+                residual_m=state.last_residual_m,
             )
             device.trilat_status = "low_confidence"
             device.trilat_reason = "insufficient_anchors_low_confidence"

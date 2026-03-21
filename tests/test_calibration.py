@@ -281,6 +281,11 @@ async def test_calibration_sample_records_trilat_capture_summary(
     assert trilat_capture["y_stddev_m"] > 0.0
     assert trilat_capture["x_rmse_from_target_m"] > 0.0
     assert trilat_capture["y_rmse_from_target_m"] > 0.0
+    # Post-correction spread fields (p95 from mean, not from target)
+    assert "x_p95_spread_m" in trilat_capture
+    assert "y_p95_spread_m" in trilat_capture
+    assert trilat_capture["x_p95_spread_m"] <= trilat_capture["x_p95_abs_error_m"]
+    assert trilat_capture["y_p95_spread_m"] <= trilat_capture["y_p95_abs_error_m"]
     assert trilat_capture["residual_mean_m"] == 0.5
 
 

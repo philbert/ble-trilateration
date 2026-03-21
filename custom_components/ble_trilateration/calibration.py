@@ -1035,17 +1035,24 @@ class BermudaCalibrationManager:
                 "z_p95_abs_error_m": round(self._p95_abs_error(z_values, target_z), 4),
             }
 
+        x_mean = float(statistics.fmean(x_values))
+        y_mean = float(statistics.fmean(y_values))
         summary: dict[str, Any] = {
             "position_source": "raw_filtered",
             "observed_count": observed_count,
-            "x_mean_m": round(float(statistics.fmean(x_values)), 4),
-            "y_mean_m": round(float(statistics.fmean(y_values)), 4),
+            "x_mean_m": round(x_mean, 4),
+            "y_mean_m": round(y_mean, 4),
             "x_stddev_m": round(self._series_stddev(x_values), 4),
             "y_stddev_m": round(self._series_stddev(y_values), 4),
             "x_rmse_from_target_m": round(x_rmse, 4),
             "y_rmse_from_target_m": round(y_rmse, 4),
             "x_p95_abs_error_m": round(self._p95_abs_error(x_values, target_x), 4),
             "y_p95_abs_error_m": round(self._p95_abs_error(y_values, target_y), 4),
+            # Post-correction spread: p95 from the observed mean, not from the declared
+            # target.  After bias correction removes the systematic offset, the residual
+            # uncertainty is characterised by spread around the mean, not from target.
+            "x_p95_spread_m": round(self._p95_abs_error(x_values, x_mean), 4),
+            "y_p95_spread_m": round(self._p95_abs_error(y_values, y_mean), 4),
             "residual_mean_m": (
                 round(float(statistics.fmean(session.trilat_residual_values)), 4)
                 if session.trilat_residual_values
@@ -1324,14 +1331,17 @@ class BermudaCalibrationManager:
             and trilat_capture.get("x_mean_m") is not None
             and trilat_capture.get("y_mean_m") is not None
         ):
+            # Use post-correction spread (p95 from mean) as half_width — this represents
+            # residual uncertainty after bias is removed.  Fall back to stddev for older
+            # summaries that predate the x_p95_spread_m field.
             half_width_x_m = max(
-                float(trilat_capture.get("x_p95_abs_error_m") or 0.0),
-                float(trilat_capture.get("x_rmse_from_target_m") or 0.0),
+                float(trilat_capture.get("x_p95_spread_m") or 0.0),
+                float(trilat_capture.get("x_stddev_m") or 0.0),
                 0.1,
             )
             half_width_y_m = max(
-                float(trilat_capture.get("y_p95_abs_error_m") or 0.0),
-                float(trilat_capture.get("y_rmse_from_target_m") or 0.0),
+                float(trilat_capture.get("y_p95_spread_m") or 0.0),
+                float(trilat_capture.get("y_stddev_m") or 0.0),
                 0.1,
             )
             return _TrilatCorrectionSample(
