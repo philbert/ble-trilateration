@@ -61,6 +61,32 @@ async def test_scanner_anchor_numbers_created_without_legacy_numbers(hass) -> No
     assert anchor_z is not None
 
 
+async def test_scanner_anchor_numbers_created_for_existing_scanners_on_startup(hass) -> None:
+    """Scanner anchor numbers should be created even when scanners predate number setup."""
+    entry = MockConfigEntry(domain=DOMAIN, data=MOCK_CONFIG, entry_id="test-number-startup", title=NAME)
+    entry.add_to_hass(hass)
+
+    async def _seed_scanner(self) -> None:
+        scanner = BermudaDevice("AA:BB:CC:DD:EE:16", self)
+        scanner._is_scanner = True  # noqa: SLF001 - test helper
+        scanner._is_remote_scanner = False  # noqa: SLF001 - test helper
+        self.devices[scanner.address] = scanner
+        self.scanner_list_add(scanner)
+
+    with patch("custom_components.ble_trilateration.BermudaDataUpdateCoordinator.async_refresh", new=_seed_scanner):
+        assert await async_setup_component(hass, DOMAIN, {})
+
+    await hass.async_block_till_done()
+    assert entry.state == ConfigEntryState.LOADED
+
+    ent_reg = er.async_get(hass)
+    unique_id = "aa:bb:cc:dd:ee:16"
+
+    assert ent_reg.async_get_entity_id("number", DOMAIN, f"{unique_id}_anchor_x_m") is not None
+    assert ent_reg.async_get_entity_id("number", DOMAIN, f"{unique_id}_anchor_y_m") is not None
+    assert ent_reg.async_get_entity_id("number", DOMAIN, f"{unique_id}_anchor_z_m") is not None
+
+
 async def test_legacy_scanner_number_entities_removed_on_setup(hass) -> None:
     """Ensure stale legacy per-scanner number entities are pruned on startup."""
     entry = MockConfigEntry(domain=DOMAIN, data=MOCK_CONFIG, entry_id="test-number-cleanup", title=NAME)
