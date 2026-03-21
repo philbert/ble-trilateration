@@ -6,11 +6,12 @@ from unittest.mock import patch
 
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers import issue_registry as ir
 from homeassistant.setup import async_setup_component
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.ble_trilateration.bermuda_device import BermudaDevice
-from custom_components.ble_trilateration.const import DOMAIN, NAME
+from custom_components.ble_trilateration.const import DOMAIN, NAME, REPAIR_TRILAT_WITHOUT_ANCHORS
 
 from .const import MOCK_CONFIG
 
@@ -200,3 +201,43 @@ async def test_scanner_anchor_store_can_hydrate_single_scanner_after_late_init(h
     assert scanner.anchor_x_m == 1.1
     assert scanner.anchor_y_m == 2.2
     assert scanner.anchor_z_m == 3.3
+
+
+async def test_anchor_geometry_changed_passes_human_readable_names_to_trilat_repair(hass) -> None:
+    """async_handle_anchor_geometry_changed must produce human-readable scanner names.
+
+    Before the fix, it passed raw MAC address strings from scanner_list to
+    _async_manage_repair_trilat_without_anchors.  The repair placeholder uses
+    these strings verbatim, so users would see addresses instead of scanner
+    names, AND any prior state set by _refresh_trilateration (which uses
+    "Name [addr]" format) would never match, causing spurious repair churn.
+    """
+    entry = await setup_integration(hass)
+    coordinator = entry.runtime_data.coordinator
+
+    scanner = _create_scanner(coordinator, "AA:BB:CC:DD:EE:20")
+    scanner.name = "Hall Proxy"
+    # No anchor coordinates set: this scanner has no anchors.
+    await hass.async_block_till_done()
+
+    # Simulate what _refresh_trilateration produces: no configured anchor scanners
+    # so it records a "Name [addr]" list.
+    coordinator._async_manage_repair_trilat_without_anchors(
+        [f"{scanner.name} [{scanner.address}]"]
+    )
+    recorded_list = coordinator._trilat_scanners_without_anchors[:]
+
+    # Now fire anchor geometry changed (simulating a number restore).
+    await coordinator.async_handle_anchor_geometry_changed(reason="test_restore")
+
+    # The stored list should still be in the same "Name [addr]" format so that
+    # the equality check in _async_manage_repair_trilat_without_anchors behaves
+    # consistently and no spurious churn occurs.
+    assert coordinator._trilat_scanners_without_anchors is not None
+    for entry_str in coordinator._trilat_scanners_without_anchors:
+        # Each entry must contain a space (i.e. at least "Name [addr]") rather
+        # than being a bare MAC address like "aa:bb:cc:dd:ee:20".
+        assert " " in entry_str, (
+            f"Scanner list entry {entry_str!r} looks like a raw address; "
+            "expected 'Name [addr]' format"
+        )

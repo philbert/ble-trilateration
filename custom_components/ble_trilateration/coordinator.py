@@ -462,8 +462,36 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         )
         if self._calibration_layout_mismatch_grace_active:
             self._arm_calibration_layout_mismatch_grace()
+        # Rebuild the ranging model and room classifier so they use the updated
+        # anchor layout hash. Without this, any hash change from a coordinate
+        # restore or user edit leaves the runtime models unreachable (they were
+        # indexed under the old hash) until the next calibration-samples-changed
+        # event.
+        await self.ranging_model.async_rebuild()
+        self.calibration.rebuild_trilat_position_model(self.ranging_model)
+        await self.room_classifier.async_rebuild()
         self._async_manage_repair_calibration_layout_mismatch()
-        self._async_manage_repair_trilat_without_anchors(list(self.scanner_list))
+        # Delegate to _refresh_trilateration for the trilat-without-anchors check
+        # so the scanner list is formatted consistently ("Name [addr]" strings).
+        # Passing raw scanner_list addresses here would produce a format mismatch
+        # against the string list stored by _refresh_trilateration.
+        configured_anchor_scanners: list[str] = [
+            scanner.address
+            for scanner in self._scanners
+            if (
+                self.get_scanner_anchor_x(scanner.address) is not None
+                and self.get_scanner_anchor_y(scanner.address) is not None
+                and scanner.floor_id is not None
+            )
+        ]
+        if not configured_anchor_scanners:
+            scannerlist = [
+                f"{scanner.name} [{scanner.address}]"
+                for scanner in sorted(self._scanners, key=lambda s: s.name)
+            ]
+            self._async_manage_repair_trilat_without_anchors(scannerlist)
+        else:
+            self._async_manage_repair_trilat_without_anchors([])
 
     def _cancel_calibration_layout_mismatch_grace(self) -> None:
         """Cancel any pending delayed repair re-check."""
@@ -2855,8 +2883,8 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 ir.async_delete_issue(self.hass, DOMAIN, REPAIR_CALIBRATION_LAYOUT_MISMATCH)
                 self._calibration_layout_mismatch_signature = None
                 # Mismatch was preventing calibration data from loading; rebuild now that
-                # the layout hash has stabilised so the room classifier can find samples.
-                self.hass.async_create_task(self.room_classifier.async_rebuild())
+                # the layout hash has stabilised so both models can find samples.
+                self.hass.async_create_task(self.async_handle_calibration_samples_changed())
             return
 
         signature = "|".join(
