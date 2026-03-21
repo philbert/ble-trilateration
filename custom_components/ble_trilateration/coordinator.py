@@ -2820,8 +2820,8 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             if deadline is not None and monotonic_time_coarse() < deadline:
                 if self._calibration_layout_mismatch_signature is not None:
                     remaining = max(0.0, deadline - monotonic_time_coarse())
-                    _LOGGER.info(
-                        "Clearing calibration layout mismatch repair during startup grace: context=%s "
+                    _LOGGER.warning(
+                        "Calibration layout mismatch repair cleared: reason=startup_grace context=%s "
                         "remaining=%.1fs total_samples=%d current_layout_samples=%d stale_samples=%d "
                         "anchors=%d current_hash=%s current_model=%s",
                         self._calibration_layout_mismatch_last_context,
@@ -2840,9 +2840,10 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         mismatch = self.calibration.get_layout_mismatch_summary()
         if mismatch is None:
             if self._calibration_layout_mismatch_signature is not None:
-                _LOGGER.info(
-                    "Cleared calibration layout mismatch repair: context=%s total_samples=%d "
-                    "current_layout_samples=%d stale_samples=%d anchors=%d current_hash=%s current_model=%s",
+                _LOGGER.warning(
+                    "Calibration layout mismatch repair cleared: reason=no_remaining_mismatch context=%s "
+                    "total_samples=%d current_layout_samples=%d stale_samples=%d anchors=%d "
+                    "current_hash=%s current_model=%s",
                     self._calibration_layout_mismatch_last_context,
                     state["total_sample_count"],
                     state["current_layout_count"],
