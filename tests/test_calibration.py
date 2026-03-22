@@ -7,7 +7,7 @@ import contextlib
 import logging
 import math
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from bluetooth_data_tools import monotonic_time_coarse
 from homeassistant import data_entry_flow
@@ -1472,17 +1472,13 @@ async def test_calibration_samples_options_flow(hass: HomeAssistant, setup_bermu
 async def test_anchor_geometry_change_rebuilds_runtime_models(
     hass: HomeAssistant, setup_bermuda_entry
 ):
-    """Changing anchor coordinates must rebuild the ranging model and room classifier.
+    """Anchor geometry changes must rebuild models onto the newly current layout hash.
 
-    Before the fix, async_handle_anchor_geometry_changed only re-evaluated
-    repairs but left ranging_model and room_classifier indexed under the old hash.
-    Subsequent estimate_range() calls would return None because the current hash
-    had no fitted model.
-
-    The scenario here mirrors what happens when the coordinator loads samples
-    from the store with one set of anchor values (hash H1), then the HA number
-    entity restore fires with slightly different stored values (hash H2).  Without
-    the rebuild, the model stays under H1 while current_anchor_layout_hash() = H2.
+    Samples can be stored with a legacy layout hash that does not match the
+    currently configured anchors. If the anchors later change back to a
+    geometry that matches those samples, async_handle_anchor_geometry_changed
+    must rebuild the runtime helpers so the samples move onto the current
+    computed layout hash immediately.
     """
     coordinator = setup_bermuda_entry.runtime_data.coordinator
     coordinator._cancel_calibration_layout_mismatch_grace()
@@ -1493,16 +1489,18 @@ async def test_anchor_geometry_change_rebuilds_runtime_models(
 
     scanner = BermudaDevice("aa:bb:cc:dd:10:60", coordinator)
     scanner.name = "Kitchen2 Proxy"
-    # Start with anchor at position P1 (= what the store returns initially).
-    scanner.anchor_x_m = 1.0
+    # Start with anchors at P2 so saved samples do not yet match current geometry.
+    scanner.anchor_x_m = 1.5
     scanner.anchor_y_m = 2.0
     scanner.anchor_z_m = 0.0
     coordinator.devices[scanner.address] = scanner
+    coordinator._scanners.add(scanner)
     coordinator._scanner_list.add(scanner.address)
 
-    hash_p1 = coordinator.calibration.current_anchor_layout_hash
+    hash_p2 = coordinator.calibration.current_anchor_layout_hash
+    stored_layout_hash = "legacy_layout_hash"
 
-    # Add enough samples to train a ranging model under the P1 hash.
+    # Saved samples were captured when the anchor was at P1.
     for idx, (distance_m, rssi_dbm) in enumerate(
         ((1.0, -52.0), (2.0, -58.0), (3.0, -61.0), (4.0, -65.0), (5.0, -68.0)),
         start=1,
@@ -1518,7 +1516,7 @@ async def test_anchor_geometry_change_rebuilds_runtime_models(
                 "room_name": area.name,
                 "position": {"x_m": distance_m, "y_m": 0.0, "z_m": 0.0},
                 "sample_radius_m": 1.0,
-                "anchor_layout_hash": hash_p1,
+                "anchor_layout_hash": stored_layout_hash,
                 "anchors": {
                     scanner.address: {
                         "scanner_name": scanner.name,
@@ -1530,51 +1528,64 @@ async def test_anchor_geometry_change_rebuilds_runtime_models(
             }
         )
 
-    # Build the model with anchors at P1.
+    # While current anchors are at P2, the samples only contribute under their
+    # stored legacy hash.
     await coordinator.async_handle_calibration_samples_changed()
-    assert coordinator.ranging_model.has_model(hash_p1), "Model must exist under P1 hash"
+    assert coordinator.ranging_model.has_model(stored_layout_hash) is True
+    assert coordinator.ranging_model.has_model(hash_p2) is False
+    assert coordinator.room_classifier.has_trained_rooms(stored_layout_hash, None) is True
+    assert coordinator.room_classifier.has_trained_rooms(hash_p2, None) is False
 
-    # Simulate the HA number entity restore returning a slightly different value
-    # (e.g., the user had previously set X=1.5 via the UI and HA state machine
-    # stores that, while the Bermuda store still has 1.0 from a previous restore).
-    # The key point: the anchor coordinate changes, the hash changes.
-    scanner.anchor_x_m = 1.5
-    hash_p2 = coordinator.calibration.current_anchor_layout_hash
-    assert hash_p2 != hash_p1, "Hash must differ when anchor coordinates change"
-
-    # Simulate async_handle_anchor_geometry_changed without rebuilding the model
-    # — this is the pre-fix behaviour.  We verify the model is NOT yet under hash_p2.
-    # (We don't want to call the fixed handler here for this part of the test.)
-    assert not coordinator.ranging_model.has_model(hash_p2), (
-        "Model should not be under new hash before the rebuild"
-    )
-
-    # Now fire the real (fixed) handler.
-    await coordinator.async_handle_anchor_geometry_changed(reason="test_coord_change")
-
-    # The ranging model must now be accessible under the new hash.
-    # Samples' geometry (1.0,2.0,0.0) does not match current P2 (1.5,2.0,0.0)
-    # so runtime_layout_hash_for_sample returns the stored hash (hash_p1).
-    # That means the model is available under hash_p1, not hash_p2.
-    # What matters for this test is: after the rebuild, both hashes are evaluated
-    # consistently so the coordinator can serve estimates under the current hash
-    # once new samples are captured.
-    #
-    # More critically: the ranging_model must be UP-TO-DATE (i.e., a rebuild
-    # happened) so that any future `async_handle_calibration_samples_changed`
-    # starts from a clean state.
-    #
-    # We verify this by checking that the rebuild was called (the model is still
-    # functional, and the room classifier is populated for the stored layout).
-    assert coordinator.ranging_model.has_model(hash_p1), (
-        "ranging_model must still serve hash_p1 samples after the rebuild"
-    )
-    # Restore to a position matching the stored samples to confirm the model is
-    # immediately accessible under the current hash when geometry matches.
+    # Now change current anchors back to the saved geometry (P1). Before the
+    # handler runs, the runtime models are still stuck on the old stored hash.
     scanner.anchor_x_m = 1.0
-    hash_p1_again = coordinator.calibration.current_anchor_layout_hash
-    assert hash_p1_again == hash_p1
+    hash_p1 = coordinator.calibration.current_anchor_layout_hash
+    assert hash_p1 != hash_p2
+    assert hash_p1 != stored_layout_hash
+    assert coordinator.ranging_model.has_model(hash_p1) is False
+    assert coordinator.room_classifier.has_trained_rooms(hash_p1, None) is False
+
     await coordinator.async_handle_anchor_geometry_changed(reason="test_coord_restore")
-    assert coordinator.ranging_model.has_model(hash_p1_again), (
-        "ranging_model must be available under the current hash after restore"
+
+    assert coordinator.ranging_model.has_model(hash_p1) is True
+    assert coordinator.ranging_model.has_model(stored_layout_hash) is False
+    assert coordinator.room_classifier.has_trained_rooms(hash_p1, None) is True
+    assert coordinator.room_classifier.has_trained_rooms(stored_layout_hash, None) is False
+
+
+async def test_calibration_layout_mismatch_clear_rebuilds_runtime_models(
+    hass: HomeAssistant, setup_bermuda_entry
+):
+    """Clearing a mismatch issue should trigger the full calibration runtime rebuild path."""
+    coordinator = setup_bermuda_entry.runtime_data.coordinator
+    coordinator._cancel_calibration_layout_mismatch_grace()
+    coordinator._calibration_layout_mismatch_grace_active = False
+    coordinator._calibration_layout_mismatch_grace_deadline = None
+    coordinator._calibration_layout_mismatch_signature = "existing_signature"
+
+    ir.async_create_issue(
+        hass,
+        DOMAIN,
+        REPAIR_CALIBRATION_LAYOUT_MISMATCH,
+        data={"entry_id": setup_bermuda_entry.entry_id},
+        is_fixable=True,
+        is_persistent=True,
+        severity=ir.IssueSeverity.WARNING,
+        translation_key=REPAIR_CALIBRATION_LAYOUT_MISMATCH,
+        translation_placeholders={"sample_count": "1"},
     )
+
+    with (
+        patch.object(coordinator.calibration, "get_layout_mismatch_summary", return_value=None),
+        patch.object(
+            coordinator,
+            "async_handle_calibration_samples_changed",
+            new_callable=AsyncMock,
+        ) as rebuild_runtime,
+    ):
+        coordinator._async_manage_repair_calibration_layout_mismatch()
+        await hass.async_block_till_done()
+
+    rebuild_runtime.assert_awaited_once()
+    assert coordinator._calibration_layout_mismatch_signature is None
+    assert ir.async_get(hass).async_get_issue(DOMAIN, REPAIR_CALIBRATION_LAYOUT_MISMATCH) is None

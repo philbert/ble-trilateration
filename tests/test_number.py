@@ -226,14 +226,24 @@ async def test_anchor_geometry_changed_passes_human_readable_names_to_trilat_rep
         [f"{scanner.name} [{scanner.address}]"]
     )
     recorded_list = coordinator._trilat_scanners_without_anchors[:]
+    issue = ir.async_get(hass).async_get_issue(DOMAIN, REPAIR_TRILAT_WITHOUT_ANCHORS)
+    assert issue is not None
+    assert issue.translation_placeholders["scannerlist"] == f"- {recorded_list[0]}\n"
 
     # Now fire anchor geometry changed (simulating a number restore).
-    await coordinator.async_handle_anchor_geometry_changed(reason="test_restore")
+    with (
+        patch("custom_components.ble_trilateration.coordinator.ir.async_create_issue") as create_issue,
+        patch("custom_components.ble_trilateration.coordinator.ir.async_delete_issue") as delete_issue,
+    ):
+        await coordinator.async_handle_anchor_geometry_changed(reason="test_restore")
 
     # The stored list should still be in the same "Name [addr]" format so that
     # the equality check in _async_manage_repair_trilat_without_anchors behaves
     # consistently and no spurious churn occurs.
+    create_issue.assert_not_called()
+    delete_issue.assert_not_called()
     assert coordinator._trilat_scanners_without_anchors is not None
+    assert coordinator._trilat_scanners_without_anchors == recorded_list
     for entry_str in coordinator._trilat_scanners_without_anchors:
         # Each entry must contain a space (i.e. at least "Name [addr]") rather
         # than being a bare MAC address like "aa:bb:cc:dd:ee:20".
