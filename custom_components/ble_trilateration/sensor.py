@@ -312,14 +312,17 @@ class BermudaSensorScannerAdvertStatus(BermudaSensor):
 
     @property
     def entity_registry_enabled_default(self) -> bool:
-        return True
+        return False
 
     @property
     def extra_state_attributes(self) -> Mapping[str, Any] | None:
-        status_entry = dict(self._status_entry() or {})
-        status_entry.setdefault("scanner_name", self._scanner.name)
-        status_entry.setdefault("scanner_address", self._scanner.address)
-        return status_entry
+        # Deliberately avoid unpacking the full status_entry dict here: it contains
+        # timestamps/rssi/distance that change on every scanner cycle and would
+        # create a new state_attributes row for every state write. Stable metadata only.
+        return {
+            "scanner_name": self._scanner.name,
+            "scanner_address": self._scanner.address,
+        }
 
 
 class BermudaSensorTrackedDeviceAdvertStatus(BermudaSensor):
@@ -374,16 +377,19 @@ class BermudaSensorTrackedDeviceAdvertStatus(BermudaSensor):
 
     @property
     def entity_registry_enabled_default(self) -> bool:
-        return True
+        return False
 
     @property
     def extra_state_attributes(self) -> Mapping[str, Any] | None:
-        status_entry = dict(self._status_entry() or {})
-        status_entry.setdefault("tracked_device_name", self._tracked_device.name)
-        status_entry.setdefault("tracked_device_address", self._tracked_device.address)
-        status_entry.setdefault("scanner_name", self._device.name)
-        status_entry.setdefault("scanner_address", self._device.address)
-        return status_entry
+        # Only stable identifying metadata. The full status_entry contains
+        # per-cycle telemetry (timestamps, rssi, distance) that would churn
+        # state_attributes rows on every coordinator tick.
+        return {
+            "tracked_device_name": self._tracked_device.name,
+            "tracked_device_address": self._tracked_device.address,
+            "scanner_name": self._device.name,
+            "scanner_address": self._device.address,
+        }
 
 
 class BermudaSensorMobilityMode(BermudaSensor):
@@ -420,7 +426,9 @@ class BermudaSensorTrilatX(BermudaSensor):
         x_val = getattr(self._device, "trilat_x_m", None)
         if x_val is None:
             return None
-        return round(x_val, 3)
+        # 1cm precision: avoids sub-centimetre float noise triggering a
+        # state write on every coordinator tick for a stationary target.
+        return round(x_val, 2)
 
     @property
     def device_class(self):
@@ -447,7 +455,7 @@ class BermudaSensorTrilatY(BermudaSensorTrilatX):
         y_val = getattr(self._device, "trilat_y_m", None)
         if y_val is None:
             return None
-        return round(y_val, 3)
+        return round(y_val, 2)
 
 
 class BermudaSensorTrilatZ(BermudaSensorTrilatX):
@@ -466,7 +474,7 @@ class BermudaSensorTrilatZ(BermudaSensorTrilatX):
         z_val = getattr(self._device, "trilat_z_m", None)
         if z_val is None:
             return None
-        return round(z_val, 3)
+        return round(z_val, 2)
 
 
 class BermudaSensorPositionUncertaintyXBand(BermudaSensorTrilatX):
@@ -487,11 +495,11 @@ class BermudaSensorPositionUncertaintyXBand(BermudaSensorTrilatX):
         band = getattr(self._device, "position_uncertainty_x_band_m", None)
         if band is None:
             return None
-        return round(float(band), 3)
+        return round(float(band), 2)
 
     @property
     def entity_registry_enabled_default(self) -> bool:
-        return True
+        return False
 
     @property
     def state_class(self):
@@ -499,16 +507,13 @@ class BermudaSensorPositionUncertaintyXBand(BermudaSensorTrilatX):
 
     @property
     def extra_state_attributes(self) -> Mapping[str, Any] | None:
-        attrs: dict[str, Any] = {}
+        # `source` is a discrete enum-like string and is stable between updates.
+        # Raw/correction float values were dropped — they changed on every tick
+        # and are available via diagnostics download when needed.
         source = getattr(self._device, "position_uncertainty_source", None)
-        if source is not None:
-            attrs["source"] = source
-        correction = getattr(self._device, "trilat_position_correction_x_m", 0.0)
-        attrs["correction_m"] = round(float(correction), 4)
-        raw_val = getattr(self._device, "trilat_x_raw_m", None)
-        if raw_val is not None:
-            attrs["raw_trilat_x_m"] = round(float(raw_val), 4)
-        return attrs
+        if source is None:
+            return None
+        return {"source": source}
 
 
 class BermudaSensorPositionUncertaintyYBand(BermudaSensorPositionUncertaintyXBand):
@@ -527,17 +532,7 @@ class BermudaSensorPositionUncertaintyYBand(BermudaSensorPositionUncertaintyXBan
         band = getattr(self._device, "position_uncertainty_y_band_m", None)
         if band is None:
             return None
-        return round(float(band), 3)
-
-    @property
-    def extra_state_attributes(self) -> Mapping[str, Any] | None:
-        attrs = dict(super().extra_state_attributes or {})
-        attrs["correction_m"] = round(float(getattr(self._device, "trilat_position_correction_y_m", 0.0)), 4)
-        raw_val = getattr(self._device, "trilat_y_raw_m", None)
-        if raw_val is not None:
-            attrs["raw_trilat_y_m"] = round(float(raw_val), 4)
-        attrs.pop("raw_trilat_x_m", None)
-        return attrs
+        return round(float(band), 2)
 
 
 class BermudaSensorTrilatFloor(BermudaSensor):
@@ -557,23 +552,14 @@ class BermudaSensorTrilatFloor(BermudaSensor):
 
     @property
     def extra_state_attributes(self) -> Mapping[str, Any] | None:
-        attrs = dict(getattr(self._device, "trilat_floor_diagnostics", {}))
-        floor_evidence = getattr(self._device, "trilat_floor_evidence", {})
-        floor_evidence_names = getattr(self._device, "trilat_floor_evidence_names", {})
-        if floor_evidence:
-            attrs["floor_evidence"] = [
-                {
-                    "floor_id": floor_id,
-                    "floor_name": floor_evidence_names.get(floor_id),
-                    "score": round(score, 3),
-                }
-                for floor_id, score in sorted(
-                    floor_evidence.items(),
-                    key=lambda row: row[1],
-                    reverse=True,
-                )
-            ]
-        return attrs
+        # The floor_evidence list and trilat_floor_diagnostics dict were removed:
+        # both are rebuilt from scored floats on every coordinator tick, which
+        # generated a fresh state_attributes row every time even when the winning
+        # floor didn't change. Detailed evidence is still available via diagnostics.
+        floor_id = getattr(self._device, "trilat_floor_id", None)
+        if floor_id is None:
+            return None
+        return {"floor_id": floor_id}
 
 
 class BermudaSensorTrilatAnchorCount(BermudaSensor):
@@ -597,17 +583,13 @@ class BermudaSensorTrilatAnchorCount(BermudaSensor):
 
     @property
     def extra_state_attributes(self) -> Mapping[str, Any] | None:
-        anchor_lines = list(getattr(self._device, "trilat_anchor_diagnostics", []))
-        attrs: dict[str, Any] = {
-            "used_anchors": getattr(self._device, "trilat_anchor_count", 0),
+        # Per-anchor diagnostic strings (previously exposed as numbered keys
+        # "1", "2", ...) were removed: they include live residual/distance text
+        # that changed every tick and caused state_attributes churn proportional
+        # to the anchor count. The integer summary below is stable.
+        return {
             "cross_floor_candidate_count": getattr(self._device, "trilat_cross_floor_anchor_count", 0),
         }
-        cross_floor_lines = list(getattr(self._device, "trilat_cross_floor_anchor_diagnostics", []))
-        if cross_floor_lines:
-            attrs["cross_floor_candidates"] = cross_floor_lines
-        for index, line in enumerate(anchor_lines, start=1):
-            attrs[str(index)] = line
-        return attrs
 
 
 class BermudaSensorPositionConfidence(BermudaSensor):
@@ -677,10 +659,10 @@ class BermudaSensorGeometryQuality(BermudaSensorPositionConfidence):
 
     @property
     def extra_state_attributes(self) -> Mapping[str, Any] | None:
-        return {
-            "gdop": getattr(self._device, "trilat_geometry_gdop", None),
-            "condition_number": getattr(self._device, "trilat_geometry_condition", None),
-        }
+        # gdop / condition_number were raw floats that changed every solver cycle
+        # and produced a fresh state_attributes row on every state write. Rely on
+        # the rounded native_value; full detail is in diagnostics.
+        return None
 
 
 class BermudaSensorResidualConsistency(BermudaSensorPositionConfidence):
@@ -697,15 +679,17 @@ class BermudaSensorResidualConsistency(BermudaSensorPositionConfidence):
         return "Residual Consistency"
 
     @property
+    def entity_registry_enabled_default(self) -> bool:
+        return False
+
+    @property
     def native_value(self):
         return round(getattr(self._device, "trilat_residual_consistency", 0.0), 1)
 
     @property
     def extra_state_attributes(self) -> Mapping[str, Any] | None:
-        return {
-            "normalized_residual_rms": getattr(self._device, "trilat_normalized_residual_rms", None),
-            "residual_m": getattr(self._device, "trilat_residual_m", None),
-        }
+        # Raw residual floats omitted — they changed every tick.
+        return None
 
 
 class BermudaSensorHorizontalSpeed(BermudaSensor):
@@ -724,7 +708,7 @@ class BermudaSensorHorizontalSpeed(BermudaSensor):
         speed = getattr(self._device, "trilat_horizontal_speed_mps", None)
         if speed is None:
             return None
-        return round(speed, 3)
+        return round(speed, 2)
 
     @property
     def device_class(self):
@@ -755,7 +739,7 @@ class BermudaSensorVerticalSpeed(BermudaSensorHorizontalSpeed):
         speed = getattr(self._device, "trilat_vertical_speed_mps", None)
         if speed is None:
             return None
-        return round(speed, 3)
+        return round(speed, 2)
 
 
 class BermudaSensorScannerTimestampSync(BermudaSensor):
@@ -777,13 +761,14 @@ class BermudaSensorScannerTimestampSync(BermudaSensor):
 
     @property
     def entity_registry_enabled_default(self) -> bool:
-        return True
+        return False
 
     @property
     def extra_state_attributes(self) -> Mapping[str, Any] | None:
-        diagnostics = dict(self._device.timestamp_sync_diagnostics())
-        diagnostics.pop("state", None)
-        return diagnostics
+        # Full diagnostics dict contained rolling timestamps/counters and was the
+        # largest per-scanner contributor to state_attributes growth. Drop it;
+        # use the HA diagnostics download for on-demand detail.
+        return None
 
 
 class BermudaGlobalSensor(BermudaGlobalEntity, SensorEntity):
