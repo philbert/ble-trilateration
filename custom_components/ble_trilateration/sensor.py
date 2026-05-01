@@ -426,9 +426,10 @@ class BermudaSensorTrilatX(BermudaSensor):
         x_val = getattr(self._device, "trilat_x_m", None)
         if x_val is None:
             return None
-        # 1cm precision: avoids sub-centimetre float noise triggering a
-        # state write on every coordinator tick for a stationary target.
-        return round(x_val, 2)
+        # 1cm precision + rate-limit: coordinates oscillate with BLE noise so without
+        # rate-limiting we write ~1 DB row/second. Coordinates have no meaningful
+        # "fast-falling" direction so use pure time-based limiting.
+        return self._cached_ratelimit(round(x_val, 2), fast_falling=False, fast_rising=False)
 
     @property
     def device_class(self):
@@ -455,7 +456,7 @@ class BermudaSensorTrilatY(BermudaSensorTrilatX):
         y_val = getattr(self._device, "trilat_y_m", None)
         if y_val is None:
             return None
-        return round(y_val, 2)
+        return self._cached_ratelimit(round(y_val, 2), fast_falling=False, fast_rising=False)
 
 
 class BermudaSensorTrilatZ(BermudaSensorTrilatX):
@@ -474,7 +475,7 @@ class BermudaSensorTrilatZ(BermudaSensorTrilatX):
         z_val = getattr(self._device, "trilat_z_m", None)
         if z_val is None:
             return None
-        return round(z_val, 2)
+        return self._cached_ratelimit(round(z_val, 2), fast_falling=False, fast_rising=False)
 
 
 class BermudaSensorPositionUncertaintyXBand(BermudaSensorTrilatX):
@@ -495,7 +496,7 @@ class BermudaSensorPositionUncertaintyXBand(BermudaSensorTrilatX):
         band = getattr(self._device, "position_uncertainty_x_band_m", None)
         if band is None:
             return None
-        return round(float(band), 2)
+        return self._cached_ratelimit(round(float(band), 2), fast_falling=False, fast_rising=False)
 
     @property
     def entity_registry_enabled_default(self) -> bool:
@@ -532,7 +533,7 @@ class BermudaSensorPositionUncertaintyYBand(BermudaSensorPositionUncertaintyXBan
         band = getattr(self._device, "position_uncertainty_y_band_m", None)
         if band is None:
             return None
-        return round(float(band), 2)
+        return self._cached_ratelimit(round(float(band), 2), fast_falling=False, fast_rising=False)
 
 
 class BermudaSensorTrilatFloor(BermudaSensor):
@@ -606,7 +607,8 @@ class BermudaSensorPositionConfidence(BermudaSensor):
     @property
     def native_value(self):
         confidence = getattr(self._device, "trilat_confidence", 0.0)
-        return round(confidence, 1)
+        # fast_falling=True: report confidence drops immediately (loss of signal is actionable).
+        return self._cached_ratelimit(round(confidence, 1), fast_falling=True, fast_rising=False)
 
     @property
     def state_class(self):
@@ -635,7 +637,7 @@ class BermudaSensorTrackingConfidence(BermudaSensorPositionConfidence):
     @property
     def native_value(self):
         confidence = getattr(self._device, "trilat_tracking_confidence", 0.0)
-        return round(confidence, 1)
+        return self._cached_ratelimit(round(confidence, 1), fast_falling=True, fast_rising=False)
 
     @property
     def extra_state_attributes(self) -> Mapping[str, Any] | None:
@@ -655,7 +657,7 @@ class BermudaSensorGeometryQuality(BermudaSensorPositionConfidence):
 
     @property
     def native_value(self):
-        return round(getattr(self._device, "trilat_geometry_quality", 0.0), 1)
+        return self._cached_ratelimit(round(getattr(self._device, "trilat_geometry_quality", 0.0), 1), fast_falling=False, fast_rising=False)
 
     @property
     def extra_state_attributes(self) -> Mapping[str, Any] | None:
@@ -684,7 +686,7 @@ class BermudaSensorResidualConsistency(BermudaSensorPositionConfidence):
 
     @property
     def native_value(self):
-        return round(getattr(self._device, "trilat_residual_consistency", 0.0), 1)
+        return self._cached_ratelimit(round(getattr(self._device, "trilat_residual_consistency", 0.0), 1), fast_falling=False, fast_rising=False)
 
     @property
     def extra_state_attributes(self) -> Mapping[str, Any] | None:
@@ -708,7 +710,8 @@ class BermudaSensorHorizontalSpeed(BermudaSensor):
         speed = getattr(self._device, "trilat_horizontal_speed_mps", None)
         if speed is None:
             return None
-        return round(speed, 2)
+        # fast_rising=True: report movement onset immediately.
+        return self._cached_ratelimit(round(speed, 2), fast_falling=False, fast_rising=True)
 
     @property
     def device_class(self):
@@ -739,7 +742,7 @@ class BermudaSensorVerticalSpeed(BermudaSensorHorizontalSpeed):
         speed = getattr(self._device, "trilat_vertical_speed_mps", None)
         if speed is None:
             return None
-        return round(speed, 2)
+        return self._cached_ratelimit(round(speed, 2), fast_falling=False, fast_rising=True)
 
 
 class BermudaSensorScannerTimestampSync(BermudaSensor):
