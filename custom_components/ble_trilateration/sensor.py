@@ -426,10 +426,10 @@ class BermudaSensorTrilatX(BermudaSensor):
         x_val = getattr(self._device, "trilat_x_m", None)
         if x_val is None:
             return None
-        # 1cm precision + rate-limit: coordinates oscillate with BLE noise so without
-        # rate-limiting we write ~1 DB row/second. Coordinates have no meaningful
-        # "fast-falling" direction so use pure time-based limiting.
-        return self._cached_ratelimit(round(x_val, 2), fast_falling=False, fast_rising=False)
+        # 1cm precision + deadband: write immediately if moved >=20cm (responsive to real
+        # movement), suppress writes when BLE noise keeps the value within the deadband.
+        # Time-based fallback (bermuda_update_interval) still fires so HA stays current.
+        return self._cached_ratelimit(round(x_val, 2), fast_falling=False, fast_rising=False, deadband=0.20)
 
     @property
     def device_class(self):
@@ -456,7 +456,7 @@ class BermudaSensorTrilatY(BermudaSensorTrilatX):
         y_val = getattr(self._device, "trilat_y_m", None)
         if y_val is None:
             return None
-        return self._cached_ratelimit(round(y_val, 2), fast_falling=False, fast_rising=False)
+        return self._cached_ratelimit(round(y_val, 2), fast_falling=False, fast_rising=False, deadband=0.20)
 
 
 class BermudaSensorTrilatZ(BermudaSensorTrilatX):

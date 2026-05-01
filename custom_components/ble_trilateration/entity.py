@@ -57,14 +57,19 @@ class BermudaEntity(CoordinatorEntity):
         self.bermuda_last_state: Any = 0
         self.bermuda_last_stamp: float = 0
 
-    def _cached_ratelimit(self, statevalue: Any, fast_falling=True, fast_rising=False, interval=None):
+    def _cached_ratelimit(self, statevalue: Any, fast_falling=True, fast_rising=False, interval=None, deadband=None):
         """
         Uses the CONF_UPDATE_INTERVAL and other logic to return either the given statevalue
         or an older, cached value. Helps to reduce excess sensor churn without compromising latency.
 
         Mostly suitable for MEASUREMENTS, but should work with strings, too.
-        If interval is specified the cache will use that (in seconds), otherwise the deafult is
-        the CONF_UPPDATE_INTERVAL (typically suitable for fast-close slow-far sensors)
+        If interval is specified the cache will use that (in seconds), otherwise the default is
+        the CONF_UPDATE_INTERVAL (typically suitable for fast-close slow-far sensors).
+        If deadband is specified (numeric), a new value is published immediately whenever
+        abs(new - last) >= deadband, regardless of the time interval. This is ideal for
+        position coordinates: stationary devices barely write (BLE noise stays within the
+        deadband) while moving devices update promptly as soon as they cross the threshold.
+        The time-based fallback still fires so HA knows the entity is alive.
         """
         if interval is not None:
             self.bermuda_update_interval = interval
@@ -76,6 +81,12 @@ class BermudaEntity(CoordinatorEntity):
             or (statevalue is None)  # or you.
             or (fast_falling and statevalue < self.bermuda_last_state)  # (like Distance)
             or (fast_rising and statevalue > self.bermuda_last_state)  # (like RSSI)
+            or (  # Deadband: publish if change exceeds threshold (position sensors)
+                deadband is not None
+                and isinstance(statevalue, (int, float))
+                and isinstance(self.bermuda_last_state, (int, float))
+                and abs(statevalue - self.bermuda_last_state) >= deadband
+            )
         ):
             # Publish the new value and update cache
             self.bermuda_last_stamp = nowstamp
