@@ -128,6 +128,7 @@ class BermudaRoomClassifier:
         current_layout_hash = getattr(self._calibration, "current_anchor_layout_hash", "")
         current_anchor_index_fn = getattr(self._calibration, "_current_anchor_identity_index", None)
         current_anchor_index = current_anchor_index_fn() if callable(current_anchor_index_fn) else None
+        canonical_key = getattr(self._calibration, "canonical_scanner_key", None)
         for sample in self._calibration.samples():
             if sample.get("quality", {}).get("status") == "rejected":
                 continue
@@ -177,7 +178,11 @@ class BermudaRoomClassifier:
                 rssi_median = anchor.get("rssi_median")
                 if rssi_median is None:
                     continue
-                scanner_key = str(scanner_address).lower()
+                scanner_key = (
+                    canonical_key(str(scanner_address))
+                    if callable(canonical_key)
+                    else str(scanner_address).lower()
+                )
                 rssi_mad = max(float(anchor.get("rssi_mad") or 0.0), 0.0)
                 packet_count = max(int(anchor.get("packet_count") or 1), 1)
                 rssi_min = anchor.get("rssi_min")

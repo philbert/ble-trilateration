@@ -140,6 +140,12 @@ class BermudaCalibrationManager:
         self._session_tasks: dict[str, asyncio.Task[None]] = {}
         self._change_callbacks: list = []
         self._trilat_correction_samples: dict[str, list[_TrilatCorrectionSample]] = {}
+        # alias (normalized) -> canonical physical scanner identity. The canonical
+        # identity is the scanner-anchor storage key, which survives BLE/Wi-Fi MAC
+        # alias flips. Rebuilt via refresh_layout_identity() when scanners or
+        # geometry change.
+        self._scanner_identity_map: dict[str, str] = {}
+        self._equivalent_layout_hashes_cache: set[str] | None = None
 
     async def async_initialize(self) -> None:
         """Load persistent calibration data."""
@@ -182,6 +188,89 @@ class BermudaCalibrationManager:
         """Return stored transition samples."""
         return self._store.transition_samples
 
+    def refresh_layout_identity(self) -> None:
+        """Rebuild the canonical scanner identity map and invalidate layout caches."""
+        alias_to_canonical: dict[str, str] = {}
+        # Stored anchor records first: the storage key is the long-lived canonical
+        # identity for a physical scanner, regardless of which alias is live now.
+        for storage_key, payload in self._coordinator.scanner_anchor_store.scanners.items():
+            canonical = mac_norm(str(storage_key))
+            alias_to_canonical[canonical] = canonical
+            for alias in payload.get("aliases", []) or []:
+                if alias:
+                    alias_to_canonical[mac_norm(str(alias))] = canonical
+        # Live scanners without a stored record yet: group their own aliases under
+        # one identity so a later BLE/Wi-Fi flip still resolves consistently.
+        for scanner_address in sorted(self._coordinator.scanner_list):
+            scanner = self._coordinator.devices.get(scanner_address)
+            if scanner is None:
+                continue
+            aliases = {
+                mac_norm(str(alias))
+                for alias in (
+                    scanner.address,
+                    getattr(scanner, "address_ble_mac", None),
+                    getattr(scanner, "address_wifi_mac", None),
+                    getattr(scanner, "unique_id", None),
+                )
+                if alias
+            }
+            known = sorted({alias_to_canonical[alias] for alias in aliases if alias in alias_to_canonical})
+            canonical = known[0] if known else mac_norm(str(getattr(scanner, "address_ble_mac", None) or scanner.address))
+            for alias in aliases:
+                alias_to_canonical.setdefault(alias, canonical)
+        self._scanner_identity_map = alias_to_canonical
+        self._equivalent_layout_hashes_cache = None
+
+    def canonical_scanner_key(self, scanner_address: str) -> str:
+        """Return the canonical physical identity for any scanner alias."""
+        if not self._scanner_identity_map:
+            self.refresh_layout_identity()
+        key = mac_norm(str(scanner_address))
+        return self._scanner_identity_map.get(key, key)
+
+    def incomplete_current_anchor_scanners(self) -> list[str]:
+        """Return names of configured anchor scanners with partial x/y/z coordinates."""
+        incomplete: list[str] = []
+        for scanner_address in sorted(self._coordinator.scanner_list):
+            scanner = self._coordinator.devices.get(scanner_address)
+            if scanner is None:
+                continue
+            anchor_x = getattr(scanner, "anchor_x_m", None)
+            anchor_y = getattr(scanner, "anchor_y_m", None)
+            anchor_z = getattr(scanner, "anchor_z_m", None)
+            coords = (anchor_x, anchor_y, anchor_z)
+            if any(value is None for value in coords) and any(value is not None for value in coords):
+                incomplete.append(str(getattr(scanner, "name", None) or scanner_address))
+        return incomplete
+
+    def equivalent_layout_hashes(self) -> set[str]:
+        """Return stored layout hashes proven geometry-equivalent to the current layout.
+
+        Always contains the current layout hash. A stored hash is equivalent when
+        every sample carrying it resolves cleanly onto the current anchor geometry,
+        so a hash mismatch alone never invalidates matching samples.
+        """
+        if self._equivalent_layout_hashes_cache is not None:
+            return set(self._equivalent_layout_hashes_cache)
+        current_layout_hash = self.current_anchor_layout_hash
+        equivalent = {current_layout_hash} if current_layout_hash else set()
+        current_anchor_index = self._current_anchor_identity_index()
+        if current_anchor_index:
+            matched: set[str] = set()
+            mismatched: set[str] = set()
+            for sample in [*self.samples(), *self.transition_samples()]:
+                stored_hash = str(sample.get("anchor_layout_hash") or "")
+                if not stored_hash or stored_hash == current_layout_hash:
+                    continue
+                if self._sample_matches_current_geometry(sample, current_anchor_index):
+                    matched.add(stored_hash)
+                else:
+                    mismatched.add(stored_hash)
+            equivalent.update(matched - mismatched)
+        self._equivalent_layout_hashes_cache = set(equivalent)
+        return equivalent
+
     @staticmethod
     def _anchor_delta_m(
         current_anchor: dict[str, float | None],
@@ -193,11 +282,30 @@ class BermudaCalibrationManager:
         sample_z = sample_position.get("z_m")
         if sample_x is None or sample_y is None or sample_z is None:
             return None
+        current_x = current_anchor.get("x_m")
+        current_y = current_anchor.get("y_m")
+        current_z = current_anchor.get("z_m")
+        if current_x is None or current_y is None or current_z is None:
+            return None
         return math.sqrt(
-            ((float(current_anchor["x_m"]) - float(sample_x)) ** 2)
-            + ((float(current_anchor["y_m"]) - float(sample_y)) ** 2)
-            + ((float(current_anchor["z_m"]) - float(sample_z)) ** 2)
+            ((float(current_x) - float(sample_x)) ** 2)
+            + ((float(current_y) - float(sample_y)) ** 2)
+            + ((float(current_z) - float(sample_z)) ** 2)
         )
+
+    @staticmethod
+    def _anchor_delta_xy_m(
+        current_anchor: dict[str, float | None],
+        sample_position: dict[str, Any],
+    ) -> float | None:
+        """Return XY-plane delta between current and stored anchor positions."""
+        sample_x = sample_position.get("x_m")
+        sample_y = sample_position.get("y_m")
+        current_x = current_anchor.get("x_m")
+        current_y = current_anchor.get("y_m")
+        if sample_x is None or sample_y is None or current_x is None or current_y is None:
+            return None
+        return math.hypot(float(current_x) - float(sample_x), float(current_y) - float(sample_y))
 
     def _sample_matches_current_geometry(
         self,
@@ -223,6 +331,127 @@ class BermudaCalibrationManager:
             matched_anchor_count += 1
 
         return matched_anchor_count > 0
+
+    # Sample classifications against the current anchor layout.
+    SAMPLE_CLASS_CURRENT = "current"
+    SAMPLE_CLASS_HASH_ONLY = "hash_only_alias_churn"
+    SAMPLE_CLASS_COORDINATE_CORRECTION = "coordinate_correction"
+    SAMPLE_CLASS_PHYSICAL_CHANGE = "physical_layout_changed"
+    SAMPLE_CLASS_CORRUPTED = "corrupted_stored_geometry"
+    SAMPLE_CLASS_REPAIRABLE_NULL_Z = "repairable_null_z"
+
+    def classify_sample_against_current(
+        self,
+        sample: dict[str, Any],
+        current_anchor_index: dict[str, tuple[dict[str, float | None], str | None]],
+        *,
+        current_layout_hash: str | None = None,
+    ) -> str:
+        """Classify one stored sample against the current anchor layout.
+
+        - current: geometry and stored hash both match.
+        - hash_only_alias_churn: geometry matches, only the stored hash is stale.
+        - coordinate_correction: same scanners, but stored coordinates differ.
+        - physical_layout_changed: sample references scanners not in the current set.
+        - corrupted_stored_geometry: stored anchor positions have null components
+          that cannot be proven against current anchors.
+        - repairable_null_z: stored z is null, but x/y prove the anchor identity and
+          the current anchor has a known z — safe to backfill.
+        """
+        if current_layout_hash is None:
+            current_layout_hash = self.current_anchor_layout_hash
+        anchors = sample.get("anchors") or {}
+        if not anchors:
+            return self.SAMPLE_CLASS_CORRUPTED
+
+        unknown_count = 0
+        corrupted_count = 0
+        repairable_z_count = 0
+        moved_count = 0
+        matched_count = 0
+        for scanner_address, anchor in anchors.items():
+            resolved = current_anchor_index.get(mac_norm(str(scanner_address)))
+            if resolved is None:
+                unknown_count += 1
+                continue
+            current_anchor, _name = resolved
+            sample_position = anchor.get("anchor_position") or {}
+            sample_x = sample_position.get("x_m")
+            sample_y = sample_position.get("y_m")
+            sample_z = sample_position.get("z_m")
+            if sample_x is None or sample_y is None:
+                corrupted_count += 1
+                continue
+            if sample_z is None:
+                delta_xy = self._anchor_delta_xy_m(current_anchor, sample_position)
+                if delta_xy is not None and delta_xy < 0.01 and current_anchor.get("z_m") is not None:
+                    repairable_z_count += 1
+                else:
+                    corrupted_count += 1
+                continue
+            delta_m = self._anchor_delta_m(current_anchor, sample_position)
+            if delta_m is None:
+                # Current anchor is missing a coordinate; cannot prove equivalence.
+                corrupted_count += 1
+            elif delta_m < 0.01:
+                matched_count += 1
+            else:
+                moved_count += 1
+
+        if unknown_count:
+            return self.SAMPLE_CLASS_PHYSICAL_CHANGE
+        if corrupted_count:
+            return self.SAMPLE_CLASS_CORRUPTED
+        if moved_count:
+            return self.SAMPLE_CLASS_COORDINATE_CORRECTION
+        if repairable_z_count:
+            return self.SAMPLE_CLASS_REPAIRABLE_NULL_Z
+        if matched_count == 0:
+            return self.SAMPLE_CLASS_CORRUPTED
+        stored_hash = str(sample.get("anchor_layout_hash") or "")
+        if stored_hash and current_layout_hash and stored_hash != current_layout_hash:
+            return self.SAMPLE_CLASS_HASH_ONLY
+        return self.SAMPLE_CLASS_CURRENT
+
+    def classify_stored_samples(self) -> dict[str, Any]:
+        """Classify all stored samples and bootstrap records for diagnostics and repair."""
+        current_anchor_index = self._current_anchor_identity_index()
+        current_layout_hash = self.current_anchor_layout_hash
+        equivalent_hashes = self.equivalent_layout_hashes()
+        incomplete_scanners = self.incomplete_current_anchor_scanners()
+
+        def _bucket(samples: list[dict[str, Any]]) -> dict[str, int]:
+            counts: dict[str, int] = {}
+            for sample in samples:
+                classification = self.classify_sample_against_current(
+                    sample,
+                    current_anchor_index,
+                    current_layout_hash=current_layout_hash,
+                )
+                counts[classification] = counts.get(classification, 0) + 1
+            return counts
+
+        result: dict[str, Any] = {
+            "current_layout_hash": current_layout_hash,
+            "equivalent_layout_hashes": sorted(equivalent_hashes),
+            "current_geometry_complete": not incomplete_scanners,
+            "incomplete_anchor_scanners": incomplete_scanners,
+            "samples": _bucket(self.samples()),
+            "transition_samples": _bucket(self.transition_samples()),
+        }
+
+        bootstrap_store = getattr(self._coordinator, "trilat_bootstrap_store", None)
+        if bootstrap_store is not None:
+            records = getattr(bootstrap_store, "records", {})
+            bootstrap: dict[str, int] = {"current": 0, "stale_layout": 0}
+            for record in records.values():
+                record_hash = getattr(record, "layout_hash", "")
+                if not record_hash or record_hash in equivalent_hashes:
+                    bootstrap["current"] += 1
+                else:
+                    bootstrap["stale_layout"] += 1
+            result["bootstrap_records"] = bootstrap
+        return result
 
     def get_summary(self) -> dict[str, Any]:
         """Return a small in-memory summary for config flow."""
@@ -289,6 +518,7 @@ class BermudaCalibrationManager:
         by_floor: dict[str, int] = {}
         by_layout: dict[str, int] = {}
         current_layout_hash = self.current_anchor_layout_hash
+        equivalent_hashes = self.equivalent_layout_hashes()
         current_layout_count = 0
         for sample in samples:
             room_name = str(sample.get("room_name") or sample.get("room_area_id") or "Unknown")
@@ -301,7 +531,7 @@ class BermudaCalibrationManager:
                 by_floor[floor_name] = by_floor.get(floor_name, 0) + 1
             layout_hash = str(sample.get("anchor_layout_hash") or "unknown")
             by_layout[layout_hash] = by_layout.get(layout_hash, 0) + 1
-            if layout_hash == current_layout_hash:
+            if layout_hash in equivalent_hashes:
                 current_layout_count += 1
         recent = sorted(
             samples,
@@ -320,7 +550,12 @@ class BermudaCalibrationManager:
         }
 
     def current_anchor_geometry(self) -> dict[str, dict[str, float | None]]:
-        """Return current configured anchor geometry by scanner address."""
+        """Return current configured anchor geometry by canonical scanner identity.
+
+        Keys are canonical physical scanner identities so the derived layout hash
+        is stable across BLE/Wi-Fi MAC alias flips. An unconfigured Z stays None;
+        it must never be silently coerced to 0.0.
+        """
         geometry: dict[str, dict[str, float | None]] = {}
         for scanner_address in sorted(self._coordinator.scanner_list):
             scanner = self._coordinator.devices.get(scanner_address)
@@ -330,10 +565,11 @@ class BermudaCalibrationManager:
             anchor_y = getattr(scanner, "anchor_y_m", None)
             if anchor_x is None or anchor_y is None:
                 continue
-            geometry[str(scanner_address).lower()] = {
+            anchor_z = getattr(scanner, "anchor_z_m", None)
+            geometry[self.canonical_scanner_key(scanner_address)] = {
                 "x_m": float(anchor_x),
                 "y_m": float(anchor_y),
-                "z_m": float(getattr(scanner, "anchor_z_m", 0.0) or 0.0),
+                "z_m": float(anchor_z) if anchor_z is not None else None,
             }
         return geometry
 
@@ -354,10 +590,11 @@ class BermudaCalibrationManager:
             if anchor_x is None or anchor_y is None:
                 continue
 
+            anchor_z = getattr(scanner, "anchor_z_m", None)
             current_anchor = {
                 "x_m": float(anchor_x),
                 "y_m": float(anchor_y),
-                "z_m": float(getattr(scanner, "anchor_z_m", 0.0) or 0.0),
+                "z_m": float(anchor_z) if anchor_z is not None else None,
             }
             aliases = {
                 mac_norm(alias)
@@ -419,7 +656,13 @@ class BermudaCalibrationManager:
         return [*changed_lines, *missing_lines]
 
     def get_layout_mismatch_summary(self) -> dict[str, Any] | None:
-        """Describe a sample/layout mismatch that requires user confirmation."""
+        """Describe a coordinate-correction mismatch that is eligible for repair.
+
+        The repair is only offered when the stored samples provably reference the
+        same physical scanners as the current layout and only the configured
+        coordinates differ. Hash-only alias churn, unknown scanners, corrupted
+        stored geometry, and incomplete current geometry never raise the repair.
+        """
         samples = self.samples()
         if not samples:
             return None
@@ -432,46 +675,64 @@ class BermudaCalibrationManager:
         if current_layout_hash in self.acknowledged_layout_hashes:
             return None
 
-        matched_samples = [
-            sample for sample in samples
-            if self._sample_matches_current_geometry(sample, current_anchor_index)
-        ]
-        mismatched_samples = [
-            sample for sample in samples
-            if not self._sample_matches_current_geometry(sample, current_anchor_index)
-        ]
-        if not mismatched_samples:
+        if self.incomplete_current_anchor_scanners():
+            # Current geometry cannot be proven complete; never offer to rewrite
+            # stored samples against it.
+            return None
+
+        matched_samples: list[dict[str, Any]] = []
+        correction_samples: list[dict[str, Any]] = []
+        blocker_classes: dict[str, int] = {}
+        for sample in samples:
+            classification = self.classify_sample_against_current(
+                sample,
+                current_anchor_index,
+                current_layout_hash=current_layout_hash,
+            )
+            if classification in {self.SAMPLE_CLASS_CURRENT, self.SAMPLE_CLASS_HASH_ONLY}:
+                matched_samples.append(sample)
+            elif classification == self.SAMPLE_CLASS_COORDINATE_CORRECTION:
+                correction_samples.append(sample)
+            else:
+                blocker_classes[classification] = blocker_classes.get(classification, 0) + 1
+
+        # Transition samples are mutated by the repair too, so unresolvable
+        # scanners there block the offer just as hard.
+        for sample in self.transition_samples():
+            classification = self.classify_sample_against_current(
+                sample,
+                current_anchor_index,
+                current_layout_hash=current_layout_hash,
+            )
+            if classification == self.SAMPLE_CLASS_PHYSICAL_CHANGE:
+                blocker_classes[classification] = blocker_classes.get(classification, 0) + 1
+
+        if not correction_samples or blocker_classes:
             return None
 
         by_layout: dict[str, list[dict[str, Any]]] = {}
-        for sample in mismatched_samples:
+        for sample in correction_samples:
             layout_hash = str(sample.get("anchor_layout_hash") or "unknown")
             by_layout.setdefault(layout_hash, []).append(sample)
 
-        for dominant_layout_hash, layout_samples in sorted(
-            by_layout.items(),
-            key=lambda row: len(row[1]),
-            reverse=True,
-        ):
-            changed_anchor_lines = self._layout_changed_anchor_lines(layout_samples, current_anchor_index)
-            if not changed_anchor_lines:
-                changed_anchor_lines = [
-                    "- Some saved sample anchors no longer resolve cleanly against the current anchor set"
-                ]
+        dominant_layout_hash, layout_samples = max(by_layout.items(), key=lambda row: len(row[1]))
+        changed_anchor_lines = self._layout_changed_anchor_lines(layout_samples, current_anchor_index)
+        if not changed_anchor_lines:
+            changed_anchor_lines = [
+                "- Some saved sample anchors no longer resolve cleanly against the current anchor set"
+            ]
 
-            return {
-                "sample_count": len(mismatched_samples),
-                "total_sample_count": len(samples),
-                "current_layout_count": len(matched_samples),
-                "mismatched_sample_count": len(mismatched_samples),
-                "mismatched_layout_count": len(by_layout),
-                "current_layout_hash": current_layout_hash,
-                "dominant_layout_hash": dominant_layout_hash,
-                "dominant_layout_count": len(layout_samples),
-                "changed_anchor_lines": "\n".join(changed_anchor_lines[:8]),
-            }
-
-        return None
+        return {
+            "sample_count": len(correction_samples),
+            "total_sample_count": len(samples),
+            "current_layout_count": len(matched_samples),
+            "mismatched_sample_count": len(correction_samples),
+            "mismatched_layout_count": len(by_layout),
+            "current_layout_hash": current_layout_hash,
+            "dominant_layout_hash": dominant_layout_hash,
+            "dominant_layout_count": len(layout_samples),
+            "changed_anchor_lines": "\n".join(changed_anchor_lines[:8]),
+        }
 
     def get_device_samples(self) -> dict[str, dict[str, str]]:
         """Return a map of device ids present in storage."""
@@ -889,45 +1150,154 @@ class BermudaCalibrationManager:
         await self._store.async_acknowledge_layout_hash(self.current_anchor_layout_hash)
 
     async def async_update_samples_to_current_geometry(self) -> int:
-        """Adopt the current anchor geometry for all stored samples."""
+        """Adopt the current anchor geometry for all stored samples.
+
+        Mutates ordinary samples, transition samples, and dependent transition-zone
+        layout hashes consistently. Refuses to run when the current geometry is
+        incomplete or any stored sample references a scanner that cannot be proven
+        to exist in the current anchor set. Never writes null coordinates and only
+        touches anchor positions and layout hashes — RSSI statistics, packet
+        counts, timestamps, and calibration positions are preserved.
+        """
         await self._store.async_ensure_loaded()
         samples = self.samples()
-        if not samples:
+        transition_samples = self.transition_samples()
+        if not samples and not transition_samples:
             return 0
 
-        current_geometry = self.current_anchor_geometry()
-        current_layout_hash = self.current_anchor_layout_hash
-        updated = 0
+        current_anchor_index = self._current_anchor_identity_index()
+        if not current_anchor_index:
+            raise HomeAssistantError(
+                "Cannot update stored sample geometry: no current anchor geometry is configured."
+            )
+        incomplete_scanners = self.incomplete_current_anchor_scanners()
+        if incomplete_scanners:
+            raise HomeAssistantError(
+                "Cannot update stored sample geometry: current anchors are missing coordinates: "
+                + ", ".join(incomplete_scanners)
+            )
 
-        for sample in samples:
+        unknown_scanners: set[str] = set()
+        for sample in [*samples, *transition_samples]:
+            for scanner_address, anchor in (sample.get("anchors") or {}).items():
+                if current_anchor_index.get(mac_norm(str(scanner_address))) is None:
+                    unknown_scanners.add(str(anchor.get("scanner_name") or scanner_address))
+        if unknown_scanners:
+            raise HomeAssistantError(
+                "Cannot update stored sample geometry: stored samples reference scanners "
+                "missing from the current anchor set: " + ", ".join(sorted(unknown_scanners))
+            )
+
+        current_layout_hash = self.current_anchor_layout_hash
+        previous_hashes: set[str] = set()
+
+        def _apply(sample: dict[str, Any]) -> bool:
             sample_changed = False
-            anchors = sample.get("anchors") or {}
-            for scanner_address, anchor in anchors.items():
-                current_anchor = current_geometry.get(str(scanner_address).lower())
-                if current_anchor is None:
-                    continue
-                anchor_position = anchor.get("anchor_position") or {}
+            for scanner_address, anchor in (sample.get("anchors") or {}).items():
+                current_anchor, _name = current_anchor_index[mac_norm(str(scanner_address))]
                 replacement = {
                     "x_m": current_anchor["x_m"],
                     "y_m": current_anchor["y_m"],
                     "z_m": current_anchor["z_m"],
                 }
-                if anchor_position != replacement:
+                if any(value is None for value in replacement.values()):
+                    raise HomeAssistantError(
+                        "Cannot update stored sample geometry: refusing to write a null coordinate "
+                        f"for scanner {scanner_address}."
+                    )
+                if (anchor.get("anchor_position") or {}) != replacement:
                     anchor["anchor_position"] = replacement
                     sample_changed = True
-            if sample.get("anchor_layout_hash") != current_layout_hash:
+            stored_hash = str(sample.get("anchor_layout_hash") or "")
+            if stored_hash != current_layout_hash:
+                if stored_hash:
+                    previous_hashes.add(stored_hash)
                 sample["anchor_layout_hash"] = current_layout_hash
                 sample_changed = True
-            if sample_changed:
-                updated += 1
+            return sample_changed
 
-        if updated == 0:
+        updated = sum(1 for sample in samples if _apply(sample))
+        transition_updated = sum(1 for sample in transition_samples if _apply(sample))
+
+        if updated == 0 and transition_updated == 0:
             return 0
 
-        await self._store.async_replace_samples(samples)
+        if updated:
+            await self._store.async_replace_samples(samples)
+        if transition_updated:
+            await self._store.async_replace_transition_samples(transition_samples)
+        await self._async_remap_transition_zone_hashes(previous_hashes, current_layout_hash)
         await self._store.async_forget_layout_hash(current_layout_hash)
+        self._equivalent_layout_hashes_cache = None
         await self._async_notify_changed()
-        return updated
+        return updated + transition_updated
+
+    async def _async_remap_transition_zone_hashes(
+        self,
+        previous_hashes: set[str],
+        current_layout_hash: str,
+    ) -> None:
+        """Re-key transition zones built from samples whose layout hash was repaired."""
+        if not previous_hashes:
+            return
+        zone_store = getattr(self._coordinator, "transition_zone_store", None)
+        if zone_store is None:
+            return
+        for zone in zone_store.zones:
+            if zone.anchor_layout_hash in previous_hashes:
+                zone.anchor_layout_hash = current_layout_hash
+                await zone_store.async_save_zone(zone)
+
+    async def async_repair_transition_sample_null_z(self) -> dict[str, int]:
+        """Backfill code-corrupted null anchor Z values in stored transition samples.
+
+        Only fills Z when the stored X/Y exactly match the current anchor for the
+        same proven scanner identity and that anchor has a known Z — i.e. the null
+        is provably storage corruption, not a layout change. Samples that cannot
+        be proven are left untouched and reported as corrupted.
+        """
+        await self._store.async_ensure_loaded()
+        transition_samples = self.transition_samples()
+        if not transition_samples:
+            return {"repaired": 0, "corrupted": 0, "unchanged": 0}
+
+        current_anchor_index = self._current_anchor_identity_index()
+        current_layout_hash = self.current_anchor_layout_hash
+        repaired = 0
+        corrupted = 0
+        unchanged = 0
+        changed_any = False
+
+        for sample in transition_samples:
+            classification = self.classify_sample_against_current(
+                sample,
+                current_anchor_index,
+                current_layout_hash=current_layout_hash,
+            )
+            if classification != self.SAMPLE_CLASS_REPAIRABLE_NULL_Z:
+                if classification == self.SAMPLE_CLASS_CORRUPTED:
+                    corrupted += 1
+                else:
+                    unchanged += 1
+                continue
+            for scanner_address, anchor in (sample.get("anchors") or {}).items():
+                resolved = current_anchor_index.get(mac_norm(str(scanner_address)))
+                if resolved is None:
+                    continue
+                current_anchor, _name = resolved
+                anchor_position = anchor.get("anchor_position") or {}
+                if anchor_position.get("z_m") is None and current_anchor.get("z_m") is not None:
+                    anchor_position["z_m"] = current_anchor["z_m"]
+                    anchor["anchor_position"] = anchor_position
+            sample["anchor_layout_hash"] = current_layout_hash
+            repaired += 1
+            changed_any = True
+
+        if changed_any:
+            await self._store.async_replace_transition_samples(transition_samples)
+            self._equivalent_layout_hashes_cache = None
+            await self._async_notify_changed()
+        return {"repaired": repaired, "corrupted": corrupted, "unchanged": unchanged}
 
     def _record_observation(
         self,
@@ -1546,7 +1916,10 @@ class BermudaCalibrationManager:
     ) -> dict[str, Any]:
         """Return transition-proximity diagnostics for the current solve."""
         all_samples = self.transition_samples()
-        layout_samples = [sample for sample in all_samples if sample.get("anchor_layout_hash") == layout_hash]
+        accepted_hashes = self.equivalent_layout_hashes() | {layout_hash}
+        layout_samples = [
+            sample for sample in all_samples if str(sample.get("anchor_layout_hash") or "") in accepted_hashes
+        ]
         diagnostics: dict[str, Any] = {
             "transition_sample_count": len(all_samples),
             "transition_layout_sample_count": len(layout_samples),
@@ -1815,7 +2188,7 @@ class BermudaCalibrationManager:
             return 0  # Already populated, skip
 
         groups: dict[tuple[str, str], list] = defaultdict(list)
-        for sample in self.samples():
+        for sample in self.transition_samples():
             t_name = sample.get("transition_name")
             layout_hash = sample.get("anchor_layout_hash", "")
             if not t_name:

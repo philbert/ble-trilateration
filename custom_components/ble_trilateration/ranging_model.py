@@ -80,6 +80,7 @@ class BermudaRangingModel:
         current_layout_hash = getattr(self._calibration, "current_anchor_layout_hash", "")
         current_anchor_index_fn = getattr(self._calibration, "_current_anchor_identity_index", None)
         current_anchor_index = current_anchor_index_fn() if callable(current_anchor_index_fn) else None
+        canonical_key = getattr(self._calibration, "canonical_scanner_key", None)
         for sample in self._calibration.samples():
             if sample.get("quality", {}).get("status") == "rejected":
                 continue
@@ -113,9 +114,14 @@ class BermudaRangingModel:
                     + ((float(sample_y) - float(anchor_y)) ** 2)
                     + ((float(sample_z) - float(anchor_z)) ** 2)
                 )
+                scanner_key = (
+                    canonical_key(str(scanner_address))
+                    if callable(canonical_key)
+                    else str(scanner_address).lower()
+                )
                 grouped_rows.setdefault(layout_hash, []).append(
                     _TrainingRow(
-                        scanner_address=str(scanner_address).lower(),
+                        scanner_address=scanner_key,
                         device_id=device_id,
                         distance_m=max(distance_m, MIN_DISTANCE_M),
                         rssi_dbm=float(rssi_median),
@@ -146,7 +152,8 @@ class BermudaRangingModel:
         model = self._models.get(layout_hash)
         if model is None:
             return None
-        scanner_key = scanner_address.lower()
+        canonical_key = getattr(self._calibration, "canonical_scanner_key", None)
+        scanner_key = canonical_key(scanner_address) if callable(canonical_key) else scanner_address.lower()
         device_bias_db = model.device_bias_db.get(device_id, 0.0) if device_id is not None else 0.0
 
         if scanner_key in model.scanner_slope_db_per_log10_m:

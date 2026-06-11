@@ -67,6 +67,11 @@ class BermudaTrilatBootstrapStore:
         """Return the persisted record for an address, if loaded."""
         return self._records.get(address.lower())
 
+    @property
+    def records(self) -> dict[str, TrilatBootstrapRecord]:
+        """Return all persisted bootstrap records keyed by device address."""
+        return dict(self._records)
+
     def schedule_save(self, address: str, record: TrilatBootstrapRecord) -> None:
         """Queue a save for the given device bootstrap state."""
         self._records[address.lower()] = record

@@ -416,6 +416,16 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         await self._floor_config_store.async_load()
         await self._trilat_bootstrap_store.async_load()
         await self.calibration.async_initialize()
+        self._restore_scanner_anchors_from_store()
+        self.calibration.refresh_layout_identity()
+        null_z_result = await self.calibration.async_repair_transition_sample_null_z()
+        if null_z_result.get("repaired") or null_z_result.get("corrupted"):
+            _LOGGER.warning(
+                "Transition sample null-Z repair: repaired=%d corrupted=%d unchanged=%d",
+                null_z_result.get("repaired", 0),
+                null_z_result.get("corrupted", 0),
+                null_z_result.get("unchanged", 0),
+            )
         migrated = await self.calibration.async_migrate_transition_samples_to_zones(
             self._transition_zone_store
         )
@@ -423,7 +433,6 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             _LOGGER.debug("Migrated %d transition sample group(s) to TransitionZone store", migrated)
         self.calibration.register_change_callback(self.async_handle_calibration_samples_changed)
         self._arm_calibration_layout_mismatch_grace()
-        self._restore_scanner_anchors_from_store()
         await self.async_handle_calibration_samples_changed()
         self._refresh_trilateration()
         self._refresh_areas_from_trilat()
@@ -434,8 +443,19 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         await self._trilat_bootstrap_store.async_save()
         await self.calibration.async_shutdown()
 
+    @property
+    def transition_zone_store(self):
+        """Return the transition-zone store."""
+        return self._transition_zone_store
+
+    @property
+    def trilat_bootstrap_store(self):
+        """Return the trilat bootstrap store."""
+        return self._trilat_bootstrap_store
+
     async def async_handle_calibration_samples_changed(self) -> None:
         """Rebuild sample-derived runtime helpers after calibration data changes."""
+        self.calibration.refresh_layout_identity()
         await self.ranging_model.async_rebuild()
         self.calibration.rebuild_trilat_position_model(self.ranging_model)
         await self.room_classifier.async_rebuild()
@@ -467,6 +487,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         # restore or user edit leaves the runtime models unreachable (they were
         # indexed under the old hash) until the next calibration-samples-changed
         # event.
+        self.calibration.refresh_layout_identity()
         await self.ranging_model.async_rebuild()
         self.calibration.rebuild_trilat_position_model(self.ranging_model)
         await self.room_classifier.async_rebuild()
@@ -598,6 +619,13 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
     def current_anchor_layout_hash(self) -> str:
         """Return the active anchor layout hash."""
         return self.calibration.current_anchor_layout_hash
+
+    def canonical_scanner_address(self, scanner_address: str) -> str:
+        """Return the canonical physical identity for a scanner alias."""
+        canonical_key = getattr(getattr(self, "calibration", None), "canonical_scanner_key", None)
+        if callable(canonical_key):
+            return canonical_key(scanner_address)
+        return str(scanner_address).lower()
 
     def get_registry_id_for_device(self, device: BermudaDevice) -> str | None:
         """Return the HA device registry id for a Bermuda device when available."""
@@ -1686,7 +1714,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 window_rssi = advert.rssi_filtered
             if window_rssi is None:
                 continue
-            live_rssi_by_scanner[advert.scanner_address.lower()] = float(window_rssi)
+            live_rssi_by_scanner[self.canonical_scanner_address(advert.scanner_address)] = float(window_rssi)
         geometry_quality_01 = max(0.0, min(1.0, float(device.trilat_geometry_quality or 0.0) / 10.0))
         anisotropy_ratio, weak_axis = self._room_live_anisotropy(device, live_floor_adverts)
         solve_covariance_xy = self._room_live_covariance_xy(device, live_floor_adverts)
@@ -3615,7 +3643,9 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             if rssi_for_score is None:
                 continue
             evidence_inputs.append((scanner_floor_id, rssi_for_score))
-            global_live_rssi_by_scanner[advert.scanner_address.lower()] = float(rssi_for_score)
+            global_live_rssi_by_scanner[self.canonical_scanner_address(advert.scanner_address)] = float(
+                rssi_for_score
+            )
 
         layout_hash = self.current_anchor_layout_hash() if getattr(self, "calibration", None) is not None else ""
         fingerprint_result = GlobalFingerprintResult(area_id=None, floor_id=None, reason="no_trained_rooms")
@@ -4677,6 +4707,8 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             if bermuda_scanner.area_id is None:
                 _scanners_without_areas.append(f"{bermuda_scanner.name} [{bermuda_scanner.address}]")
         self._async_manage_repair_scanners_without_areas(_scanners_without_areas)
+        if getattr(self, "calibration", None) is not None:
+            self.calibration.refresh_layout_identity()
         self._calibration_layout_mismatch_last_context = "refresh_scanners"
         self._async_manage_repair_calibration_layout_mismatch()
 
