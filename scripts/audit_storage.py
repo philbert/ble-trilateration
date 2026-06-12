@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# ruff: noqa: T201, D103, D213, EXE001, ARG005
 """Offline audit of Bermuda trilateration storage files.
 
 Drives the real calibration-manager classification code against copies of the

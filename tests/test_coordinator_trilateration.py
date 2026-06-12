@@ -2292,3 +2292,123 @@ def test_trilat_solve_prior_is_weakened_after_floor_switch():
     assert switched is not None
     assert switched.sigma_x_m > baseline.sigma_x_m
     assert switched.sigma_z_m > baseline.sigma_z_m
+
+
+def test_broken_timestamp_scanner_excluded_everywhere():
+    """A broken-timestamp scanner contributes nothing to floor evidence, fingerprints, or the solve."""
+    coordinator = _make_coordinator()
+    device = _DummyDevice("dev-broken-scanner")
+
+    sc_a = _make_scanner(coordinator, "bts-a", "f1", 0.0, 0.0)
+    sc_b = _make_scanner(coordinator, "bts-b", "f1", 6.0, 0.0)
+    sc_c = _make_scanner(coordinator, "bts-c", "f1", 0.0, 8.0)
+    sc_broken = _make_scanner(coordinator, "bts-broken", "f2", 3.0, 3.0)
+    sc_broken.is_scanner = True
+    sc_broken.timestamp_sync_diagnostics = lambda: {"state": "broken"}
+
+    seen_live_maps = []
+    coordinator.room_classifier = SimpleNamespace(
+        fingerprint_global=lambda **kwargs: (
+            seen_live_maps.append(kwargs.get("live_rssi_by_scanner") or {}),
+            GlobalFingerprintResult(area_id=None, floor_id=None, reason="no_trained_rooms"),
+        )[1],
+    )
+
+    fresh = time.monotonic()
+    device.adverts = {
+        ("dev-broken-scanner", sc_a.address): _make_advert(sc_a, fresh, -60.0, 5.0),
+        ("dev-broken-scanner", sc_b.address): _make_advert(sc_b, fresh, -60.0, 5.0),
+        ("dev-broken-scanner", sc_c.address): _make_advert(sc_c, fresh, -60.0, 5.0),
+        ("dev-broken-scanner", sc_broken.address): _make_advert(sc_broken, fresh, -30.0, 1.0),
+    }
+    coordinator._refresh_trilateration_for_device(device)
+
+    # The very loud broken scanner on f2 must not pull floor evidence or the solve.
+    assert device.trilat_floor_id == "f1"
+    assert "f2" not in device.trilat_floor_evidence
+    assert device.trilat_anchor_count == 3
+    assert seen_live_maps and all("bts-broken" not in live for live in seen_live_maps)
+
+
+def test_stationary_noisy_classification_does_not_wander():
+    """Alternating noisy classifications must never accumulate enough evidence to switch."""
+    coordinator = _make_coordinator()
+    device = _DummyDevice("dev-noisy-stationary")
+    device.trilat_status = "ok"
+    device.trilat_x_m = 10.0
+    device.trilat_y_m = 2.0
+    device.trilat_z_m = 3.0
+    device.trilat_floor_id = "f1"
+    device.trilat_floor_name = "Floor f1"
+    device.area_id = "kitchen"
+    device.area_name = "kitchen"
+    device.area_last_seen_id = "kitchen"
+
+    def _classification(area_id):
+        return RoomClassification(
+            area_id=area_id,
+            reason="ok",
+            best_area_id=area_id,
+            best_score=0.40,
+            second_score=0.25,
+            topk_used=3,
+            geometry_score=0.41,
+            fingerprint_score=0.73,
+            fingerprint_best_area_id=area_id,
+            fingerprint_best_score=0.73,
+            fingerprint_second_score=0.40,
+            fingerprint_confidence=0.33,
+            fingerprint_coverage=1.0,
+            sample_count=3,
+        )
+
+    # Noise flips the classifier between the stable room and a neighbour every cycle.
+    flip = {"count": 0}
+
+    def _classify(**_kwargs):
+        flip["count"] += 1
+        return _classification("living_room" if flip["count"] % 2 else "kitchen")
+
+    coordinator.room_classifier = SimpleNamespace(
+        has_trained_rooms=lambda _layout_hash, _floor_id: True,
+        classify=_classify,
+    )
+
+    timestamps = [100.0 + cycle for cycle in range(10)]
+    with patch(
+        "custom_components.ble_trilateration.coordinator.monotonic_time_coarse",
+        side_effect=timestamps,
+    ):
+        for _ in timestamps:
+            coordinator._refresh_area_from_trilat(device, "layout-a")
+            assert device.area_id == "kitchen"
+
+
+def test_restart_bootstrap_skips_low_quality_record():
+    """A low-quality bootstrap record must not seed current positioning."""
+    coordinator = _make_coordinator()
+    coordinator._trilat_bootstrap_store = SimpleNamespace(
+        get=lambda _addr: TrilatBootstrapRecord(
+            saved_at="2026-03-15T03:00:00+00:00",
+            floor_id="f1",
+            area_id="guest_room",
+            x_m=9.0,
+            y_m=7.0,
+            z_m=3.3,
+            layout_hash="layout-a",
+            floor_confidence=0.9,
+            geometry_quality_01=0.2,
+        ),
+        schedule_save=lambda *_args, **_kwargs: None,
+    )
+    device = _DummyDevice("dev-bootstrap-low-quality")
+    with patch(
+        "custom_components.ble_trilateration.coordinator.now",
+        return_value=datetime.fromisoformat("2026-03-15T03:00:20+00:00"),
+    ):
+        state = coordinator._get_trilat_decision_state(device)
+
+    assert state.floor_id is None
+    assert state.bootstrap_restored_at == 0.0
+    assert state.last_solution_xy is None
+    assert device.area_last_seen_id is None
