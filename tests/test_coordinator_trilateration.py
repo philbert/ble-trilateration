@@ -637,10 +637,7 @@ def test_floor_challenger_switches_earlier_when_fingerprint_supports_challenger(
 
 
 def test_floor_challenger_switches_earlier_when_transition_supports_challenger():
-    """Transition support is recorded in diagnostics but no longer reduces dwell (Phase 4).
-
-    The switch still occurs once standard dwell expires.
-    """
+    """Strong calibrated transition support shortens the floor confirmation dwell."""
     coordinator = _make_coordinator()
     coordinator.calibration = SimpleNamespace(
         current_anchor_layout_hash="layout-a",
@@ -681,7 +678,7 @@ def test_floor_challenger_switches_earlier_when_transition_supports_challenger()
 
     assert state.floor_id == "f2"
     assert device.trilat_floor_diagnostics["transition_support_01"] == 0.8
-    assert device.trilat_floor_diagnostics["effective_required_dwell_s"] == 8.0
+    assert device.trilat_floor_diagnostics["effective_required_dwell_s"] == 2.0
 
 
 def test_restart_bootstrap_holds_restored_floor_until_fingerprint_is_ready():
@@ -731,8 +728,8 @@ def test_restart_bootstrap_holds_restored_floor_until_fingerprint_is_ready():
     assert device.trilat_floor_diagnostics["bootstrap_hold_active"] is True
 
 
-def test_restart_bootstrap_restores_floor_even_when_layout_hash_differs():
-    """A layout mismatch should suppress stale geometry, not discard the floor bootstrap."""
+def test_restart_bootstrap_skips_record_when_layout_hash_differs():
+    """A stale-layout bootstrap record must not seed any current positioning state."""
     coordinator = _make_coordinator()
     coordinator._trilat_bootstrap_store = SimpleNamespace(
         get=lambda _addr: TrilatBootstrapRecord(
@@ -755,8 +752,8 @@ def test_restart_bootstrap_restores_floor_even_when_layout_hash_differs():
     ):
         state = coordinator._get_trilat_decision_state(device)
 
-    assert state.floor_id == "f1"
-    assert state.bootstrap_restored_at > 0.0
+    assert state.floor_id is None
+    assert state.bootstrap_restored_at == 0.0
     assert state.last_solution_xy is None
     assert state.last_solution_z is None
     assert state.last_good_position is None
@@ -1249,8 +1246,8 @@ def test_area_from_trilat_holds_previous_room_on_weak_evidence():
     assert "hold=weak_evidence" in device.diag_area_switch
 
 
-def test_area_switch_requires_room_dwell_before_switching():
-    """A challenger room should need sustained evidence before Bermuda switches."""
+def test_area_switch_accumulates_evidence_before_switching():
+    """A challenger holds one cycle, then switches once accumulated evidence is strong."""
     coordinator = _make_coordinator()
     device = _DummyDevice("dev-room-switch")
     device.trilat_status = "ok"
@@ -1283,20 +1280,17 @@ def test_area_switch_requires_room_dwell_before_switching():
         ),
     )
 
-    with patch("custom_components.ble_trilateration.coordinator.monotonic_time_coarse", side_effect=[100.0, 101.0, 103.0]):
+    with patch("custom_components.ble_trilateration.coordinator.monotonic_time_coarse", side_effect=[100.0, 101.0]):
         coordinator._refresh_area_from_trilat(device, "layout-a")
         assert device.area_id == "kitchen"
-        assert "hold=room_switch_dwell" in device.diag_area_switch
-
-        coordinator._refresh_area_from_trilat(device, "layout-a")
-        assert device.area_id == "kitchen"
+        assert "hold=room_evidence" in device.diag_area_switch
 
         coordinator._refresh_area_from_trilat(device, "layout-a")
         assert device.area_id == "living_room"
 
 
-def test_area_switch_requires_extra_dwell_for_weak_transition():
-    """Room switches with weak learned transition support should hold longer."""
+def test_area_switch_accumulates_evidence_slower_for_weak_transition():
+    """Room switches with weak learned transition support accumulate evidence slower."""
     coordinator = _make_coordinator()
     device = _DummyDevice("dev-room-transition")
     device.trilat_status = "ok"
@@ -1314,7 +1308,7 @@ def test_area_switch_requires_extra_dwell_for_weak_transition():
             area_id="living_room",
             reason="ok",
             best_area_id="living_room",
-            best_score=0.62,
+            best_score=0.42,
             second_score=0.12,
             topk_used=3,
             geometry_score=0.41,
@@ -1329,13 +1323,10 @@ def test_area_switch_requires_extra_dwell_for_weak_transition():
         transition_strength=lambda **_kwargs: 0.2,
     )
 
-    with patch("custom_components.ble_trilateration.coordinator.monotonic_time_coarse", side_effect=[100.0, 102.0, 104.0, 104.6]):
+    with patch("custom_components.ble_trilateration.coordinator.monotonic_time_coarse", side_effect=[100.0, 102.0, 104.0]):
         coordinator._refresh_area_from_trilat(device, "layout-a")
         assert device.area_id == "kitchen"
         assert "transition=0.20" in device.diag_area_switch
-
-        coordinator._refresh_area_from_trilat(device, "layout-a")
-        assert device.area_id == "kitchen"
 
         coordinator._refresh_area_from_trilat(device, "layout-a")
         assert device.area_id == "kitchen"
@@ -1481,7 +1472,7 @@ def test_area_switch_allows_decisive_fingerprint_challenger_when_geometry_is_wea
     assert device.area_id == "kitchen"
     assert state.room_challenger_id == "living_room"
     assert "hold=weak_geometry_guardrail" not in device.diag_area_switch
-    assert "hold=room_switch_dwell" in device.diag_area_switch
+    assert "hold=room_evidence" in device.diag_area_switch
 
 
 def test_area_switch_logs_suspicious_low_geometry_switch_at_warning():
@@ -1537,8 +1528,8 @@ def test_area_switch_logs_suspicious_low_geometry_switch_at_warning():
     assert "fp_best=living_room" in args[15]
 
 
-def test_area_switch_requires_extra_dwell_for_sparse_room_challenger():
-    """Sparse challenger rooms should need longer dwell before switching."""
+def test_area_switch_accumulates_evidence_slower_for_sparse_room_challenger():
+    """Sparse challenger rooms accumulate switch evidence at half rate."""
     coordinator = _make_coordinator()
     device = _DummyDevice("dev-room-sparse")
     device.trilat_status = "ok"
@@ -1557,7 +1548,7 @@ def test_area_switch_requires_extra_dwell_for_sparse_room_challenger():
             area_id="living_room",
             reason="ok",
             best_area_id="living_room",
-            best_score=0.62,
+            best_score=0.42,
             second_score=0.12,
             topk_used=3,
             geometry_score=0.41,
@@ -1575,7 +1566,7 @@ def test_area_switch_requires_extra_dwell_for_sparse_room_challenger():
     with patch("custom_components.ble_trilateration.coordinator.monotonic_time_coarse", side_effect=[100.0, 101.5, 103.1]):
         coordinator._refresh_area_from_trilat(device, "layout-a")
         assert device.area_id == "kitchen"
-        assert "hold=room_switch_dwell(3.0s)" in device.diag_area_switch
+        assert "hold=room_evidence(0.15/0.45)" in device.diag_area_switch
 
         coordinator._refresh_area_from_trilat(device, "layout-a")
         assert device.area_id == "kitchen"
@@ -1650,8 +1641,8 @@ def test_room_live_covariance_xy_reflects_weak_axis_geometry():
     assert abs(cov_xy) < 1e-3
 
 
-def test_area_switch_weak_axis_alignment_increases_dwell_end_to_end():
-    """Weak-axis aligned room switches should get the extra dwell multiplier in the live path."""
+def test_area_switch_weak_axis_alignment_slows_evidence_end_to_end():
+    """Weak-axis aligned room switches accumulate evidence slower in the live path."""
     coordinator = _make_coordinator()
     device = _DummyDevice("dev-room-weak-axis")
     device.trilat_status = "ok"
@@ -1679,7 +1670,7 @@ def test_area_switch_weak_axis_alignment_increases_dwell_end_to_end():
             area_id="living_room",
             reason="ok",
             best_area_id="living_room",
-            best_score=0.62,
+            best_score=0.42,
             second_score=0.12,
             topk_used=3,
             geometry_score=0.41,
@@ -1701,7 +1692,7 @@ def test_area_switch_weak_axis_alignment_increases_dwell_end_to_end():
         coordinator._refresh_area_from_trilat(device, "layout-a")
         assert device.area_id == "kitchen"
         assert "weak_axis_aligned=yes" in device.diag_area_switch
-        assert "hold=room_switch_dwell(2.2s)" in device.diag_area_switch
+        assert "hold=room_evidence(0.20/0.45)" in device.diag_area_switch
 
         coordinator._refresh_area_from_trilat(device, "layout-a")
         assert device.area_id == "kitchen"
@@ -1763,7 +1754,7 @@ def test_area_switch_emits_target_room_diag_logging():
     assert args[5] == "living_room"
     assert args[6] == "living_room"
     assert args[7] == "kitchen"
-    assert "hold=room_switch_dwell" in args[8]
+    assert "hold=room_evidence" in args[8]
     assert "geom=0.41" in args[8]
     assert "fp=0.73" in args[8]
     assert "fp_rooms=living_room:0.73/1.00/3,kitchen:0.40/0.75/2" in args[8]

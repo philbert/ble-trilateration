@@ -28,6 +28,8 @@ async def async_get_config_entry_diagnostics(hass: HomeAssistant, entry: Bermuda
     data: dict[str, Any] = {
         "active_devices": f"{coordinator.count_active_devices()}/{len(coordinator.devices)}",
         "active_scanners": f"{coordinator.count_active_scanners()}/{len(coordinator.scanner_list)}",
+        "layout_identity": coordinator.layout_identity_diagnostics(),
+        "scanner_floor_z": coordinator.scanner_floor_z_diagnostics(),
         "irk_manager": coordinator.redact_data(coordinator.irk_manager.async_diagnostics_no_redactions()),
         "devices": await coordinator.service_dump_devices(call),
         "bt_manager": coordinator.redact_data(bt_diags),

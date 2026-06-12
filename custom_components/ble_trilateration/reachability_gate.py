@@ -38,6 +38,7 @@ class ReachabilityGate:
         nowstamp: float,
         traversal_recency_s: float,
         layout_hash: str,
+        accepted_layout_hashes: set[str] | None = None,
     ) -> ReachabilityDecision:
         # 1. Bypass: no source floor
         if from_floor_id is None:
@@ -48,8 +49,10 @@ class ReachabilityGate:
         # 3. Bypass: no reference position
         if reference_position is None:
             return ReachabilityDecision(allowed=True, reason="bypass_no_reference", matching_zone_count=0, best_zone_score=0.0, motion_budget_m=motion_budget_m, nearest_zone_distance_m=None)
-        # 4. Find matching zones for this (from, to) pair and layout
-        matching = [z for z in zones if z.anchor_layout_hash == layout_hash and z.covers_pair(from_floor_id, to_floor_id)]
+        # 4. Find matching zones for this (from, to) pair and layout. Zones keyed
+        # by a geometry-equivalent (alias-churned) hash still count.
+        accepted = accepted_layout_hashes or {layout_hash}
+        matching = [z for z in zones if z.anchor_layout_hash in accepted and z.covers_pair(from_floor_id, to_floor_id)]
         # 5. Bypass: no zones configured for this pair
         if not matching:
             return ReachabilityDecision(allowed=True, reason="bypass_no_coverage", matching_zone_count=0, best_zone_score=0.0, motion_budget_m=motion_budget_m, nearest_zone_distance_m=None)

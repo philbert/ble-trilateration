@@ -627,6 +627,84 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             return canonical_key(scanner_address)
         return str(scanner_address).lower()
 
+    def _accepted_layout_hashes(self, layout_hash: str) -> set[str]:
+        """Return layout hashes treated as equivalent to the current layout."""
+        equivalent_fn = getattr(getattr(self, "calibration", None), "equivalent_layout_hashes", None)
+        accepted = {layout_hash} if layout_hash else set()
+        if callable(equivalent_fn):
+            accepted |= equivalent_fn()
+        return accepted
+
+    def layout_identity_diagnostics(self) -> dict[str, Any]:
+        """Return canonical-layout classification of all stored positioning data."""
+        return self.calibration.classify_stored_samples()
+
+    def scanner_floor_z_diagnostics(self) -> list[dict[str, Any]]:
+        """Validate scanner anchor Z against the HA floor assignment, not nearest floor_z.
+
+        Each row shows the scanner's assigned floor, its anchor Z, the configured
+        floor surface Z, whether the anchor Z falls inside the assigned floor's
+        vertical band, and how the scanner is used as floor evidence (same-floor
+        for devices resolved to its assigned floor, cross-floor otherwise).
+        """
+        floor_z_levels: list[tuple[str, float]] = sorted(
+            (
+                (floor_id, cfg.floor_z_m)
+                for floor_id, cfg in self._floor_config_store.all_configs.items()
+                if cfg.floor_z_m is not None
+            ),
+            key=lambda row: row[1],
+        )
+
+        def _band_for_floor(floor_id: str | None) -> tuple[float, float] | None:
+            for index, (candidate_id, floor_z) in enumerate(floor_z_levels):
+                if candidate_id != floor_id:
+                    continue
+                if index + 1 < len(floor_z_levels):
+                    upper = floor_z_levels[index + 1][1] + 0.5
+                else:
+                    upper = floor_z + 3.5
+                return (floor_z, upper)
+            return None
+
+        rows: list[dict[str, Any]] = []
+        for scanner in sorted(self._scanners, key=lambda sc: (sc.name, sc.address)):
+            anchor_z = getattr(scanner, "anchor_z_m", None)
+            floor_id = scanner.floor_id
+            floor_z = self.get_floor_z_m(floor_id)
+            band = _band_for_floor(floor_id)
+            z_in_assigned_band: bool | None = None
+            if anchor_z is not None and band is not None:
+                z_in_assigned_band = band[0] <= float(anchor_z) <= band[1]
+            nearest_floor_by_z: str | None = None
+            if anchor_z is not None and floor_z_levels:
+                nearest_floor_by_z = min(
+                    floor_z_levels,
+                    key=lambda row: abs(float(anchor_z) - row[1]),
+                )[0]
+            rows.append(
+                {
+                    "scanner_name": scanner.name,
+                    "scanner_address": scanner.address,
+                    "canonical_address": self.canonical_scanner_address(scanner.address),
+                    "floor_id": floor_id,
+                    "floor_name": self._resolve_floor_name(floor_id),
+                    "anchor_z_m": anchor_z,
+                    "floor_z_m": floor_z,
+                    "assigned_floor_z_band": band,
+                    "z_in_assigned_floor_band": z_in_assigned_band,
+                    "nearest_floor_by_z": nearest_floor_by_z,
+                    "nearest_floor_matches_assignment": (
+                        nearest_floor_by_z == floor_id if nearest_floor_by_z is not None else None
+                    ),
+                    "evidence_role": (
+                        "same_floor for devices resolved to "
+                        f"{floor_id or 'unknown'}; cross_floor (inflated sigma, RSSI penalty) otherwise"
+                    ),
+                }
+            )
+        return rows
+
     def get_registry_id_for_device(self, device: BermudaDevice) -> str | None:
         """Return the HA device registry id for a Bermuda device when available."""
         if ":" in device.address:
@@ -1656,6 +1734,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             stable_area_id = self._stable_area_id(device)
             state.room_challenger_id = None
             state.room_challenger_since = 0.0
+            state.room_challenger_evidence = 0.0
             device.diag_area_switch = "Hybrid room classification: trilat_unavailable"
             device.apply_position_classification(
                 None,
@@ -1680,6 +1759,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             stable_area_id = self._stable_area_id(device)
             state.room_challenger_id = None
             state.room_challenger_since = 0.0
+            state.room_challenger_evidence = 0.0
             device.diag_area_switch = "Hybrid room classification: no_trained_rooms"
             device.apply_position_classification(
                 None,
@@ -1707,6 +1787,8 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 continue
             scanner = advert.scanner_device
             if scanner.floor_id != device.trilat_floor_id:
+                continue
+            if self._timestamp_health_penalty(scanner) >= 1.0:
                 continue
             live_floor_adverts.append(advert)
             window_rssi = getattr(advert, "rssi_window_median", None)
@@ -1759,6 +1841,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 if guardrail_reason is not None:
                     state.room_challenger_id = None
                     state.room_challenger_since = 0.0
+                    state.room_challenger_evidence = 0.0
                     device.diag_area_switch += f" hold={guardrail_reason}"
                     device.apply_position_classification(
                         stable_area_id,
@@ -1795,7 +1878,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                     to_area_id=classification.area_id,
                     weak_axis=weak_axis,
                 )
-                required_dwell = self._room_switch_dwell_seconds(
+                evidence_increment = self._room_switch_evidence_increment(
                     classification,
                     transition_strength=transition_strength,
                     weak_axis_aligned=weak_axis_aligned,
@@ -1807,6 +1890,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 if (classification.best_score - classification.second_score) < sample_margin:
                     state.room_challenger_id = None
                     state.room_challenger_since = 0.0
+                    state.room_challenger_evidence = 0.0
                     device.diag_area_switch += f" hold=min_sample_margin({sample_margin:.2f})"
                     device.apply_position_classification(
                         stable_area_id,
@@ -1833,7 +1917,22 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 if state.room_challenger_id != classification.area_id:
                     state.room_challenger_id = classification.area_id
                     state.room_challenger_since = nowstamp
-                    device.diag_area_switch += f" hold=room_switch_dwell({required_dwell:.1f}s)"
+                    state.room_challenger_evidence = 0.0
+                    log_event = "challenger_started"
+                else:
+                    log_event = "challenger_waiting"
+                state.room_challenger_evidence += evidence_increment
+                # A brand-new challenger always holds for one cycle so a single
+                # noisy classification can never flip the room on its own.
+                if (
+                    log_event == "challenger_started"
+                    or state.room_challenger_evidence < (self._ROOM_SWITCH_EVIDENCE_THRESHOLD - 1e-9)
+                ):
+                    hold_reason = (
+                        f"room_evidence({state.room_challenger_evidence:.2f}/"
+                        f"{self._ROOM_SWITCH_EVIDENCE_THRESHOLD:.2f})"
+                    )
+                    device.diag_area_switch += f" hold={hold_reason}"
                     device.apply_position_classification(
                         stable_area_id,
                         floor_id=device.trilat_floor_id,
@@ -1842,36 +1941,12 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                     self._log_room_decision_event(
                         device,
                         state,
-                        event="challenger_started",
+                        event=log_event,
                         stable_area_id=stable_area_id,
                         challenger_area_id=classification.area_id,
                         candidate_area_id=classification.area_id,
                         resolved_area_id=stable_area_id,
-                        hold_reason=f"room_switch_dwell({required_dwell:.1f}s)",
-                        classification=classification,
-                        geometry_quality_01=geometry_quality_01,
-                    )
-                    _log_target_room_diag(
-                        stable_area_id=stable_area_id,
-                        candidate_area_id=classification.area_id,
-                    )
-                    return
-                if nowstamp - state.room_challenger_since < required_dwell:
-                    device.diag_area_switch += f" hold=room_switch_dwell({required_dwell:.1f}s)"
-                    device.apply_position_classification(
-                        stable_area_id,
-                        floor_id=device.trilat_floor_id,
-                        floor_name=device.trilat_floor_name,
-                    )
-                    self._log_room_decision_event(
-                        device,
-                        state,
-                        event="challenger_waiting",
-                        stable_area_id=stable_area_id,
-                        challenger_area_id=classification.area_id,
-                        candidate_area_id=classification.area_id,
-                        resolved_area_id=stable_area_id,
-                        hold_reason=f"room_switch_dwell({required_dwell:.1f}s)",
+                        hold_reason=hold_reason,
                         classification=classification,
                         geometry_quality_01=geometry_quality_01,
                     )
@@ -1882,6 +1957,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                     return
             state.room_challenger_id = None
             state.room_challenger_since = 0.0
+            state.room_challenger_evidence = 0.0
             device.apply_position_classification(
                 classification.area_id,
                 floor_id=device.trilat_floor_id,
@@ -1908,6 +1984,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         if stable_area_id is not None and classification.reason in {"weak_room_evidence", "room_ambiguity"}:
             state.room_challenger_id = None
             state.room_challenger_since = 0.0
+            state.room_challenger_evidence = 0.0
             device.diag_area_switch += " hold=weak_evidence"
             device.apply_position_classification(
                 stable_area_id,
@@ -1931,6 +2008,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
 
         state.room_challenger_id = None
         state.room_challenger_since = 0.0
+        state.room_challenger_evidence = 0.0
         device.apply_position_classification(
             None,
             floor_id=device.trilat_floor_id,
@@ -2224,38 +2302,35 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             return self._ROOM_SWITCH_MIN_SAMPLE_MARGIN_TWO
         return 0.0
 
-    def _room_switch_dwell_seconds(
+    def _room_switch_evidence_increment(
         self,
         classification,
         *,
         transition_strength: float = 1.0,
         weak_axis_aligned: bool = False,
     ) -> float:
-        """Return an evidence-based dwell for room switches."""
+        """Return this cycle's evidence contribution toward a room switch.
+
+        Strong, unambiguous classifications accumulate quickly (switching within
+        one or two cycles); weak margins, implausible transitions, sparse rooms,
+        and weak-axis moves accumulate slowly so the stable room holds.
+        """
         margin = max(0.0, classification.best_score - classification.second_score)
-        if classification.best_score >= 0.60 and margin >= 0.35:
-            base = 1.5
-        elif classification.best_score >= 0.40 and margin >= 0.20:
-            base = 2.5
-        else:
-            base = 4.0
-
-        if transition_strength >= 0.65:
-            dwell = base
-        elif transition_strength >= 0.35:
-            dwell = base + 1.5
-        else:
-            dwell = base + 3.0
-
+        increment = max(
+            self._ROOM_SWITCH_EVIDENCE_MIN_INCREMENT,
+            min(margin, self._ROOM_SWITCH_EVIDENCE_MAX_INCREMENT),
+        )
+        if transition_strength < 0.35:
+            increment *= 0.5
+        elif transition_strength < 0.65:
+            increment *= 0.8
         if classification.sample_count == 1:
-            dwell *= self._ROOM_SWITCH_MIN_SAMPLE_DWELL_MULTIPLIER_ONE
+            increment *= 0.5
         elif classification.sample_count == 2:
-            dwell *= self._ROOM_SWITCH_MIN_SAMPLE_DWELL_MULTIPLIER_TWO
-
+            increment *= 0.75
         if weak_axis_aligned:
-            dwell *= self._ROOM_SWITCH_WEAK_AXIS_DWELL_MULTIPLIER
-
-        return min(self._ROOM_SWITCH_DWELL_CEILING_S, dwell)
+            increment *= 0.67
+        return increment
 
     def _room_transition_strength(
         self,
@@ -2318,6 +2393,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         last_status: str = "unknown"
         room_challenger_id: str | None = None
         room_challenger_since: float = 0.0
+        room_challenger_evidence: float = 0.0
         recent_transition_name: str | None = None
         recent_transition_room_area_id: str | None = None
         recent_transition_floor_ids: tuple[str, ...] = ()
@@ -2383,10 +2459,9 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
     _ROOM_SWITCH_FP_COVERAGE_FLOOR: float = 0.50
     _ROOM_SWITCH_MIN_SAMPLE_MARGIN_ONE: float = 0.10
     _ROOM_SWITCH_MIN_SAMPLE_MARGIN_TWO: float = 0.05
-    _ROOM_SWITCH_MIN_SAMPLE_DWELL_MULTIPLIER_ONE: float = 2.0
-    _ROOM_SWITCH_MIN_SAMPLE_DWELL_MULTIPLIER_TWO: float = 1.5
-    _ROOM_SWITCH_WEAK_AXIS_DWELL_MULTIPLIER: float = 1.5
-    _ROOM_SWITCH_DWELL_CEILING_S: float = 180.0
+    _ROOM_SWITCH_EVIDENCE_THRESHOLD: float = 0.45
+    _ROOM_SWITCH_EVIDENCE_MIN_INCREMENT: float = 0.08
+    _ROOM_SWITCH_EVIDENCE_MAX_INCREMENT: float = 0.50
 
     def trilat_max_horizontal_speed_mps(self) -> float:
         """Return the configured horizontal trilat speed limit."""
@@ -2665,7 +2740,12 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         device: BermudaDevice,
         state: TrilatDecisionState,
     ) -> None:
-        """Warm-start floor/geometry state from the last trusted trilat solution."""
+        """Warm-start floor/geometry state from the last trusted trilat solution.
+
+        Stale-layout or low-quality records must not seed current positioning:
+        a record only restores anything when its layout hash is geometry-equivalent
+        to the current layout and its saved solve quality was acceptable.
+        """
         if state.bootstrap_applied:
             return
         record = self._trilat_bootstrap_store.get(device.address)
@@ -2673,7 +2753,8 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             state.bootstrap_applied = True
             return
         layout_hash = self.current_anchor_layout_hash()
-        layout_matches = not (record.layout_hash and layout_hash and record.layout_hash != layout_hash)
+        accepted_hashes = self._accepted_layout_hashes(layout_hash)
+        layout_matches = not (record.layout_hash and layout_hash and record.layout_hash not in accepted_hashes)
         try:
             saved_at = datetime.fromisoformat(record.saved_at)
         except ValueError:
@@ -2681,6 +2762,15 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             return
         record_age_s = (now() - saved_at).total_seconds()
         if record_age_s < 0.0 or record_age_s > self._TRILAT_BOOTSTRAP_MAX_AGE_S:
+            state.bootstrap_applied = True
+            return
+        if not layout_matches or record.geometry_quality_01 < self._CHALLENGER_REFERENCE_QUALITY_THRESHOLD:
+            _LOGGER.debug(
+                "Skipping trilat bootstrap for %s: layout_matches=%s quality=%.2f",
+                device.address,
+                layout_matches,
+                record.geometry_quality_01,
+            )
             state.bootstrap_applied = True
             return
         state.bootstrap_applied = True
@@ -3283,7 +3373,12 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         floor_evidence: dict,
         floor_ambiguity: bool,
     ) -> None:
-        """Update floor_confidence after each inference cycle."""
+        """Update floor_confidence after each inference cycle.
+
+        Confidence must keep decaying whenever the selected floor is not winning
+        the evidence, so a previously confident floor cannot self-seal behind the
+        reachability gate while contrary evidence accumulates.
+        """
         if selected_floor_id is None or floor_ambiguity:
             state.floor_confidence = max(0.0, state.floor_confidence - 0.05)
             return
@@ -3291,9 +3386,14 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         if total <= 0.0:
             state.floor_confidence = max(0.0, state.floor_confidence - 0.05)
             return
-        best = floor_evidence.get(selected_floor_id, 0.0)
-        rssi_ratio = best / total
-        if rssi_ratio >= self._FLOOR_CONFIDENCE_HIGH_THRESHOLD:
+        best_evidence_floor_id = max(floor_evidence.items(), key=lambda row: row[1])[0]
+        selected_score = floor_evidence.get(selected_floor_id, 0.0)
+        rssi_ratio = selected_score / total
+        if best_evidence_floor_id != selected_floor_id:
+            # Another floor is winning the evidence: decay fast enough that the
+            # reachability-gate confidence threshold unseals within a few cycles.
+            state.floor_confidence = max(0.0, state.floor_confidence - 0.08)
+        elif rssi_ratio >= self._FLOOR_CONFIDENCE_HIGH_THRESHOLD:
             state.floor_confidence = min(1.0, state.floor_confidence + 0.04)
         else:
             state.floor_confidence = max(0.0, state.floor_confidence - 0.02)
@@ -3315,8 +3415,9 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         # Update last known good position — used as challenger reference, not the onset position
         state.last_good_position = (x_m, y_m, z_m)
         state.last_good_position_at = nowstamp
+        accepted_hashes = self._accepted_layout_hashes(layout_hash)
         for zone in self._transition_zone_store.zones:
-            if zone.anchor_layout_hash != layout_hash:
+            if zone.anchor_layout_hash not in accepted_hashes:
                 continue
             score = zone.score(x_m, y_m, z_m)
             prev_score = state.zone_entry_scores.get(zone.zone_id, 0.0)
@@ -3370,7 +3471,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             *,
             other_floor: bool = False,
         ) -> float | None:
-            if advert.rssi_distance_raw is None or advert.rssi_distance is None:
+            if advert.rssi_distance_raw is None:
                 return None
             sigma_m = getattr(advert, "rssi_distance_sigma_m", None)
             effective_sigma_m = float(sigma_m) if sigma_m is not None else self._TRILAT_DEFAULT_ANCHOR_SIGMA_M
@@ -3549,7 +3650,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                     or anchor_y is None
                 ):
                     status = "rejected_missing_anchor"
-                elif advert.rssi_distance_raw is None or advert.rssi_distance is None:
+                elif advert.rssi_distance_raw is None:
                     status = "rejected_no_range"
                 elif selected_floor_id is not None and scanner.floor_id != selected_floor_id:
                     status = "valid_other_floor"
@@ -3626,7 +3727,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 )
             return
 
-        evidence_inputs: list[tuple[str, float]] = []
+        evidence_inputs: list[tuple[str, float, float]] = []
         global_live_rssi_by_scanner: dict[str, float] = {}
         penalty_db = self.trilat_cross_floor_penalty_db()
         for advert in latest.values():
@@ -3635,6 +3736,12 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             scanner_floor_id = advert.scanner_device.floor_id
             if scanner_floor_id is None:
                 continue
+            health_penalty = self._timestamp_health_penalty(advert.scanner_device)
+            if health_penalty >= 1.0:
+                # Broken-timestamp scanners contribute nothing to floor evidence
+                # or fingerprint matching; their data is replayed/stale.
+                continue
+            health_weight = 1.0 / (1.0 + health_penalty)
             rssi_for_score = getattr(advert, "rssi_window_median", None)
             if rssi_for_score is None:
                 rssi_for_score = advert.rssi_filtered
@@ -3642,7 +3749,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 rssi_for_score = advert.rssi + advert.conf_rssi_offset
             if rssi_for_score is None:
                 continue
-            evidence_inputs.append((scanner_floor_id, rssi_for_score))
+            evidence_inputs.append((scanner_floor_id, rssi_for_score, health_weight))
             global_live_rssi_by_scanner[self.canonical_scanner_address(advert.scanner_address)] = float(
                 rssi_for_score
             )
@@ -3751,20 +3858,20 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             self._clear_trilat_quality_metrics(device)
             return
 
-        floors = sorted({floor_id for floor_id, _rssi in evidence_inputs})
+        floors = sorted({floor_id for floor_id, _rssi, _weight in evidence_inputs})
 
         # Phase 3: Signal priority reorder — fingerprint (primary), RSSI (secondary), Z hint (tertiary).
-        # RSSI floor evidence (secondary signal)
+        # RSSI floor evidence (secondary signal), weighted by scanner timestamp health.
         rssi_floor_evidence: dict[str, float] = {}
         for candidate_floor_id in floors:
             evidence = 0.0
-            for scanner_floor_id, rssi_for_score in evidence_inputs:
+            for scanner_floor_id, rssi_for_score, health_weight in evidence_inputs:
                 adjusted_rssi = (
                     rssi_for_score
                     if scanner_floor_id == candidate_floor_id
                     else rssi_for_score - penalty_db
                 )
-                evidence += self._score_rssi(adjusted_rssi)
+                evidence += health_weight * self._score_rssi(adjusted_rssi)
             rssi_floor_evidence[candidate_floor_id] = evidence
 
         # Fingerprint floor scores (primary signal)
@@ -3901,6 +4008,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                             nowstamp=nowstamp,
                             traversal_recency_s=self._ZONE_TRAVERSAL_RECENCY_S,
                             layout_hash=layout_hash,
+                            accepted_layout_hashes=self._accepted_layout_hashes(layout_hash),
                         )
                         _gate_blocked = not _gate_result_pre.allowed
 
@@ -3959,6 +4067,14 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                             state.floor_challenger_id
                         )
                         transition_support_01 = max(transition_immediate_support_01, transition_recent_support_01)
+                        if transition_support_01 >= self._TRILAT_TRANSITION_SUPPORT_REQUIRED:
+                            # Strong calibrated transition evidence makes this floor
+                            # change physically plausible right now; require only a
+                            # short confirmation dwell instead of the full hysteresis.
+                            effective_required_dwell_s = min(
+                                effective_required_dwell_s,
+                                float(policy.floor_dwell_seconds) * 0.25,
+                            )
 
                         # Update motion budget while challenger is active
                         if state.floor_challenger_id is not None and state.challenger_onset_time > 0.0:
@@ -4150,6 +4266,8 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             if advert.stamp < nowstamp - DISTANCE_TIMEOUT:
                 continue
             scanner = advert.scanner_device
+            if self._timestamp_health_penalty(scanner) >= 1.0:
+                continue
             other_floor = scanner.floor_id != selected_floor_id
             anchor_x = self.get_scanner_anchor_x(scanner.address)
             anchor_y = self.get_scanner_anchor_y(scanner.address)
@@ -4158,23 +4276,17 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
 
             if advert.rssi_distance_raw is None:
                 continue
-            if advert.rssi_distance is None:
-                continue
             effective_sigma_m = _anchor_effective_sigma_m(advert, other_floor=other_floor)
             if effective_sigma_m is None:
                 continue
 
             current_role = "other_floor" if other_floor else "same_floor"
-            previous_role = state.last_anchor_floor_roles.get(scanner.address)
-            if previous_role in ("same_floor", "other_floor") and previous_role != current_role:
-                advert.trilat_range_ewma_m = None
 
-            if advert.trilat_range_ewma_m is None:
-                advert.trilat_range_ewma_m = advert.rssi_distance_raw
-            else:
-                advert.trilat_range_ewma_m = (policy.trilat_alpha * advert.rssi_distance_raw) + (
-                    (1 - policy.trilat_alpha) * advert.trilat_range_ewma_m
-                )
+            # The raw range already aggregates the recent RSSI window (median +
+            # dispersion + packet count) with an explicit sigma. The legacy
+            # local-min "near" smoothing and a second EWMA stage only delayed
+            # genuine movement, so trilateration consumes the raw estimate.
+            advert.trilat_range_ewma_m = advert.rssi_distance_raw
             anchor_z_m = self.get_scanner_anchor_z(scanner.address)
             current_anchor_floor_roles[scanner.address] = current_role
             if not other_floor:
