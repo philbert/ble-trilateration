@@ -426,3 +426,54 @@ async def test_transition_capture_refuses_misconfigured_anchor(
             z_m=3.7,
             transition_floor_ids=["basement", "top_floor"],
         )
+
+
+async def test_zone_migration_pairs_room_floor_with_transition_floors(
+    hass: HomeAssistant, setup_bermuda_entry
+):
+    """Zone migration must pair the capture room's floor with each transition floor."""
+    coordinator = setup_bermuda_entry.runtime_data.coordinator
+    scanner = _add_scanner(coordinator, "aa:bb:cc:dd:32:01", "Zone Proxy", 8.0, 2.0, 1.0)
+    coordinator.calibration.refresh_layout_identity()
+
+    await coordinator.calibration_store.async_replace_transition_samples(
+        [
+            _sample(
+                "t_door",
+                {scanner.address: _anchor("Zone Proxy", 8.0, 2.0, 1.0)},
+                transition_name="laundry_door",
+                room_floor_id="ground_floor",
+                transition_floor_ids=["street_level"],
+            ),
+            _sample(
+                "t_stair_down",
+                {scanner.address: _anchor("Zone Proxy", 8.0, 2.0, 1.0)},
+                transition_name="stairwell",
+                room_floor_id="ground_floor",
+                transition_floor_ids=["basement"],
+            ),
+            _sample(
+                "t_stair_up",
+                {scanner.address: _anchor("Zone Proxy", 8.0, 2.0, 1.0)},
+                transition_name="stairwell",
+                room_floor_id="ground_floor",
+                transition_floor_ids=["top_floor"],
+            ),
+        ]
+    )
+
+    migrated = await coordinator.calibration.async_migrate_transition_samples_to_zones(
+        coordinator.transition_zone_store
+    )
+    assert migrated == 2
+
+    zones = {zone.name: zone for zone in coordinator.transition_zone_store.zones}
+    door = zones["laundry_door"]
+    assert door.covers_pair("ground_floor", "street_level")
+    assert door.covers_pair("street_level", "ground_floor")
+
+    stairwell = zones["stairwell"]
+    assert stairwell.covers_pair("ground_floor", "basement")
+    assert stairwell.covers_pair("basement", "ground_floor")
+    assert stairwell.covers_pair("ground_floor", "top_floor")
+    assert stairwell.covers_pair("top_floor", "ground_floor")

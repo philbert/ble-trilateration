@@ -2248,6 +2248,12 @@ class BermudaCalibrationManager:
                 captures.append(TransitionZoneCapture(x_m=float(x_m), y_m=float(y_m), z_m=float(z_m), sigma_m=sigma_m))
                 for fid in s.get("transition_floor_ids", []):
                     all_floor_ids.add(fid)
+                # The transition connects the capture room's floor with each
+                # declared transition floor; without it a single-target capture
+                # (e.g. ground_floor -> [street_level]) yields no pairs at all.
+                room_floor_id = self._sample_floor_id(s, self._coordinator)
+                if room_floor_id:
+                    all_floor_ids.add(str(room_floor_id))
 
             if not captures:
                 continue
