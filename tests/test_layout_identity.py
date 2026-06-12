@@ -522,3 +522,37 @@ async def test_null_z_repair_retries_when_scanners_arrive_after_startup(
     repaired = coordinator.calibration.transition_samples()[0]
     assert repaired["anchors"]["aa:bb:cc:dd:33:01"]["anchor_position"]["z_m"] == 1.0
     assert repaired["anchor_layout_hash"] == coordinator.calibration.current_anchor_layout_hash
+
+
+async def test_null_z_repair_skips_while_anchor_restore_is_partial(
+    hass: HomeAssistant, setup_bermuda_entry
+):
+    """Mid-restore partial geometry must not classify healthy samples as corrupted."""
+    coordinator = setup_bermuda_entry.runtime_data.coordinator
+    scanner = _add_scanner(coordinator, "aa:bb:cc:dd:34:01", "Restore Proxy", 8.0, 2.0, None)
+    coordinator.calibration.refresh_layout_identity()
+
+    await coordinator.calibration_store.async_replace_transition_samples(
+        [
+            _sample(
+                "t_mid_restore",
+                {"aa:bb:cc:dd:34:01": _anchor("Restore Proxy", 8.0, 2.0, None)},
+                transition_name="stairs",
+                transition_floor_ids=["f2"],
+            ),
+        ]
+    )
+
+    # Z has not restored yet: the runner must skip without touching the sample.
+    await coordinator._async_run_transition_null_z_repair()
+    untouched = coordinator.calibration.transition_samples()[0]
+    assert untouched["anchors"]["aa:bb:cc:dd:34:01"]["anchor_position"]["z_m"] is None
+    assert untouched["anchor_layout_hash"] == "old_layout_hash"
+
+    # Once Z restores, the same runner repairs the sample.
+    scanner.anchor_z_m = 1.0
+    coordinator.calibration.refresh_layout_identity()
+    await coordinator._async_run_transition_null_z_repair()
+    repaired = coordinator.calibration.transition_samples()[0]
+    assert repaired["anchors"]["aa:bb:cc:dd:34:01"]["anchor_position"]["z_m"] == 1.0
+    assert repaired["anchor_layout_hash"] == coordinator.calibration.current_anchor_layout_hash

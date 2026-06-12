@@ -628,6 +628,11 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         the repair can only prove anchor identity once the scanner list and its
         coordinates are actually available — at initialize they often aren't yet.
         """
+        if self.calibration.incomplete_current_anchor_scanners():
+            # Anchor coordinates are still restoring entity-by-entity (or are
+            # genuinely misconfigured). Classifying now would falsely flag
+            # healthy samples as corrupted; the next geometry change retries.
+            return
         result = await self.calibration.async_repair_transition_sample_null_z()
         if result.get("repaired") or result.get("corrupted"):
             _LOGGER.warning(
