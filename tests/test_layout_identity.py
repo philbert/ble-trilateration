@@ -379,3 +379,50 @@ async def test_equivalent_layout_hashes_require_full_geometry_match(
     assert "hash_a" in equivalent
     assert "hash_b" not in equivalent
     assert "hash_c" not in equivalent
+
+
+async def test_calibration_capture_refuses_misconfigured_anchor(
+    hass: HomeAssistant, setup_bermuda_entry
+):
+    """A capture must fail to start while any scanner anchor lacks an axis value."""
+    coordinator = setup_bermuda_entry.runtime_data.coordinator
+    _add_scanner(coordinator, "aa:bb:cc:dd:30:01", "Good Proxy", 8.0, 2.0, 1.0)
+    _add_scanner(coordinator, "aa:bb:cc:dd:30:02", "Half Proxy", 4.0, None, None)
+    coordinator.calibration.refresh_layout_identity()
+
+    assert coordinator.calibration.misconfigured_anchor_scanners() == ["Half Proxy (missing y/z)"]
+
+    with pytest.raises(HomeAssistantError, match=r"Half Proxy \(missing y/z\)"):
+        await coordinator.calibration.async_start_session(
+            device_id="any-device",
+            room_area_id="garage",
+            x_m=1.0,
+            y_m=2.0,
+            z_m=1.0,
+        )
+
+    # Completing the configuration unblocks the precondition.
+    half = coordinator.devices["aa:bb:cc:dd:30:02"]
+    half.anchor_y_m = 5.0
+    half.anchor_z_m = 1.5
+    assert coordinator.calibration.misconfigured_anchor_scanners() == []
+
+
+async def test_transition_capture_refuses_misconfigured_anchor(
+    hass: HomeAssistant, setup_bermuda_entry
+):
+    """Transition captures hard-fail the same way when a scanner anchor Z is missing."""
+    coordinator = setup_bermuda_entry.runtime_data.coordinator
+    _add_scanner(coordinator, "aa:bb:cc:dd:31:01", "NoZ Capture Proxy", 8.0, 2.0, None)
+    coordinator.calibration.refresh_layout_identity()
+
+    with pytest.raises(HomeAssistantError, match=r"NoZ Capture Proxy \(missing z\)"):
+        await coordinator.calibration.async_start_transition_session(
+            device_id="any-device",
+            room_area_id="entrance",
+            transition_name="stairwell",
+            x_m=12.5,
+            y_m=0.5,
+            z_m=3.7,
+            transition_floor_ids=["basement", "top_floor"],
+        )

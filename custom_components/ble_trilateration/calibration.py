@@ -229,6 +229,42 @@ class BermudaCalibrationManager:
         key = mac_norm(str(scanner_address))
         return self._scanner_identity_map.get(key, key)
 
+    def misconfigured_anchor_scanners(self) -> list[str]:
+        """Return scanners whose anchor coordinates are not fully configured.
+
+        Captures snapshot every visible scanner's anchor position into the stored
+        sample, so any scanner with a missing x, y, or z would write unprovable
+        geometry. Capture sessions refuse to start while this list is non-empty.
+        """
+        problems: list[str] = []
+        for scanner_address in sorted(self._coordinator.scanner_list):
+            scanner = self._coordinator.devices.get(scanner_address)
+            if scanner is None:
+                continue
+            missing = [
+                axis
+                for axis, value in (
+                    ("x", getattr(scanner, "anchor_x_m", None)),
+                    ("y", getattr(scanner, "anchor_y_m", None)),
+                    ("z", getattr(scanner, "anchor_z_m", None)),
+                )
+                if value is None
+            ]
+            if missing:
+                name = str(getattr(scanner, "name", None) or scanner_address)
+                problems.append(f"{name} (missing {'/'.join(missing)})")
+        return problems
+
+    def _raise_if_anchors_misconfigured(self) -> None:
+        """Refuse to start a capture while any scanner anchor is misconfigured."""
+        misconfigured = self.misconfigured_anchor_scanners()
+        if misconfigured:
+            raise HomeAssistantError(
+                "Cannot start capture: anchor coordinates are not fully configured for: "
+                + "; ".join(misconfigured)
+                + ". Configure or remove these scanners before recording samples."
+            )
+
     def incomplete_current_anchor_scanners(self) -> list[str]:
         """Return names of configured anchor scanners with partial x/y/z coordinates."""
         incomplete: list[str] = []
@@ -958,6 +994,7 @@ class BermudaCalibrationManager:
             raise HomeAssistantError("Calibration duration must be at least 1 second.")
         if sample_radius_m <= 0:
             raise HomeAssistantError("Calibration sample radius must be greater than 0 metres.")
+        self._raise_if_anchors_misconfigured()
 
         device = self._resolve_device_from_registry_id(device_id)
         if device is None:
@@ -1020,6 +1057,7 @@ class BermudaCalibrationManager:
             raise HomeAssistantError("Transition sample radius must be greater than 0 metres.")
         if capture_duration_s < 1:
             raise HomeAssistantError("Transition capture duration must be at least 1 second.")
+        self._raise_if_anchors_misconfigured()
 
         device = self._resolve_device_from_registry_id(device_id)
         if device is None:
