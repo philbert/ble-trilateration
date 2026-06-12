@@ -1305,6 +1305,7 @@ class BermudaCalibrationManager:
         corrupted = 0
         unchanged = 0
         changed_any = False
+        previous_hashes: set[str] = set()
 
         for sample in transition_samples:
             classification = self.classify_sample_against_current(
@@ -1327,12 +1328,19 @@ class BermudaCalibrationManager:
                 if anchor_position.get("z_m") is None and current_anchor.get("z_m") is not None:
                     anchor_position["z_m"] = current_anchor["z_m"]
                     anchor["anchor_position"] = anchor_position
+            stored_hash = str(sample.get("anchor_layout_hash") or "")
+            if stored_hash and stored_hash != current_layout_hash:
+                previous_hashes.add(stored_hash)
             sample["anchor_layout_hash"] = current_layout_hash
             repaired += 1
             changed_any = True
 
         if changed_any:
             await self._store.async_replace_transition_samples(transition_samples)
+            # Zones may already have been migrated from these samples under their
+            # old hash (e.g. when the first repair attempt ran before scanners
+            # were discovered); re-key them so they stay active.
+            await self._async_remap_transition_zone_hashes(previous_hashes, current_layout_hash)
             self._equivalent_layout_hashes_cache = None
             await self._async_notify_changed()
         return {"repaired": repaired, "corrupted": corrupted, "unchanged": unchanged}

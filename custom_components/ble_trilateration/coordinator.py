@@ -418,14 +418,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         await self.calibration.async_initialize()
         self._restore_scanner_anchors_from_store()
         self.calibration.refresh_layout_identity()
-        null_z_result = await self.calibration.async_repair_transition_sample_null_z()
-        if null_z_result.get("repaired") or null_z_result.get("corrupted"):
-            _LOGGER.warning(
-                "Transition sample null-Z repair: repaired=%d corrupted=%d unchanged=%d",
-                null_z_result.get("repaired", 0),
-                null_z_result.get("corrupted", 0),
-                null_z_result.get("unchanged", 0),
-            )
+        await self._async_run_transition_null_z_repair()
         migrated = await self.calibration.async_migrate_transition_samples_to_zones(
             self._transition_zone_store
         )
@@ -482,12 +475,13 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         )
         if self._calibration_layout_mismatch_grace_active:
             self._arm_calibration_layout_mismatch_grace()
+        self.calibration.refresh_layout_identity()
+        await self._async_run_transition_null_z_repair()
         # Rebuild the ranging model and room classifier so they use the updated
         # anchor layout hash. Without this, any hash change from a coordinate
         # restore or user edit leaves the runtime models unreachable (they were
         # indexed under the old hash) until the next calibration-samples-changed
         # event.
-        self.calibration.refresh_layout_identity()
         await self.ranging_model.async_rebuild()
         self.calibration.rebuild_trilat_position_model(self.ranging_model)
         await self.room_classifier.async_rebuild()
@@ -626,6 +620,22 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         if callable(canonical_key):
             return canonical_key(scanner_address)
         return str(scanner_address).lower()
+
+    async def _async_run_transition_null_z_repair(self) -> None:
+        """Run the null-Z transition repair and log when it changes anything.
+
+        Called at initialize and again whenever scanner anchors (re)load, because
+        the repair can only prove anchor identity once the scanner list and its
+        coordinates are actually available — at initialize they often aren't yet.
+        """
+        result = await self.calibration.async_repair_transition_sample_null_z()
+        if result.get("repaired") or result.get("corrupted"):
+            _LOGGER.warning(
+                "Transition sample null-Z repair: repaired=%d corrupted=%d unchanged=%d",
+                result.get("repaired", 0),
+                result.get("corrupted", 0),
+                result.get("unchanged", 0),
+            )
 
     def _accepted_layout_hashes(self, layout_hash: str) -> set[str]:
         """Return layout hashes treated as equivalent to the current layout."""
@@ -4821,6 +4831,10 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         self._async_manage_repair_scanners_without_areas(_scanners_without_areas)
         if getattr(self, "calibration", None) is not None:
             self.calibration.refresh_layout_identity()
+            # Scanners (and their restored anchors) often arrive after
+            # async_initialize, so the null-Z repair gets another chance now
+            # that anchor identities can actually be proven.
+            self.hass.async_create_task(self._async_run_transition_null_z_repair())
         self._calibration_layout_mismatch_last_context = "refresh_scanners"
         self._async_manage_repair_calibration_layout_mismatch()
 

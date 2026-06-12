@@ -301,8 +301,22 @@ async def test_transition_null_z_repaired_or_flagged(
         ]
     )
 
+    # A zone already migrated from these samples under their old hash must be
+    # re-keyed by the repair so it stays active.
+    await coordinator.transition_zone_store.async_save_zone(
+        TransitionZone(
+            zone_id="zone_old_hash",
+            name="stairs",
+            captures=[TransitionZoneCapture(x_m=1.0, y_m=2.0, z_m=1.0, sigma_m=1.0)],
+            floor_pairs=[("f1", "f2"), ("f2", "f1")],
+            anchor_layout_hash="old_layout_hash",
+            created_at="2026-03-06T12:00:00+00:00",
+        )
+    )
+
     result = await coordinator.calibration.async_repair_transition_sample_null_z()
     assert result == {"repaired": 1, "corrupted": 1, "unchanged": 0}
+    assert coordinator.transition_zone_store.zones[0].anchor_layout_hash == current_hash
 
     transition_samples = {s["id"]: s for s in coordinator.calibration.transition_samples()}
     repaired = transition_samples["t_repairable"]
@@ -477,3 +491,34 @@ async def test_zone_migration_pairs_room_floor_with_transition_floors(
     assert stairwell.covers_pair("basement", "ground_floor")
     assert stairwell.covers_pair("ground_floor", "top_floor")
     assert stairwell.covers_pair("top_floor", "ground_floor")
+
+
+async def test_null_z_repair_retries_when_scanners_arrive_after_startup(
+    hass: HomeAssistant, setup_bermuda_entry
+):
+    """The repair must succeed on a later pass once scanner anchors become available."""
+    coordinator = setup_bermuda_entry.runtime_data.coordinator
+    coordinator.calibration.refresh_layout_identity()
+
+    await coordinator.calibration_store.async_replace_transition_samples(
+        [
+            _sample(
+                "t_late",
+                {"aa:bb:cc:dd:33:01": _anchor("Late Proxy", 8.0, 2.0, None)},
+                transition_name="stairs",
+                transition_floor_ids=["f2"],
+            ),
+        ]
+    )
+
+    # First pass: scanner not discovered yet, nothing can be proven.
+    result = await coordinator.calibration.async_repair_transition_sample_null_z()
+    assert result == {"repaired": 0, "corrupted": 0, "unchanged": 1}
+
+    # Scanner appears with its anchors; the geometry-changed hook re-runs the repair.
+    _add_scanner(coordinator, "aa:bb:cc:dd:33:01", "Late Proxy", 8.0, 2.0, 1.0)
+    await coordinator.async_handle_anchor_geometry_changed(reason="test_scanner_arrived")
+
+    repaired = coordinator.calibration.transition_samples()[0]
+    assert repaired["anchors"]["aa:bb:cc:dd:33:01"]["anchor_position"]["z_m"] == 1.0
+    assert repaired["anchor_layout_hash"] == coordinator.calibration.current_anchor_layout_hash
