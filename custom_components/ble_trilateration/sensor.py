@@ -73,7 +73,7 @@ async def async_setup_entry(
 
         if address not in created_devices:
             entities = []
-            entities.append(BermudaSensor(coordinator, entry, address))
+            entities.append(BermudaSensorArea(coordinator, entry, address))
             entities.append(BermudaSensorMobilityMode(coordinator, entry, address))
             entities.append(BermudaSensorTrilatX(coordinator, entry, address))
             entities.append(BermudaSensorTrilatY(coordinator, entry, address))
@@ -188,16 +188,14 @@ def _remove_retired_sensor_entities(hass: HomeAssistant, entry_id: str) -> None:
             entity_registry.async_remove(entity_entry.entity_id)
 
 
+# Main Sensor Class with overrides that go everywhere.
 class BermudaSensor(BermudaEntity, SensorEntity):
     """bermuda Sensor class."""
 
     @property
-    def unique_id(self):
-        """
-        "Uniquely identify this sensor so that it gets stored in the entity_registry,
-        and can be maintained / renamed etc by the user.
-        """
-        return self._device.unique_id
+    def entity_registry_enabled_default(self) -> bool:
+        """Declare if entity should be automatically enabled on adding."""
+        return False
 
     @property
     def has_entity_name(self) -> bool:
@@ -206,42 +204,6 @@ class BermudaSensor(BermudaEntity, SensorEntity):
         so that HA should prepend the device name for the user.
         """
         return True
-
-    @property
-    def name(self):
-        """Return the name of the sensor."""
-        return "Area"
-
-    @property
-    def native_value(self):
-        """Return the state of the sensor."""
-        # return self.coordinator.data.get("body")
-        return self._device.area_name
-
-    @property
-    def icon(self):
-        """Provide a custom icon for particular entities."""
-        # TODO: This is ugly doing a check on name, and is a kludge
-        # because I originally was a bit reckless with the multiple
-        # inheritance here. So all the sensors should be restructured
-        # a bit to clean up this and other properties.
-        if self.name == "Area":
-            return self._device.area_icon
-        return super().icon
-        # return "mdi:floor-plan" or "mdi:map-marker-distance" or "mdi:signal-distance-variant"
-
-    @property
-    def entity_registry_enabled_default(self) -> bool:
-        """Declare if entity should be automatically enabled on adding."""
-        return self.name == "Area"
-
-    @property
-    def device_class(self):
-        """Return de device class of the sensor."""
-        # There isn't one for "Area Names" so we'll arbitrarily define our own.
-        if self.name == "Area":
-            return "bermuda__custom_device_class"
-        return None
 
     @property
     def extra_state_attributes(self) -> Mapping[str, Any] | None:
@@ -265,7 +227,7 @@ class BermudaSensor(BermudaEntity, SensorEntity):
         # since oft-changing attribs cause more db writes than sensors
         # "last_seen": self.coordinator.dt_mono_to_datetime(self._device.last_seen),
         attribs = {}
-        if self.name == "Area":
+        if self.name in ["Area", "Trilat Floor"]:
             attribs["area_id"] = self._device.area_id
             attribs["area_name"] = self._device.area_name
             attribs["floor_id"] = self._device.floor_id
@@ -274,6 +236,99 @@ class BermudaSensor(BermudaEntity, SensorEntity):
         attribs["current_mac"] = current_mac
 
         return attribs
+
+
+# Class for Default sesnors for devices.
+class BermudaDefaultSensor(BermudaSensor):
+    """bermuda Sensor class which are enabled by default."""
+
+    @property
+    def entity_registry_enabled_default(self) -> bool:
+        """Declare if entity should be automatically enabled on adding."""
+        return True
+
+
+# Class for Distance sensors.
+class BermudaDistanceSensor(BermudaSensor):
+    """bermuda Sensor class which set common distance properties."""
+
+    @property
+    def device_class(self):
+        return SensorDeviceClass.DISTANCE
+
+    @property
+    def native_unit_of_measurement(self):
+        """Results are in metres."""
+        return UnitOfLength.METERS
+
+    @property
+    def state_class(self):
+        """Measurement should result in graphed results."""
+        return SensorStateClass.MEASUREMENT
+
+
+# Area / Floor
+class BermudaSensorArea(BermudaDefaultSensor):
+    """Sensor for name of current area."""
+
+    @property
+    def icon(self):
+        """Provide a custom icon for particular entities."""
+        return self._device.area_icon
+
+    @property
+    def name(self):
+        """Return the name of the sensor."""
+        return "Area"
+
+    @property
+    def native_value(self):
+        """Return the state of the sensor."""
+        return self._device.area_name
+
+    @property
+    def state(self) -> str:
+        """Return the state of the device."""
+        return self._device.area_name
+
+    @property
+    def unique_id(self):
+        """
+        "Uniquely identify this sensor so that it gets stored in the entity_registry,
+        and can be maintained / renamed etc by the user.
+        """
+        return f"{self._device.unique_id}_area"
+
+
+class BermudaSensorTrilatFloor(BermudaDefaultSensor):
+    """Diagnostic sensor for chosen trilat floor."""
+
+    @property
+    def name(self):
+        return "Trilat Floor"
+
+    @property
+    def native_value(self):
+        return getattr(self._device, "trilat_floor_name", None)
+
+    @property
+    def state(self):
+        return getattr(self._device, "trilat_floor_name", None)
+
+    @property
+    def unique_id(self):
+        return f"{self._device.unique_id}_trilat_floor"
+
+    @property
+    def extra_state_attributes(self) -> Mapping[str, Any] | None:
+        # The floor_evidence list and trilat_floor_diagnostics dict were removed:
+        # both are rebuilt from scored floats on every coordinator tick, which
+        # generated a fresh state_attributes row every time even when the winning
+        # floor didn't change. Detailed evidence is still available via diagnostics.
+        floor_id = getattr(self._device, "trilat_floor_id", None)
+        if floor_id is None:
+            return None
+        return {"floor_id": floor_id}
 
 
 class BermudaSensorScannerAdvertStatus(BermudaSensor):
@@ -410,7 +465,7 @@ class BermudaSensorMobilityMode(BermudaSensor):
         return self._device.get_mobility_type()
 
 
-class BermudaSensorTrilatX(BermudaSensor):
+class BermudaSensorTrilatX(BermudaDistanceSensor):
     """Diagnostic sensor for trilat X coordinate."""
 
     @property
@@ -430,14 +485,6 @@ class BermudaSensorTrilatX(BermudaSensor):
         # movement), suppress writes when BLE noise keeps the value within the deadband.
         # Time-based fallback (bermuda_update_interval) still fires so HA stays current.
         return self._cached_ratelimit(round(x_val, 2), fast_falling=False, fast_rising=False, deadband=0.20)
-
-    @property
-    def device_class(self):
-        return SensorDeviceClass.DISTANCE
-
-    @property
-    def native_unit_of_measurement(self):
-        return UnitOfLength.METERS
 
 
 class BermudaSensorTrilatY(BermudaSensorTrilatX):
@@ -501,10 +548,6 @@ class BermudaSensorPositionUncertaintyXBand(BermudaSensorTrilatX):
     @property
     def entity_registry_enabled_default(self) -> bool:
         return False
-
-    @property
-    def state_class(self):
-        return SensorStateClass.MEASUREMENT
 
     @property
     def extra_state_attributes(self) -> Mapping[str, Any] | None:
