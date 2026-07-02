@@ -55,6 +55,7 @@ DOMAIN_PRIVATE_BLE_DEVICE = "private_ble_device"
 SIGNAL_DEVICE_NEW = f"{DOMAIN}-device-new"
 SIGNAL_SCANNERS_CHANGED = f"{DOMAIN}-scanners-changed"
 CALIBRATION_EVENT_SAMPLE_CAPTURED = f"{DOMAIN}_calibration_sample_captured"
+DEVICE_OFFSET_EVENT_CAPTURED = f"{DOMAIN}_device_offset_captured"
 CALIBRATION_SAMPLE_WARN_THRESHOLD: Final = 500
 CALIBRATION_QUALITY_ACCEPTED: Final = "accepted"
 CALIBRATION_QUALITY_POOR: Final = "poor_quality"
@@ -150,9 +151,14 @@ def debug_device_match(*identifiers: str | None) -> bool:
             if ident == target or target in ident or ident in target:
                 return True
             if ident_compact != "" and target_compact != "":
-                if ident_compact == target_compact or target_compact in ident_compact or ident_compact in target_compact:
+                if (
+                    ident_compact == target_compact
+                    or target_compact in ident_compact
+                    or ident_compact in target_compact
+                ):
                     return True
     return False
+
 
 DISTANCE_TIMEOUT = 30  # seconds to wait before marking a sensor distance measurement
 # as unknown/none/stale/away. Separate from device_tracker.

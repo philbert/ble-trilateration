@@ -11,13 +11,12 @@ import math
 import statistics
 from copy import deepcopy
 from dataclasses import dataclass, field
-from datetime import timedelta
+from datetime import UTC, timedelta
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from bluetooth_data_tools import monotonic_time_coarse
 from homeassistant.components import persistent_notification
-from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import device_registry as dr
 from homeassistant.util.dt import now
@@ -29,6 +28,7 @@ from .const import (
     CALIBRATION_QUALITY_REJECTED,
     CALIBRATION_SAMPLE_WARN_THRESHOLD,
     DEFAULT_SAMPLE_RADIUS_M,
+    DEVICE_OFFSET_EVENT_CAPTURED,
     DISTANCE_TIMEOUT,
     DOMAIN_PRIVATE_BLE_DEVICE,
 )
@@ -42,11 +42,88 @@ from .trilateration import (
 from .util import mac_norm
 
 if TYPE_CHECKING:
+    from homeassistant.core import HomeAssistant
+
     from .bermuda_advert import BermudaAdvert
     from .bermuda_device import BermudaDevice
     from .calibration_store import BermudaCalibrationStore
     from .coordinator import BermudaDataUpdateCoordinator
     from .ranging_model import BermudaRangingModel
+
+
+# Device-offset capture: minimum anchors that must yield a usable delta,
+# minimum packets per anchor before its median is trusted, and a plausibility
+# bound on the resulting offset (beyond this, something other than TX power
+# difference is going on and the capture is rejected).
+DEVICE_OFFSET_MIN_ANCHORS = 4
+DEVICE_OFFSET_MIN_PACKETS = 3
+DEVICE_OFFSET_MAX_ABS_DB = 30.0
+
+
+def compute_device_offset(
+    observations: list[dict[str, Any]],
+    predict_rssi,
+) -> dict[str, Any]:
+    """
+    Compute a device's global RSSI offset against the calibrated reference scale.
+
+    observations: one entry per anchor with scanner_address, scanner_name,
+    rssi_median, distance_m, and packet_count. predict_rssi(scanner_address,
+    distance_m) returns the expected RSSI on the reference scale, or None.
+
+    Returns a result dict with status "ok" or "rejected" (plus reason). The
+    offset sign convention: positive means the device reads hotter than the
+    reference device, so live readings should have the offset subtracted.
+    """
+    deltas: list[float] = []
+    anchor_rows: list[dict[str, Any]] = []
+    for observation in observations:
+        if int(observation.get("packet_count") or 0) < DEVICE_OFFSET_MIN_PACKETS:
+            continue
+        expected = predict_rssi(observation["scanner_address"], float(observation["distance_m"]))
+        if expected is None:
+            continue
+        delta = float(observation["rssi_median"]) - float(expected)
+        deltas.append(delta)
+        anchor_rows.append(
+            {
+                "scanner_address": observation["scanner_address"],
+                "scanner_name": observation.get("scanner_name") or observation["scanner_address"],
+                "distance_m": round(float(observation["distance_m"]), 3),
+                "rssi_median": round(float(observation["rssi_median"]), 3),
+                "expected_rssi": round(float(expected), 3),
+                "delta_db": round(delta, 3),
+                "packet_count": int(observation.get("packet_count") or 0),
+            }
+        )
+
+    if len(deltas) < DEVICE_OFFSET_MIN_ANCHORS:
+        return {
+            "status": "rejected",
+            "reason": f"insufficient_anchors ({len(deltas)}/{DEVICE_OFFSET_MIN_ANCHORS})",
+            "anchor_count": len(deltas),
+            "anchors": anchor_rows,
+        }
+
+    offset_db = float(statistics.median(deltas))
+    if abs(offset_db) > DEVICE_OFFSET_MAX_ABS_DB:
+        return {
+            "status": "rejected",
+            "reason": f"implausible_offset ({offset_db:+.1f} dB)",
+            "offset_db": round(offset_db, 3),
+            "anchor_count": len(deltas),
+            "anchors": anchor_rows,
+        }
+
+    spread_db = float(statistics.median(abs(delta - offset_db) for delta in deltas)) * 1.4826
+    return {
+        "status": "ok",
+        "reason": None,
+        "offset_db": round(offset_db, 3),
+        "spread_db": round(spread_db, 3),
+        "anchor_count": len(deltas),
+        "anchors": anchor_rows,
+    }
 
 
 @dataclass
@@ -216,7 +293,9 @@ class BermudaCalibrationManager:
                 if alias
             }
             known = sorted({alias_to_canonical[alias] for alias in aliases if alias in alias_to_canonical})
-            canonical = known[0] if known else mac_norm(str(getattr(scanner, "address_ble_mac", None) or scanner.address))
+            canonical = (
+                known[0] if known else mac_norm(str(getattr(scanner, "address_ble_mac", None) or scanner.address))
+            )
             for alias in aliases:
                 alias_to_canonical.setdefault(alias, canonical)
         self._scanner_identity_map = alias_to_canonical
@@ -230,7 +309,8 @@ class BermudaCalibrationManager:
         return self._scanner_identity_map.get(key, key)
 
     def misconfigured_anchor_scanners(self) -> list[str]:
-        """Return scanners whose anchor coordinates are not fully configured.
+        """
+        Return scanners whose anchor coordinates are not fully configured.
 
         Captures snapshot every visible scanner's anchor position into the stored
         sample, so any scanner with a missing x, y, or z would write unprovable
@@ -281,7 +361,8 @@ class BermudaCalibrationManager:
         return incomplete
 
     def equivalent_layout_hashes(self) -> set[str]:
-        """Return stored layout hashes proven geometry-equivalent to the current layout.
+        """
+        Return stored layout hashes proven geometry-equivalent to the current layout.
 
         Always contains the current layout hash. A stored hash is equivalent when
         every sample carrying it resolves cleanly onto the current anchor geometry,
@@ -383,7 +464,8 @@ class BermudaCalibrationManager:
         *,
         current_layout_hash: str | None = None,
     ) -> str:
-        """Classify one stored sample against the current anchor layout.
+        """
+        Classify one stored sample against the current anchor layout.
 
         - current: geometry and stored hash both match.
         - hash_only_alias_churn: geometry matches, only the stored hash is stale.
@@ -526,7 +608,8 @@ class BermudaCalibrationManager:
         current_anchor_index: dict[str, tuple[dict[str, float | None], str | None]] | None = None,
         current_layout_hash: str | None = None,
     ) -> str:
-        """Return the effective runtime layout hash for one sample.
+        """
+        Return the effective runtime layout hash for one sample.
 
         Samples that already match the current anchor geometry should participate
         in the current runtime model/classifier even if their stored hash is
@@ -586,7 +669,8 @@ class BermudaCalibrationManager:
         }
 
     def current_anchor_geometry(self) -> dict[str, dict[str, float | None]]:
-        """Return current configured anchor geometry by canonical scanner identity.
+        """
+        Return current configured anchor geometry by canonical scanner identity.
 
         Keys are canonical physical scanner identities so the derived layout hash
         is stable across BLE/Wi-Fi MAC alias flips. An unconfigured Z stays None;
@@ -681,18 +765,13 @@ class BermudaCalibrationManager:
                 label = str(anchor.get("scanner_name") or current_name or scanner_address)
                 changed_anchors[label] = max(changed_anchors.get(label, 0.0), delta_m)
 
-        changed_lines = [
-            f"- {label}: moved {delta_m:.2f} m"
-            for label, delta_m in sorted(changed_anchors.items())
-        ]
-        missing_lines = [
-            f"- {label}: no longer present in current anchor set"
-            for label in sorted(missing_anchors)
-        ]
+        changed_lines = [f"- {label}: moved {delta_m:.2f} m" for label, delta_m in sorted(changed_anchors.items())]
+        missing_lines = [f"- {label}: no longer present in current anchor set" for label in sorted(missing_anchors)]
         return [*changed_lines, *missing_lines]
 
     def get_layout_mismatch_summary(self) -> dict[str, Any] | None:
-        """Describe a coordinate-correction mismatch that is eligible for repair.
+        """
+        Describe a coordinate-correction mismatch that is eligible for repair.
 
         The repair is only offered when the stored samples provably reference the
         same physical scanners as the current layout and only the configured
@@ -823,9 +902,7 @@ class BermudaCalibrationManager:
     ) -> TrilatPositionAdjustment | None:
         """Return weighted local XY correction and empirical uncertainty bands."""
         candidates = [
-            sample
-            for sample in self._trilat_correction_samples.get(layout_hash, [])
-            if sample.floor_id == floor_id
+            sample for sample in self._trilat_correction_samples.get(layout_hash, []) if sample.floor_id == floor_id
         ]
         if not candidates:
             return None
@@ -869,9 +946,7 @@ class BermudaCalibrationManager:
         correction_y_m = weighted_bias_y / total_weight
         half_width_x_m = weighted_half_width_x / total_weight
         half_width_y_m = weighted_half_width_y / total_weight
-        reference_residual_m = (
-            weighted_residual_ref / residual_ref_weight if residual_ref_weight > 0.0 else None
-        )
+        reference_residual_m = weighted_residual_ref / residual_ref_weight if residual_ref_weight > 0.0 else None
         residual_factor = 1.0
         if residual_m is not None and reference_residual_m is not None and reference_residual_m > 0.0:
             residual_factor = max(1.0, float(residual_m) / reference_residual_m)
@@ -991,21 +1066,26 @@ class BermudaCalibrationManager:
         """Validate and start a calibration sample capture."""
         await self._store.async_ensure_loaded()
         if duration_s < 1:
-            raise HomeAssistantError("Calibration duration must be at least 1 second.")
+            msg = "Calibration duration must be at least 1 second."
+            raise HomeAssistantError(msg)
         if sample_radius_m <= 0:
-            raise HomeAssistantError("Calibration sample radius must be greater than 0 metres.")
+            msg = "Calibration sample radius must be greater than 0 metres."
+            raise HomeAssistantError(msg)
         self._raise_if_anchors_misconfigured()
 
         device = self._resolve_device_from_registry_id(device_id)
         if device is None:
-            raise HomeAssistantError("Selected device is not currently available in Bermuda.")
+            msg = "Selected device is not currently available in Bermuda."
+            raise HomeAssistantError(msg)
 
         if any(session.device_id == device_id for session in self._sessions.values()):
-            raise HomeAssistantError("A capture session is already running for that device.")
+            msg = "A capture session is already running for that device."
+            raise HomeAssistantError(msg)
 
         area = self._coordinator.ar.async_get_area(room_area_id)
         if area is None:
-            raise HomeAssistantError("Selected room area does not exist.")
+            msg = "Selected room area does not exist."
+            raise HomeAssistantError(msg)
 
         started_dt = now()
         session = _CaptureSession(
@@ -1054,34 +1134,42 @@ class BermudaCalibrationManager:
         """Validate and start a transition sample capture session."""
         await self._store.async_ensure_loaded()
         if sample_radius_m <= 0:
-            raise HomeAssistantError("Transition sample radius must be greater than 0 metres.")
+            msg = "Transition sample radius must be greater than 0 metres."
+            raise HomeAssistantError(msg)
         if capture_duration_s < 1:
-            raise HomeAssistantError("Transition capture duration must be at least 1 second.")
+            msg = "Transition capture duration must be at least 1 second."
+            raise HomeAssistantError(msg)
         self._raise_if_anchors_misconfigured()
 
         device = self._resolve_device_from_registry_id(device_id)
         if device is None:
-            raise HomeAssistantError("Selected device is not currently available in Bermuda.")
+            msg = "Selected device is not currently available in Bermuda."
+            raise HomeAssistantError(msg)
 
         if any(session.device_id == device_id for session in self._sessions.values()):
-            raise HomeAssistantError("A capture session is already running for that device.")
+            msg = "A capture session is already running for that device."
+            raise HomeAssistantError(msg)
 
         area = self._coordinator.ar.async_get_area(room_area_id)
         if area is None:
-            raise HomeAssistantError("Selected room area does not exist.")
+            msg = "Selected room area does not exist."
+            raise HomeAssistantError(msg)
         if area.floor_id is None:
-            raise HomeAssistantError("Transition samples require the room area to belong to a floor.")
+            msg = "Transition samples require the room area to belong to a floor."
+            raise HomeAssistantError(msg)
 
         cleaned_name = str(transition_name).strip()
         if not cleaned_name:
-            raise HomeAssistantError("transition_name must not be empty.")
+            msg = "transition_name must not be empty."
+            raise HomeAssistantError(msg)
 
         cleaned_floor_ids = self._normalize_transition_floor_ids(
             transition_floor_ids=transition_floor_ids,
             room_floor_id=area.floor_id,
         )
         if not cleaned_floor_ids:
-            raise HomeAssistantError("transition_floor_ids must include at least one floor other than the room floor.")
+            msg = "transition_floor_ids must include at least one floor other than the room floor."
+            raise HomeAssistantError(msg)
 
         started_dt = now()
         session = _CaptureSession(
@@ -1119,12 +1207,88 @@ class BermudaCalibrationManager:
             "expected_complete_at": expected_complete_at,
         }
 
+    async def async_start_device_offset_session(
+        self,
+        *,
+        device_id: str,
+        x_m: float,
+        y_m: float,
+        z_m: float,
+        duration_s: int = 60,
+    ) -> dict[str, Any]:
+        """
+        Validate and start a per-device RSSI offset capture.
+
+        The device is held still at a known reference position; observed
+        per-anchor RSSI medians are compared against the fitted ranging model's
+        expectations to derive one global offset for the device. Calibration
+        samples themselves are untouched — the map stays single-device.
+        """
+        await self._store.async_ensure_loaded()
+        if duration_s < 1:
+            msg = "Device offset capture duration must be at least 1 second."
+            raise HomeAssistantError(msg)
+        self._raise_if_anchors_misconfigured()
+
+        ranging_model = getattr(self._coordinator, "ranging_model", None)
+        current_layout_hash = self.current_anchor_layout_hash
+        if ranging_model is None or not ranging_model.has_model(current_layout_hash):
+            msg = (
+                "Device offset calibration needs a fitted ranging model for the current anchor "
+                "layout. Record calibration samples first."
+            )
+            raise HomeAssistantError(msg)
+
+        device = self._resolve_device_from_registry_id(device_id)
+        if device is None:
+            msg = "Selected device is not currently available in Bermuda."
+            raise HomeAssistantError(msg)
+
+        if any(session.device_id == device_id for session in self._sessions.values()):
+            msg = "A capture session is already running for that device."
+            raise HomeAssistantError(msg)
+
+        started_dt = now()
+        session = _CaptureSession(
+            session_type="device_offset",
+            session_id=f"offset_{uuid4().hex[:12]}",
+            started_at=started_dt.isoformat(),
+            started_monotonic=monotonic_time_coarse(),
+            duration_s=duration_s,
+            device_id=device_id,
+            device_name=device.name,
+            device_address=device.address,
+            room_area_id="",
+            room_name="(offset reference point)",
+            room_floor_id=None,
+            position={"x_m": float(x_m), "y_m": float(y_m), "z_m": float(z_m)},
+            sample_radius_m=DEFAULT_SAMPLE_RADIUS_M,
+        )
+        expected_complete_at = self._register_session(session)
+        return {
+            "session_id": session.session_id,
+            "started_at": session.started_at,
+            "device_id": device_id,
+            "device_name": device.name,
+            "x_m": float(x_m),
+            "y_m": float(y_m),
+            "z_m": float(z_m),
+            "duration_s": duration_s,
+            "expected_complete_at": expected_complete_at,
+        }
+
     def _register_session(self, session: _CaptureSession) -> str:
         """Track and schedule one active capture session."""
         expected_complete_at = (now() + timedelta(seconds=session.duration_s)).isoformat()
         self._sessions[session.session_id] = session
         if session.session_type == "transition":
             self._update_transition_session_notification(
+                session,
+                status="started",
+                expected_complete_at=expected_complete_at,
+            )
+        elif session.session_type == "device_offset":
+            self._update_device_offset_notification(
                 session,
                 status="started",
                 expected_complete_at=expected_complete_at,
@@ -1188,7 +1352,8 @@ class BermudaCalibrationManager:
         await self._store.async_acknowledge_layout_hash(self.current_anchor_layout_hash)
 
     async def async_update_samples_to_current_geometry(self) -> int:
-        """Adopt the current anchor geometry for all stored samples.
+        """
+        Adopt the current anchor geometry for all stored samples.
 
         Mutates ordinary samples, transition samples, and dependent transition-zone
         layout hashes consistently. Refuses to run when the current geometry is
@@ -1205,9 +1370,8 @@ class BermudaCalibrationManager:
 
         current_anchor_index = self._current_anchor_identity_index()
         if not current_anchor_index:
-            raise HomeAssistantError(
-                "Cannot update stored sample geometry: no current anchor geometry is configured."
-            )
+            msg = "Cannot update stored sample geometry: no current anchor geometry is configured."
+            raise HomeAssistantError(msg)
         incomplete_scanners = self.incomplete_current_anchor_scanners()
         if incomplete_scanners:
             raise HomeAssistantError(
@@ -1239,10 +1403,11 @@ class BermudaCalibrationManager:
                     "z_m": current_anchor["z_m"],
                 }
                 if any(value is None for value in replacement.values()):
-                    raise HomeAssistantError(
+                    msg = (
                         "Cannot update stored sample geometry: refusing to write a null coordinate "
                         f"for scanner {scanner_address}."
                     )
+                    raise HomeAssistantError(msg)
                 if (anchor.get("anchor_position") or {}) != replacement:
                     anchor["anchor_position"] = replacement
                     sample_changed = True
@@ -1287,7 +1452,8 @@ class BermudaCalibrationManager:
                 await zone_store.async_save_zone(zone)
 
     async def async_repair_transition_sample_null_z(self) -> dict[str, int]:
-        """Backfill code-corrupted null anchor Z values in stored transition samples.
+        """
+        Backfill code-corrupted null anchor Z values in stored transition samples.
 
         Only fills Z when the stored X/Y exactly match the current anchor for the
         same proven scanner identity and that anchor has a known Z — i.e. the null
@@ -1418,6 +1584,11 @@ class BermudaCalibrationManager:
                     status="failed",
                     quality_reason=failure_reason,
                 )
+            elif session.session_type == "device_offset":
+                self._emit_device_offset_event(
+                    session=session,
+                    result={"status": "failed", "reason": failure_reason},
+                )
             else:
                 self._emit_completion_event(
                     session=session,
@@ -1425,6 +1596,10 @@ class BermudaCalibrationManager:
                     quality_status="failed",
                     quality_reason=failure_reason,
                 )
+            return
+
+        if session.session_type == "device_offset":
+            await self._async_finalize_device_offset_session(session)
             return
 
         if session.session_type == "transition":
@@ -1639,10 +1814,7 @@ class BermudaCalibrationManager:
         packet_score = min(1.0, median_packet_count / 3.0) if median_packet_count > 0 else 0.0
         stability_score = max(0.0, min(1.0, 1.0 - (median_rssi_mad_db / 10.0)))
         quality_score_01 = round(
-            (0.35 * anchor_score)
-            + (0.25 * packet_score)
-            + (0.20 * stability_score)
-            + (0.20 * geometry_quality_01),
+            (0.35 * anchor_score) + (0.25 * packet_score) + (0.20 * stability_score) + (0.20 * geometry_quality_01),
             3,
         )
         quality_level = self._quality_level_from_metrics(
@@ -1848,11 +2020,7 @@ class BermudaCalibrationManager:
                 scanner_address=str(scanner_address),
                 device_id=device_id or None,
                 filtered_rssi=float(rssi_median),
-                live_rssi_dispersion=(
-                    float(anchor.get("rssi_mad"))
-                    if anchor.get("rssi_mad") is not None
-                    else None
-                ),
+                live_rssi_dispersion=(float(anchor.get("rssi_mad")) if anchor.get("rssi_mad") is not None else None),
                 live_packet_count=int(anchor.get("packet_count") or 1),
             )
             if range_estimate is None:
@@ -1995,7 +2163,9 @@ class BermudaCalibrationManager:
 
         for sample in layout_samples:
             sample_room_area_id = str(sample.get("room_area_id") or "")
-            transition_floor_ids = [str(floor_id) for floor_id in (sample.get("transition_floor_ids") or []) if floor_id]
+            transition_floor_ids = [
+                str(floor_id) for floor_id in (sample.get("transition_floor_ids") or []) if floor_id
+            ]
             room_context_match = room_area_id == sample_room_area_id if room_area_id is not None else False
             supports_challenger = (
                 challenger_floor_id in transition_floor_ids if challenger_floor_id is not None else False
@@ -2003,9 +2173,9 @@ class BermudaCalibrationManager:
             if room_context_match:
                 diagnostics["transition_matching_room_count"] = int(diagnostics["transition_matching_room_count"]) + 1
             if supports_challenger:
-                diagnostics["transition_supporting_floor_count"] = int(
-                    diagnostics["transition_supporting_floor_count"]
-                ) + 1
+                diagnostics["transition_supporting_floor_count"] = (
+                    int(diagnostics["transition_supporting_floor_count"]) + 1
+                )
 
             position = sample.get("position") or {}
             distance_m: float | None = None
@@ -2031,13 +2201,10 @@ class BermudaCalibrationManager:
                 elif not room_quality_ok:
                     support_01 = 0.5
 
-            if (
-                support_01 > best_support_01
-                or (
-                    math.isclose(support_01, best_support_01)
-                    and distance_m is not None
-                    and (best_distance_m is None or distance_m < best_distance_m)
-                )
+            if support_01 > best_support_01 or (
+                math.isclose(support_01, best_support_01)
+                and distance_m is not None
+                and (best_distance_m is None or distance_m < best_distance_m)
             ):
                 best_support_01 = support_01
                 best_sample = sample
@@ -2072,7 +2239,8 @@ class BermudaCalibrationManager:
             if not candidate or candidate == room_floor_id or candidate in cleaned:
                 continue
             if self._coordinator.fr.async_get_floor(candidate) is None:
-                raise HomeAssistantError(f"Transition floor '{candidate}' does not exist.")
+                msg = f"Transition floor '{candidate}' does not exist."
+                raise HomeAssistantError(msg)
             cleaned.append(candidate)
         return cleaned
 
@@ -2090,6 +2258,135 @@ class BermudaCalibrationManager:
             result = callback()
             if inspect.isawaitable(result):
                 await result
+
+    async def _async_finalize_device_offset_session(self, session: _CaptureSession) -> None:
+        """Compute and persist the device offset from a completed capture."""
+        current_layout_hash = self.current_anchor_layout_hash
+        ranging_model = getattr(self._coordinator, "ranging_model", None)
+        if ranging_model is None or not ranging_model.has_model(current_layout_hash):
+            self._emit_device_offset_event(
+                session=session,
+                result={"status": "failed", "reason": "no_ranging_model"},
+            )
+            return
+
+        reference_x = float(session.position["x_m"])
+        reference_y = float(session.position["y_m"])
+        reference_z = float(session.position["z_m"])
+        observations: list[dict[str, Any]] = []
+        for scanner_address, accumulator in sorted(session.anchors.items()):
+            if not accumulator.values:
+                continue
+            anchor_position = accumulator.anchor_position
+            anchor_x = anchor_position.get("x_m")
+            anchor_y = anchor_position.get("y_m")
+            anchor_z = anchor_position.get("z_m")
+            if anchor_x is None or anchor_y is None or anchor_z is None:
+                continue
+            distance_m = math.sqrt(
+                ((reference_x - float(anchor_x)) ** 2)
+                + ((reference_y - float(anchor_y)) ** 2)
+                + ((reference_z - float(anchor_z)) ** 2)
+            )
+            observations.append(
+                {
+                    "scanner_address": scanner_address,
+                    "scanner_name": accumulator.scanner_name,
+                    "rssi_median": float(statistics.median(accumulator.values)),
+                    "distance_m": distance_m,
+                    "packet_count": len(accumulator.values),
+                }
+            )
+
+        result = compute_device_offset(
+            observations,
+            lambda scanner_address, distance_m: ranging_model.predict_rssi(
+                layout_hash=current_layout_hash,
+                scanner_address=scanner_address,
+                device_id=session.device_id,
+                distance_m=distance_m,
+            ),
+        )
+
+        if result["status"] == "ok":
+            record = {
+                "device_name": session.device_name,
+                "device_address": session.device_address,
+                "offset_db": result["offset_db"],
+                "spread_db": result["spread_db"],
+                "anchor_count": result["anchor_count"],
+                "anchors": result["anchors"],
+                "anchor_layout_hash": current_layout_hash,
+                "reference_position": dict(session.position),
+                "captured_at": now().isoformat(),
+                "duration_s": session.duration_s,
+            }
+            offset_store = getattr(self._coordinator, "device_offset_store", None)
+            if offset_store is not None:
+                await offset_store.async_save_offset(session.device_id, record)
+            else:
+                result = {"status": "failed", "reason": "offset_store_unavailable"}
+
+        self._emit_device_offset_event(session=session, result=result)
+
+    def _emit_device_offset_event(
+        self,
+        *,
+        session: _CaptureSession,
+        result: dict[str, Any],
+    ) -> None:
+        """Emit the completion event and notification for a device offset capture."""
+        self.hass.bus.async_fire(
+            DEVICE_OFFSET_EVENT_CAPTURED,
+            {
+                "session_id": session.session_id,
+                "device_id": session.device_id,
+                "status": result.get("status"),
+                "reason": result.get("reason"),
+                "offset_db": result.get("offset_db"),
+                "spread_db": result.get("spread_db"),
+                "anchor_count": result.get("anchor_count"),
+            },
+        )
+        self._update_device_offset_notification(
+            session,
+            status=str(result.get("status")),
+            result=result,
+        )
+
+    def _update_device_offset_notification(
+        self,
+        session: _CaptureSession,
+        *,
+        status: str,
+        expected_complete_at: str | None = None,
+        result: dict[str, Any] | None = None,
+    ) -> None:
+        """Create or update the persistent notification for one offset capture."""
+        message = (
+            f"Device: {session.device_name}\n"
+            f"Reference position: x={session.position['x_m']:.3f}, "
+            f"y={session.position['y_m']:.3f}, z={session.position['z_m']:.3f}\n"
+            f"Capture duration: {session.duration_s} s\n"
+            f"Status: {status}"
+        )
+        if expected_complete_at is not None:
+            message += f"\nExpected complete at: {expected_complete_at}"
+        if result is not None:
+            if result.get("offset_db") is not None:
+                message += (
+                    f"\nOffset: {float(result['offset_db']):+.1f} dB "
+                    f"(spread={float(result.get('spread_db') or 0.0):.1f} dB, "
+                    f"anchors={int(result.get('anchor_count') or 0)})"
+                )
+            if result.get("reason"):
+                message += f"\nReason: {result['reason']}"
+        persistent_notification.async_create(
+            self.hass,
+            message,
+            title="BLE Trilateration device RSSI offset",
+            notification_id=f"ble_trilateration_device_offset_{session.session_id}",
+        )
 
     def _emit_completion_event(
         self,
@@ -2175,7 +2472,9 @@ class BermudaCalibrationManager:
     ) -> None:
         """Create or update the persistent notification for one transition session."""
         room_floor_name = self._floor_name_for_id(session.room_floor_id)
-        transition_floor_names = ", ".join(self._floor_name_for_id(floor_id) for floor_id in session.transition_floor_ids)
+        transition_floor_names = ", ".join(
+            self._floor_name_for_id(floor_id) for floor_id in session.transition_floor_ids
+        )
         message = (
             f"Device: {session.device_name}\n"
             f"Room: {session.room_name}\n"
@@ -2221,14 +2520,13 @@ class BermudaCalibrationManager:
         floor = self._coordinator.fr.async_get_floor(floor_id)
         return floor.name if floor is not None else str(floor_id)
 
-    async def async_migrate_transition_samples_to_zones(
-        self, transition_zone_store
-    ) -> int:
+    async def async_migrate_transition_samples_to_zones(self, transition_zone_store) -> int:
         """Migrate existing transition samples to TransitionZone objects. Non-destructive."""
-        from collections import defaultdict
-        from datetime import datetime, timezone
-        from .transition_zone_store import TransitionZone, TransitionZoneCapture
         import uuid
+        from collections import defaultdict
+        from datetime import datetime
+
+        from .transition_zone_store import TransitionZone, TransitionZoneCapture
 
         if transition_zone_store.zones:
             return 0  # Already populated, skip
@@ -2270,7 +2568,7 @@ class BermudaCalibrationManager:
             floor_ids = sorted(all_floor_ids)
             floor_pairs = []
             for i, a in enumerate(floor_ids):
-                for b in floor_ids[i+1:]:
+                for b in floor_ids[i + 1 :]:
                     floor_pairs.append((a, b))
                     floor_pairs.append((b, a))
 
@@ -2280,7 +2578,7 @@ class BermudaCalibrationManager:
                 captures=captures,
                 floor_pairs=floor_pairs,
                 anchor_layout_hash=layout_hash,
-                created_at=datetime.now(timezone.utc).isoformat(),
+                created_at=datetime.now(UTC).isoformat(),
             )
             await transition_zone_store.async_save_zone(zone)
             count += 1

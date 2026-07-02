@@ -46,6 +46,32 @@ record_calibration_sample:
       required: false
       example: "Near sofa"
       default: ""
+calibrate_device_offset:
+  name: Calibrate device RSSI offset
+  fields:
+    device_id:
+      required: true
+      example: "abc123def456"
+    x_y_z_m:
+      required: false
+      example: "12.5,0.5,3.7"
+    x_m:
+      required: false
+      example: "4.2"
+    y_m:
+      required: false
+      example: "1.8"
+    z_m:
+      required: false
+      example: "1.1"
+    duration_s:
+      required: false
+      example: "60"
+      default: 60
+    clear:
+      required: false
+      example: "false"
+      default: false
 record_transition_sample:
   name: Record transition sample
   fields:

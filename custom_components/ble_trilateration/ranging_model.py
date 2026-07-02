@@ -68,7 +68,8 @@ class BermudaRangingModel:
         self._models: dict[str, _LayoutModel] = {}
 
     async def async_rebuild(self) -> None:
-        """Rebuild all layout models from saved calibration samples.
+        """
+        Rebuild all layout models from saved calibration samples.
 
         NOTE: _fit_layout calls numpy.linalg.lstsq synchronously. For typical
         home deployments (tens of samples) this is negligible. If sample counts
@@ -115,9 +116,7 @@ class BermudaRangingModel:
                     + ((float(sample_z) - float(anchor_z)) ** 2)
                 )
                 scanner_key = (
-                    canonical_key(str(scanner_address))
-                    if callable(canonical_key)
-                    else str(scanner_address).lower()
+                    canonical_key(str(scanner_address)) if callable(canonical_key) else str(scanner_address).lower()
                 )
                 grouped_rows.setdefault(layout_hash, []).append(
                     _TrainingRow(
@@ -171,7 +170,7 @@ class BermudaRangingModel:
             return None
 
         log10_distance = (observed_rssi - intercept_dbm) / slope
-        range_m = 10 ** log10_distance
+        range_m = 10**log10_distance
         range_m = max(MIN_DISTANCE_M, min(range_m, MAX_DISTANCE_M))
 
         sigma_rssi = model.scanner_rssi_rmse_db.get(scanner_key, model.global_rssi_rmse_db)
@@ -196,6 +195,38 @@ class BermudaRangingModel:
         sigma_m = max(0.001, sigma_m)
 
         return RangeEstimate(range_m=range_m, sigma_m=sigma_m, source="learned")
+
+    def predict_rssi(
+        self,
+        *,
+        layout_hash: str,
+        scanner_address: str,
+        device_id: str | None,
+        distance_m: float,
+    ) -> float | None:
+        """
+        Return the expected RSSI at a known distance under the fitted model.
+
+        This is the inverse of estimate_range: it predicts what the calibration
+        reference scale expects to see, including any fitted per-scanner and
+        per-device terms. Used to measure a device's global RSSI offset against
+        the calibrated map.
+        """
+        model = self._models.get(layout_hash)
+        if model is None:
+            return None
+        canonical_key = getattr(self._calibration, "canonical_scanner_key", None)
+        scanner_key = canonical_key(scanner_address) if callable(canonical_key) else scanner_address.lower()
+        device_bias_db = model.device_bias_db.get(device_id, 0.0) if device_id is not None else 0.0
+        log10_distance = math.log10(max(float(distance_m), MIN_DISTANCE_M))
+
+        if scanner_key in model.scanner_slope_db_per_log10_m:
+            intercept_dbm = model.scanner_slope_intercept_db[scanner_key]
+            slope = model.scanner_slope_db_per_log10_m[scanner_key]
+        else:
+            intercept_dbm = model.intercept_dbm + model.scanner_bias_db.get(scanner_key, 0.0)
+            slope = model.slope_db_per_log10_m
+        return intercept_dbm + (slope * log10_distance) + device_bias_db
 
     def has_model(self, layout_hash: str) -> bool:
         """Return whether a fitted model exists for the layout."""
@@ -295,10 +326,7 @@ class BermudaRangingModel:
                 dtype=float,
             )
             sub_observed = np.asarray(
-                [
-                    row.rssi_dbm - device_bias_db.get(row.device_id, 0.0)
-                    for row in scanner_rows
-                ],
+                [row.rssi_dbm - device_bias_db.get(row.device_id, 0.0) for row in scanner_rows],
                 dtype=float,
             )
             sub_coeffs, *_subrest = np.linalg.lstsq(sub_design, sub_observed, rcond=None)

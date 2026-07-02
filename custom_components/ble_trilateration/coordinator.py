@@ -57,16 +57,9 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.util.dt import get_age, now
 
 from .bermuda_device import BermudaDevice
+from .bermuda_irk import BermudaIrkManager
 from .calibration import BermudaCalibrationManager
 from .calibration_store import BermudaCalibrationStore
-from .floor_config_store import FloorConfigStore
-from .transition_zone_store import BermudaTransitionZoneStore, TransitionZone
-from .reachability_gate import ReachabilityGate, ReachabilityDecision
-from .bermuda_irk import BermudaIrkManager
-from .ranging_model import BermudaRangingModel
-from .room_classifier import BermudaRoomClassifier, GlobalFingerprintResult
-from .scanner_anchor_store import BermudaScannerAnchorStore
-from .trilat_bootstrap_store import BermudaTrilatBootstrapStore, TrilatBootstrapRecord
 from .const import (
     _LOGGER,
     _LOGGER_SPAM_LESS,
@@ -78,9 +71,9 @@ from .const import (
     CONF_DEVICES,
     CONF_DEVTRACK_TIMEOUT,
     CONF_MAX_VELOCITY,
+    CONF_SMOOTHING_SAMPLES,
     CONF_TRILAT_CROSS_FLOOR_PENALTY_DB,
     CONF_TRILAT_REACHABILITY_GATE,
-    CONF_SMOOTHING_SAMPLES,
     CONF_UPDATE_INTERVAL,
     DEFAULT_DEVTRACK_TIMEOUT,
     DEFAULT_MAX_VELOCITY,
@@ -92,10 +85,10 @@ from .const import (
     DISTANCE_TIMEOUT,
     DOMAIN,
     DOMAIN_PRIVATE_BLE_DEVICE,
-    MOBILITY_STATIONARY,
     METADEVICE_IBEACON_DEVICE,
     METADEVICE_TYPE_IBEACON_SOURCE,
     METADEVICE_TYPE_PRIVATE_BLE_SOURCE,
+    MOBILITY_STATIONARY,
     PRUNE_MAX_COUNT,
     PRUNE_TIME_DEFAULT,
     PRUNE_TIME_INTERVAL,
@@ -111,17 +104,25 @@ from .const import (
     UPDATE_INTERVAL,
     debug_device_match,
 )
+from .device_offset_store import BermudaDeviceOffsetStore
+from .floor_config_store import FloorConfigStore
+from .ranging_model import BermudaRangingModel
+from .reachability_gate import ReachabilityDecision, ReachabilityGate
+from .room_classifier import BermudaRoomClassifier, GlobalFingerprintResult
+from .scanner_anchor_store import BermudaScannerAnchorStore
+from .transition_zone_store import BermudaTransitionZoneStore
+from .trilat_bootstrap_store import BermudaTrilatBootstrapStore, TrilatBootstrapRecord
 from .trilateration import (
     AnchorMeasurement,
-    SolveQualityMetrics,
     SolvePrior2D,
     SolvePrior3D,
+    SolveQualityMetrics,
     anchor_centroid,
     anchor_centroid_3d,
-    solve_quality_metrics_2d,
-    solve_quality_metrics_3d,
     solve_2d_soft_l1,
     solve_3d_soft_l1,
+    solve_quality_metrics_2d,
+    solve_quality_metrics_3d,
 )
 from .util import mac_explode_formats, mac_norm
 
@@ -264,6 +265,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         self._transition_zone_store = BermudaTransitionZoneStore(hass)
         self._floor_config_store = FloorConfigStore(hass)
         self._trilat_bootstrap_store = BermudaTrilatBootstrapStore(hass)
+        self.device_offset_store = BermudaDeviceOffsetStore(hass)
         self._reachability_gate = ReachabilityGate()
         self.calibration = BermudaCalibrationManager(hass, self, self.calibration_store)
         self.ranging_model = BermudaRangingModel(self.calibration)
@@ -394,6 +396,25 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         )
         self.config_entry.async_on_unload(lambda: hass.services.async_remove(DOMAIN, "record_transition_sample"))
 
+        hass.services.async_register(
+            DOMAIN,
+            "calibrate_device_offset",
+            self.service_calibrate_device_offset,
+            vol.Schema(
+                {
+                    vol.Required("device_id"): cv.string,
+                    vol.Optional("x_y_z_m"): cv.string,
+                    vol.Optional("x_m"): vol.Coerce(float),
+                    vol.Optional("y_m"): vol.Coerce(float),
+                    vol.Optional("z_m"): vol.Coerce(float),
+                    vol.Optional("duration_s", default=60): vol.All(vol.Coerce(int), vol.Range(min=1)),
+                    vol.Optional("clear", default=False): cv.boolean,
+                }
+            ),
+            SupportsResponse.OPTIONAL,
+        )
+        self.config_entry.async_on_unload(lambda: hass.services.async_remove(DOMAIN, "calibrate_device_offset"))
+
         # Register for newly discovered / changed BLE devices
         if self.config_entry is not None:
             self.config_entry.async_on_unload(
@@ -415,13 +436,12 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         await self._transition_zone_store.async_load()
         await self._floor_config_store.async_load()
         await self._trilat_bootstrap_store.async_load()
+        await self.device_offset_store.async_load()
         await self.calibration.async_initialize()
         self._restore_scanner_anchors_from_store()
         self.calibration.refresh_layout_identity()
         await self._async_run_transition_null_z_repair()
-        migrated = await self.calibration.async_migrate_transition_samples_to_zones(
-            self._transition_zone_store
-        )
+        migrated = await self.calibration.async_migrate_transition_samples_to_zones(self._transition_zone_store)
         if migrated:
             _LOGGER.debug("Migrated %d transition sample group(s) to TransitionZone store", migrated)
         self.calibration.register_change_callback(self.async_handle_calibration_samples_changed)
@@ -501,8 +521,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         ]
         if not configured_anchor_scanners:
             scannerlist = [
-                f"{scanner.name} [{scanner.address}]"
-                for scanner in sorted(self._scanners, key=lambda s: s.name)
+                f"{scanner.name} [{scanner.address}]" for scanner in sorted(self._scanners, key=lambda s: s.name)
             ]
             self._async_manage_repair_trilat_without_anchors(scannerlist)
         else:
@@ -622,7 +641,8 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         return str(scanner_address).lower()
 
     async def _async_run_transition_null_z_repair(self) -> None:
-        """Run the null-Z transition repair and log when it changes anything.
+        """
+        Run the null-Z transition repair and log when it changes anything.
 
         Called at initialize and again whenever scanner anchors (re)load, because
         the repair can only prove anchor identity once the scanner list and its
@@ -655,7 +675,8 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         return self.calibration.classify_stored_samples()
 
     def scanner_floor_z_diagnostics(self) -> list[dict[str, Any]]:
-        """Validate scanner anchor Z against the HA floor assignment, not nearest floor_z.
+        """
+        Validate scanner anchor Z against the HA floor assignment, not nearest floor_z.
 
         Each row shows the scanner's assigned floor, its anchor Z, the configured
         floor surface Z, whether the anchor Z falls inside the assigned floor's
@@ -723,13 +744,29 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
     def get_registry_id_for_device(self, device: BermudaDevice) -> str | None:
         """Return the HA device registry id for a Bermuda device when available."""
         if ":" in device.address:
-            if registry_device := self.dr.async_get_device(connections={(dr.CONNECTION_BLUETOOTH, device.address.upper())}):
+            if registry_device := self.dr.async_get_device(
+                connections={(dr.CONNECTION_BLUETOOTH, device.address.upper())}
+            ):
                 return registry_device.id
         if registry_device := self.dr.async_get_device(connections={(DOMAIN_PRIVATE_BLE_DEVICE, device.address)}):
             return registry_device.id
         if registry_device := self.dr.async_get_device(connections={("ibeacon", device.address)}):
             return registry_device.id
         return None
+
+    def device_rssi_offset_db(self, device: BermudaDevice) -> float:
+        """
+        Return the device's calibrated global RSSI offset, or 0.0 when unknown.
+
+        Positive means the device reads hotter than the calibration reference
+        device; subtracting it maps live RSSI onto the reference scale that the
+        ranging model and room fingerprints were trained on.
+        """
+        offset_store = getattr(self, "device_offset_store", None)
+        if offset_store is None or not offset_store.has_offsets:
+            return 0.0
+        offset = offset_store.get_offset_db(self.get_registry_id_for_device(device))
+        return offset if offset is not None else 0.0
 
     def estimate_sampled_range(
         self,
@@ -743,6 +780,9 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         """Estimate range for one advert using the sample-derived model."""
         scanner = self.devices.get(scanner_address)
         timestamp_health_penalty = self._timestamp_health_penalty(scanner)
+        rssi_offset_db = self.device_rssi_offset_db(device)
+        if filtered_rssi is not None and rssi_offset_db:
+            filtered_rssi = filtered_rssi - rssi_offset_db
         return self.ranging_model.estimate_range(
             layout_hash=self.current_anchor_layout_hash(),
             scanner_address=scanner_address,
@@ -1797,6 +1837,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
 
         live_rssi_by_scanner: dict[str, float] = {}
         live_floor_adverts: list[BermudaAdvert] = []
+        rssi_offset_db = self.device_rssi_offset_db(device)
         for advert in self._latest_adverts_by_scanner(device).values():
             if advert.stamp < nowstamp - DISTANCE_TIMEOUT:
                 continue
@@ -1811,7 +1852,9 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 window_rssi = advert.rssi_filtered
             if window_rssi is None:
                 continue
-            live_rssi_by_scanner[self.canonical_scanner_address(advert.scanner_address)] = float(window_rssi)
+            live_rssi_by_scanner[self.canonical_scanner_address(advert.scanner_address)] = (
+                float(window_rssi) - rssi_offset_db
+            )
         geometry_quality_01 = max(0.0, min(1.0, float(device.trilat_geometry_quality or 0.0) / 10.0))
         anisotropy_ratio, weak_axis = self._room_live_anisotropy(device, live_floor_adverts)
         solve_covariance_xy = self._room_live_covariance_xy(device, live_floor_adverts)
@@ -1939,9 +1982,8 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 state.room_challenger_evidence += evidence_increment
                 # A brand-new challenger always holds for one cycle so a single
                 # noisy classification can never flip the room on its own.
-                if (
-                    log_event == "challenger_started"
-                    or state.room_challenger_evidence < (self._ROOM_SWITCH_EVIDENCE_THRESHOLD - 1e-9)
+                if log_event == "challenger_started" or state.room_challenger_evidence < (
+                    self._ROOM_SWITCH_EVIDENCE_THRESHOLD - 1e-9
                 ):
                     hold_reason = (
                         f"room_evidence({state.room_challenger_evidence:.2f}/"
@@ -2249,7 +2291,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
     def _log_room_decision_event(
         self,
         device: BermudaDevice,
-        state: "BermudaDataUpdateCoordinator.TrilatDecisionState",
+        state: BermudaDataUpdateCoordinator.TrilatDecisionState,
         *,
         event: str,
         stable_area_id: str | None,
@@ -2324,7 +2366,8 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         transition_strength: float = 1.0,
         weak_axis_aligned: bool = False,
     ) -> float:
-        """Return this cycle's evidence contribution toward a room switch.
+        """
+        Return this cycle's evidence contribution toward a room switch.
 
         Strong, unambiguous classifications accumulate quickly (switching within
         one or two cycles); weak margins, implausible transitions, sparse rooms,
@@ -2755,7 +2798,8 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         device: BermudaDevice,
         state: TrilatDecisionState,
     ) -> None:
-        """Warm-start floor/geometry state from the last trusted trilat solution.
+        """
+        Warm-start floor/geometry state from the last trusted trilat solution.
 
         Stale-layout or low-quality records must not seed current positioning:
         a record only restores anything when its layout hash is geometry-equivalent
@@ -2990,7 +3034,8 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         floor_z_m: float | None = None,
         layout_hash: str = "",
     ) -> SolvePrior2D | SolvePrior3D | None:
-        """Build a soft predicted-position prior for the next trilat solve.
+        """
+        Build a soft predicted-position prior for the next trilat solve.
 
         When *floor_z_m* is provided (Step 10) the phone-height band prior
         [floor_z_m, floor_z_m + 1.2 m] is combined with the motion-based Z
@@ -3149,10 +3194,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         if age_s >= window_s:
             return 1.0
         remaining = 1.0 - (age_s / max(window_s, 1e-9))
-        return 1.0 + (
-            (self._TRILAT_FLOOR_SWITCH_PRIOR_SIGMA_MULTIPLIER - 1.0)
-            * remaining
-        )
+        return 1.0 + ((self._TRILAT_FLOOR_SWITCH_PRIOR_SIGMA_MULTIPLIER - 1.0) * remaining)
 
     @staticmethod
     def _apply_soft_vertical_prior(
@@ -3332,8 +3374,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         best_room_area_id = transition_diag.get("transition_best_room_area_id")
         transition_diag["transition_best_room_name"] = self.resolve_area_name(best_room_area_id)
         transition_diag["transition_best_floor_names"] = [
-            self._resolve_floor_name(str(floor_id))
-            for floor_id in transition_diag.get("transition_best_floor_ids", [])
+            self._resolve_floor_name(str(floor_id)) for floor_id in transition_diag.get("transition_best_floor_ids", [])
         ]
         device.trilat_floor_diagnostics.update(transition_diag)
 
@@ -3370,7 +3411,9 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 configured_anchor_scanners.append(scanner.address)
 
         if len(configured_anchor_scanners) == 0:
-            scannerlist = [f"{scanner.name} [{scanner.address}]" for scanner in sorted(self._scanners, key=lambda s: s.name)]
+            scannerlist = [
+                f"{scanner.name} [{scanner.address}]" for scanner in sorted(self._scanners, key=lambda s: s.name)
+            ]
             self._async_manage_repair_trilat_without_anchors(scannerlist)
         else:
             self._async_manage_repair_trilat_without_anchors([])
@@ -3382,13 +3425,14 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
 
     def _update_floor_confidence(
         self,
-        state: "BermudaDataUpdateCoordinator.TrilatDecisionState",
+        state: BermudaDataUpdateCoordinator.TrilatDecisionState,
         *,
         selected_floor_id: str | None,
         floor_evidence: dict,
         floor_ambiguity: bool,
     ) -> None:
-        """Update floor_confidence after each inference cycle.
+        """
+        Update floor_confidence after each inference cycle.
 
         Confidence must keep decaying whenever the selected floor is not winning
         the evidence, so a previously confident floor cannot self-seal behind the
@@ -3415,7 +3459,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
 
     def _update_zone_traversal_tracker(
         self,
-        state: "BermudaDataUpdateCoordinator.TrilatDecisionState",
+        state: BermudaDataUpdateCoordinator.TrilatDecisionState,
         *,
         nowstamp: float,
         x_m: float,
@@ -3448,8 +3492,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         # Prune stale completed traversals
         cutoff = nowstamp - self._ZONE_TRAVERSAL_RECENCY_S * 2
         state.zone_traversal_history = {
-            zid: (e, x) for zid, (e, x) in state.zone_traversal_history.items()
-            if x == 0.0 or x > cutoff
+            zid: (e, x) for zid, (e, x) in state.zone_traversal_history.items() if x == 0.0 or x > cutoff
         }
 
     def _refresh_trilateration_for_device(self, device: BermudaDevice) -> None:
@@ -3478,7 +3521,9 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         bootstrap_hold_remaining_s = (
             max(0.0, state.bootstrap_hold_until - nowstamp)
             if bootstrap_hold_active
-            else 0.0 if bootstrap_restored else None
+            else 0.0
+            if bootstrap_restored
+            else None
         )
 
         def _anchor_effective_sigma_m(
@@ -3531,8 +3576,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             )
             device.trilat_floor_evidence = dict(floor_evidence)
             device.trilat_floor_evidence_names = {
-                floor_id: self._resolve_floor_name(floor_id)
-                for floor_id in floor_evidence
+                floor_id: self._resolve_floor_name(floor_id) for floor_id in floor_evidence
             }
             challenger_dwell_s = None
             if state.floor_challenger_id is not None and state.floor_challenger_since > 0.0:
@@ -3652,18 +3696,13 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 anchor_x = self.get_scanner_anchor_x(scanner.address)
                 anchor_y = self.get_scanner_anchor_y(scanner.address)
                 sync_state = (
-                    scanner.timestamp_sync_diagnostics().get("state")
-                    if getattr(scanner, "is_scanner", False)
-                    else None
+                    scanner.timestamp_sync_diagnostics().get("state") if getattr(scanner, "is_scanner", False) else None
                 )
                 if advert is None:
                     status = "no_advert"
                 elif advert.stamp < nowstamp - DISTANCE_TIMEOUT:
                     status = "rejected_stale"
-                elif (
-                    anchor_x is None
-                    or anchor_y is None
-                ):
+                elif anchor_x is None or anchor_y is None:
                     status = "rejected_missing_anchor"
                 elif advert.rssi_distance_raw is None:
                     status = "rejected_no_range"
@@ -3672,7 +3711,12 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 else:
                     status = "valid"
                 other_floor_sigma_m = None
-                if status == "valid_other_floor" and advert is not None and anchor_x is not None and anchor_y is not None:
+                if (
+                    status == "valid_other_floor"
+                    and advert is not None
+                    and anchor_x is not None
+                    and anchor_y is not None
+                ):
                     other_floor_sigma_m = _anchor_effective_sigma_m(advert, other_floor=True)
                 entries.append(
                     {
@@ -3690,16 +3734,12 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
 
         def _apply_anchor_status_entries(selected_floor_id: str | None = None) -> None:
             entries = _anchor_status_entries(selected_floor_id)
-            device.trilat_anchor_statuses = {
-                str(entry["scanner_address"]).lower(): entry
-                for entry in entries
-            }
+            device.trilat_anchor_statuses = {str(entry["scanner_address"]).lower(): entry for entry in entries}
             device.trilat_anchor_diagnostics = [self._format_anchor_status_entry(entry) for entry in entries]
             cross_floor_entries = [entry for entry in entries if entry.get("status") == "valid_other_floor"]
             device.trilat_cross_floor_anchor_count = len(cross_floor_entries)
             device.trilat_cross_floor_anchor_diagnostics = [
-                self._format_anchor_status_entry(entry)
-                for entry in cross_floor_entries
+                self._format_anchor_status_entry(entry) for entry in cross_floor_entries
             ]
 
         def _anchor_status_count_summary() -> str:
@@ -3745,6 +3785,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         evidence_inputs: list[tuple[str, float, float]] = []
         global_live_rssi_by_scanner: dict[str, float] = {}
         penalty_db = self.trilat_cross_floor_penalty_db()
+        rssi_offset_db = self.device_rssi_offset_db(device)
         for advert in latest.values():
             if advert.stamp < nowstamp - DISTANCE_TIMEOUT:
                 continue
@@ -3764,10 +3805,9 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 rssi_for_score = advert.rssi + advert.conf_rssi_offset
             if rssi_for_score is None:
                 continue
+            rssi_for_score = float(rssi_for_score) - rssi_offset_db
             evidence_inputs.append((scanner_floor_id, rssi_for_score, health_weight))
-            global_live_rssi_by_scanner[self.canonical_scanner_address(advert.scanner_address)] = float(
-                rssi_for_score
-            )
+            global_live_rssi_by_scanner[self.canonical_scanner_address(advert.scanner_address)] = float(rssi_for_score)
 
         layout_hash = self.current_anchor_layout_hash() if getattr(self, "calibration", None) is not None else ""
         fingerprint_result = GlobalFingerprintResult(area_id=None, floor_id=None, reason="no_trained_rooms")
@@ -3792,7 +3832,9 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 challenger_floor_id=None,
                 geometry_quality_01=geometry_quality_01,
             )
-            best_floor_ids = tuple(str(floor_id) for floor_id in (transition_diag.get("transition_best_floor_ids") or []) if floor_id)
+            best_floor_ids = tuple(
+                str(floor_id) for floor_id in (transition_diag.get("transition_best_floor_ids") or []) if floor_id
+            )
             best_within_radius = bool(transition_diag.get("transition_best_within_radius"))
             if best_within_radius and best_floor_ids:
                 support_01 = 1.0 if geometry_quality_01 >= 0.30 else 0.5
@@ -3831,7 +3873,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 return 0.0, None
             return state.recent_transition_support_01, age_s
 
-        transition_context_diag = _refresh_recent_transition_context()
+        _refresh_recent_transition_context()
 
         def _transition_support_for_challenger(challenger_floor_id: str | None) -> float:
             if (
@@ -3861,7 +3903,9 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 bootstrap_hold_active=bootstrap_hold_active,
                 bootstrap_hold_remaining_s=bootstrap_hold_remaining_s,
             )
-            device.set_trilat_unknown("ambiguous_floor", floor_id=state.floor_id, floor_name=self._resolve_floor_name(state.floor_id))
+            device.set_trilat_unknown(
+                "ambiguous_floor", floor_id=state.floor_id, floor_name=self._resolve_floor_name(state.floor_id)
+            )
             state.last_status = "unknown"
             state.last_geometry_quality_01 = 0.0
             state.last_residual_consistency_01 = 0.0
@@ -3882,9 +3926,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             evidence = 0.0
             for scanner_floor_id, rssi_for_score, health_weight in evidence_inputs:
                 adjusted_rssi = (
-                    rssi_for_score
-                    if scanner_floor_id == candidate_floor_id
-                    else rssi_for_score - penalty_db
+                    rssi_for_score if scanner_floor_id == candidate_floor_id else rssi_for_score - penalty_db
                 )
                 evidence += health_weight * self._score_rssi(adjusted_rssi)
             rssi_floor_evidence[candidate_floor_id] = evidence
@@ -3920,15 +3962,9 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 for fid in floors
             }
         elif _fp_norm:
-            floor_evidence = {
-                fid: _fp_norm.get(fid, 0.0) * 0.65 + rssi_norm.get(fid, 0.0) * 0.35
-                for fid in floors
-            }
+            floor_evidence = {fid: _fp_norm.get(fid, 0.0) * 0.65 + rssi_norm.get(fid, 0.0) * 0.35 for fid in floors}
         elif _z_norm:
-            floor_evidence = {
-                fid: rssi_norm.get(fid, 0.0) * 0.70 + _z_norm.get(fid, 0.0) * 0.30
-                for fid in floors
-            }
+            floor_evidence = {fid: rssi_norm.get(fid, 0.0) * 0.70 + _z_norm.get(fid, 0.0) * 0.30 for fid in floors}
         else:
             floor_evidence = rssi_floor_evidence
 
@@ -4054,7 +4090,9 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                             state.challenger_onset_time = nowstamp
                             state.challenger_motion_budget_m = 0.0
 
-                        current_floor_fp_score = fingerprint_result.floor_scores.get(state.floor_id, 0.0) if state.floor_id else 0.0
+                        current_floor_fp_score = (
+                            fingerprint_result.floor_scores.get(state.floor_id, 0.0) if state.floor_id else 0.0
+                        )
                         challenger_floor_fp_score = (
                             fingerprint_result.floor_scores.get(state.floor_challenger_id, 0.0)
                             if state.floor_challenger_id
@@ -4071,15 +4109,16 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                             and (
                                 fingerprint_result.floor_confidence >= self._TRILAT_FINGERPRINT_FLOOR_CONFIDENCE_HIGH
                                 or (
-                                    fingerprint_result.floor_confidence >= self._TRILAT_FINGERPRINT_FLOOR_CONFIDENCE_MODERATE
+                                    fingerprint_result.floor_confidence
+                                    >= self._TRILAT_FINGERPRINT_FLOOR_CONFIDENCE_MODERATE
                                     and current_floor_fp_ratio >= self._TRILAT_FINGERPRINT_FLOOR_SCORE_RATIO_HOLD
                                 )
                             )
                         )
 
                         transition_immediate_support_01 = _transition_support_for_challenger(state.floor_challenger_id)
-                        transition_recent_support_01, transition_recent_age_s = _recent_transition_support_for_challenger(
-                            state.floor_challenger_id
+                        transition_recent_support_01, transition_recent_age_s = (
+                            _recent_transition_support_for_challenger(state.floor_challenger_id)
                         )
                         transition_support_01 = max(transition_immediate_support_01, transition_recent_support_01)
                         if transition_support_01 >= self._TRILAT_TRANSITION_SUPPORT_REQUIRED:
@@ -4106,9 +4145,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                         )
 
                         # Hysteresis is the last line of defence (Phase 3 + 4 priority order).
-                        veto_hold_active = (
-                            nowstamp - state.last_fingerprint_veto_at
-                        ) < self._FINGERPRINT_VETO_HOLD_S
+                        veto_hold_active = (nowstamp - state.last_fingerprint_veto_at) < self._FINGERPRINT_VETO_HOLD_S
                         if challenger_effective_dwell_s >= effective_required_dwell_s:
                             if fingerprint_supports_current_floor:
                                 # Safety net: combined evidence already de-prioritises this
@@ -4150,7 +4187,9 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         bootstrap_hold_remaining_s = (
             max(0.0, state.bootstrap_hold_until - nowstamp)
             if bootstrap_hold_active
-            else 0.0 if bootstrap_restored else None
+            else 0.0
+            if bootstrap_restored
+            else None
         )
         selected_floor_id = state.floor_id or best_floor_id
         self._update_floor_confidence(
@@ -4234,14 +4273,17 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             )
 
         if _debug_this_device:
-            evidence_str = ", ".join(
-                f"{floor_id}={score:.3f}"
-                for floor_id, score in sorted(
-                    device.trilat_floor_evidence.items(),
-                    key=lambda row: row[1],
-                    reverse=True,
+            evidence_str = (
+                ", ".join(
+                    f"{floor_id}={score:.3f}"
+                    for floor_id, score in sorted(
+                        device.trilat_floor_evidence.items(),
+                        key=lambda row: row[1],
+                        reverse=True,
+                    )
                 )
-            ) or "none"
+                or "none"
+            )
             _LOGGER_TARGET_SPAM_LESS.debug(
                 f"trilat_floor_diag:{device.address}",
                 (
@@ -4323,14 +4365,10 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         anchor_count = len(anchors)
         state.last_anchor_floor_roles = current_anchor_floor_roles
         mean_sigma_m = (
-            (sum(confidence_anchor_sigmas_m) / len(confidence_anchor_sigmas_m))
-            if confidence_anchor_sigmas_m
-            else None
+            (sum(confidence_anchor_sigmas_m) / len(confidence_anchor_sigmas_m)) if confidence_anchor_sigmas_m else None
         )
         anchor_z_bounds = (
-            (min(same_floor_known_anchor_z), max(same_floor_known_anchor_z))
-            if same_floor_known_anchor_z
-            else None
+            (min(same_floor_known_anchor_z), max(same_floor_known_anchor_z)) if same_floor_known_anchor_z else None
         )
         if anchor_count < self._TRILAT_MIN_ANCHORS:
             fallback_xy = state.last_solution_xy
@@ -4403,17 +4441,12 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             if address in state.last_anchor_ranges
         ]
         mean_anchor_range_delta_m = (
-            sum(common_anchor_deltas) / len(common_anchor_deltas)
-            if common_anchor_deltas
-            else None
+            sum(common_anchor_deltas) / len(common_anchor_deltas) if common_anchor_deltas else None
         )
         # Step 11: Always run 3D when all anchors carry Z coordinates, regardless of
         # whether cross-floor anchors are included.  Cross-floor anchors already have
         # inflated sigma so the 3D solve naturally down-weights their Z contribution.
-        can_solve_3d = (
-            anchor_count >= self._TRILAT_MIN_ANCHORS_3D
-            and all(anchor.z_m is not None for anchor in anchors)
-        )
+        can_solve_3d = anchor_count >= self._TRILAT_MIN_ANCHORS_3D and all(anchor.z_m is not None for anchor in anchors)
         solver_dimension = "3d" if can_solve_3d else "2d"
 
         inputs_changed = (
@@ -4513,17 +4546,22 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 and state.last_solution_z is not None
                 and selected_floor_id == state.floor_id
             ):
-                if math.sqrt(
-                    ((state.last_solution_xy[0] - centroid_3d[0]) ** 2)
-                    + ((state.last_solution_xy[1] - centroid_3d[1]) ** 2)
-                    + ((state.last_solution_z - centroid_3d[2]) ** 2)
-                ) <= self._TRILAT_MAX_RESIDUAL_M:
+                if (
+                    math.sqrt(
+                        ((state.last_solution_xy[0] - centroid_3d[0]) ** 2)
+                        + ((state.last_solution_xy[1] - centroid_3d[1]) ** 2)
+                        + ((state.last_solution_z - centroid_3d[2]) ** 2)
+                    )
+                    <= self._TRILAT_MAX_RESIDUAL_M
+                ):
                     initial_guess_3d = (
                         state.last_solution_xy[0],
                         state.last_solution_xy[1],
                         state.last_solution_z,
                     )
-            if solve_prior is not None and (mean_anchor_range_delta_m is None or mean_anchor_range_delta_m <= self._TRILAT_MAX_RESIDUAL_M):
+            if solve_prior is not None and (
+                mean_anchor_range_delta_m is None or mean_anchor_range_delta_m <= self._TRILAT_MAX_RESIDUAL_M
+            ):
                 initial_guess_3d = (solve_prior.x_m, solve_prior.y_m, solve_prior.z_m)
             used_prior = solve_prior is not None
             solve_result = solve_3d_soft_l1(anchors, initial_guess=initial_guess_3d, prior=solve_prior)
@@ -4542,12 +4580,17 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 layout_hash=layout_hash,
             )
             if state.last_solution_xy is not None and selected_floor_id == state.floor_id:
-                if math.hypot(
-                    state.last_solution_xy[0] - centroid[0],
-                    state.last_solution_xy[1] - centroid[1],
-                ) <= self._TRILAT_MAX_RESIDUAL_M:
+                if (
+                    math.hypot(
+                        state.last_solution_xy[0] - centroid[0],
+                        state.last_solution_xy[1] - centroid[1],
+                    )
+                    <= self._TRILAT_MAX_RESIDUAL_M
+                ):
                     initial_guess_2d = state.last_solution_xy
-            if solve_prior is not None and (mean_anchor_range_delta_m is None or mean_anchor_range_delta_m <= self._TRILAT_MAX_RESIDUAL_M):
+            if solve_prior is not None and (
+                mean_anchor_range_delta_m is None or mean_anchor_range_delta_m <= self._TRILAT_MAX_RESIDUAL_M
+            ):
                 initial_guess_2d = (solve_prior.x_m, solve_prior.y_m)
             used_prior = solve_prior is not None
             solve_result = solve_2d_soft_l1(anchors, initial_guess=initial_guess_2d, prior=solve_prior)
@@ -4593,7 +4636,9 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
 
             fallback_residual = solve_result.residual_rms_m
             if fallback_residual is None:
-                fallback_residual = state.last_residual_m if state.last_residual_m is not None else (self._TRILAT_MAX_RESIDUAL_M * 1.5)
+                fallback_residual = (
+                    state.last_residual_m if state.last_residual_m is not None else (self._TRILAT_MAX_RESIDUAL_M * 1.5)
+                )
 
             filtered_xy, filtered_z = self._apply_trilat_motion_filter(
                 state,
@@ -4808,9 +4853,8 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             # instance forever.
             old_by_source = {mac_norm(scanner.source): scanner for scanner in self._hascanners}
             new_by_source = {mac_norm(scanner.source): scanner for scanner in _new_ha_scanners}
-            if (
-                old_by_source.keys() == new_by_source.keys()
-                and all(old_by_source[source] is new_by_source[source] for source in old_by_source)
+            if old_by_source.keys() == new_by_source.keys() and all(
+                old_by_source[source] is new_by_source[source] for source in old_by_source
             ):
                 return
 
@@ -4927,15 +4971,18 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         if packed_xyz is not None:
             parts = [part.strip() for part in str(packed_xyz).split(",")]
             if len(parts) != 3 or any(part == "" for part in parts):
-                raise vol.Invalid("x_y_z_m must be provided as 'x,y,z' in metres.")
+                msg = "x_y_z_m must be provided as 'x,y,z' in metres."
+                raise vol.Invalid(msg)
             try:
                 return tuple(float(part) for part in parts)
             except ValueError as err:
-                raise vol.Invalid("x_y_z_m must contain numeric x, y, and z values.") from err
+                msg = "x_y_z_m must contain numeric x, y, and z values."
+                raise vol.Invalid(msg) from err
 
         missing = [field for field in ("x_m", "y_m", "z_m") if field not in call_data]
         if missing:
-            raise vol.Invalid("Provide either x_y_z_m or all of x_m, y_m, and z_m.")
+            msg = "Provide either x_y_z_m or all of x_m, y_m, and z_m."
+            raise vol.Invalid(msg)
 
         return (float(call_data["x_m"]), float(call_data["y_m"]), float(call_data["z_m"]))
 
@@ -4955,6 +5002,25 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 sample_radius_m=sample_radius_m,
                 duration_s=call.data.get("duration_s", 60),
                 notes=call.data.get("notes") or None,
+            )
+        except HomeAssistantError as err:
+            raise vol.Invalid(str(err)) from err
+        return response
+
+    async def service_calibrate_device_offset(self, call: ServiceCall) -> ServiceResponse:
+        """Start a per-device RSSI offset capture, or clear a stored offset."""
+        device_id = call.data["device_id"]
+        if call.data.get("clear", False):
+            removed = await self.device_offset_store.async_remove_offset(device_id)
+            return {"device_id": device_id, "cleared": removed}
+        x_m, y_m, z_m = self._parse_calibration_position(call.data)
+        try:
+            response = await self.calibration.async_start_device_offset_session(
+                device_id=device_id,
+                x_m=x_m,
+                y_m=y_m,
+                z_m=z_m,
+                duration_s=call.data.get("duration_s", 60),
             )
         except HomeAssistantError as err:
             raise vol.Invalid(str(err)) from err

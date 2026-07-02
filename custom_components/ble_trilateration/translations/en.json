@@ -213,6 +213,40 @@
         }
       }
     },
+    "calibrate_device_offset": {
+      "name": "Calibrate Device RSSI Offset",
+      "description": "Measure one tracked device's global RSSI offset against the calibrated map by holding it still at a known reference position. The offset is applied to that device's live readings for ranging and room fingerprint matching; calibration samples themselves are not modified.",
+      "fields": {
+        "device_id": {
+          "name": "Device",
+          "description": "Home Assistant device registry id for the tracked device to calibrate."
+        },
+        "x_y_z_m": {
+          "name": "X, Y, Z Coordinates",
+          "description": "Reference position in metres as `x,y,z`, ideally a spot used for a calibration sample."
+        },
+        "x_m": {
+          "name": "X Coordinate",
+          "description": "Reference X coordinate in metres. Optional if `x_y_z_m` is provided."
+        },
+        "y_m": {
+          "name": "Y Coordinate",
+          "description": "Reference Y coordinate in metres. Optional if `x_y_z_m` is provided."
+        },
+        "z_m": {
+          "name": "Z Coordinate",
+          "description": "Reference Z coordinate in metres. Optional if `x_y_z_m` is provided."
+        },
+        "duration_s": {
+          "name": "Duration",
+          "description": "Capture duration in seconds."
+        },
+        "clear": {
+          "name": "Clear Stored Offset",
+          "description": "Remove the stored offset for this device instead of capturing a new one."
+        }
+      }
+    },
     "record_transition_sample": {
       "name": "Record Transition Sample",
       "description": "Start a timed capture for one BLE Trilateration-native floor-transition sample tied to a tracked device.",
