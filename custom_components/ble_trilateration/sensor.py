@@ -11,6 +11,7 @@ from homeassistant.const import (
     EntityCategory,
     UnitOfLength,
     UnitOfSpeed,
+    UnitOfTime,
 )
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import entity_registry as er
@@ -103,6 +104,7 @@ async def async_setup_entry(
             entities.append(BermudaSensorGeometryConditionNumber(coordinator, entry, address))
             entities.append(BermudaSensorNormalizedResidualRms(coordinator, entry, address))
             entities.append(BermudaSensorResidualRms(coordinator, entry, address))
+            entities.append(BermudaSensorBroadcastInterval(coordinator, entry, address))
             entities.append(BermudaSensorValidAnchorCount(coordinator, entry, address))
             entities.append(BermudaSensorStaleAnchorCount(coordinator, entry, address))
             entities.append(BermudaSensorNoAdvertAnchorCount(coordinator, entry, address))
@@ -1075,6 +1077,41 @@ class BermudaSensorResidualRms(BermudaSensorNumericDiagnostic):
     @property
     def native_unit_of_measurement(self):
         return UnitOfLength.METERS
+
+
+class BermudaSensorBroadcastInterval(BermudaSensorNumericDiagnostic):
+    """Diagnostic sensor estimating the device's advert broadcast interval."""
+
+    _diag_suffix = "broadcast_interval"
+    _diag_name = "Advert - Broadcast Interval"
+    _device_attr = "broadcast_interval_estimate_s"
+    _round_digits = 2
+    _meaning = (
+        "Estimated seconds between this device's advertisements, taken from the "
+        "best-receiving scanner's median inter-advert gap. Missed packets can only "
+        "stretch this estimate, never shrink it."
+    )
+    _better = "lower"
+    _expected_range = "0.1..30 s"
+    _bands = (
+        "0-2 s excellent; 2-10 s good; 10-15 s usable; 15-30 s risky; "
+        ">30 s device will drop out between adverts (30 s away-timeout)"
+    )
+    _level_thresholds = (
+        (2.0, "excellent"),
+        (10.0, "good"),
+        (15.0, "usable"),
+        (30.0, "risky"),
+        (999999.0, "beyond_away_timeout"),
+    )
+
+    @property
+    def device_class(self):
+        return SensorDeviceClass.DURATION
+
+    @property
+    def native_unit_of_measurement(self):
+        return UnitOfTime.SECONDS
 
 
 class BermudaSensorValidAnchorCount(BermudaSensorAnchorStatusCount):

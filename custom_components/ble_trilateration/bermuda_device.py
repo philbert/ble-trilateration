@@ -172,6 +172,8 @@ class BermudaDevice(dict):
         self.room_fingerprint_blend_weight: float | None = None
         self.room_sample_count: int = 0
         self.room_hold_reason: str | None = None
+        # Estimated advertising cadence in seconds, from observed inter-advert gaps.
+        self.broadcast_interval_estimate_s: float | None = None
         # Per-scanner trilateration anchor settings (only meaningful for scanners).
         self.anchor_x_m: float | None = None
         self.anchor_y_m: float | None = None
@@ -1096,6 +1098,26 @@ class BermudaDevice(dict):
                 _LOGGER_SPAM_LESS.error(
                     "scanner_not_instance", "Scanner device is not a BermudaDevice instance, skipping."
                 )
+
+        # Estimate this device's advertising cadence from the gaps between
+        # accepted adverts. Missed packets stretch a gap to a multiple of the
+        # true broadcast interval but never shrink it, so the best-receiving
+        # scanner's median gap is the closest observable estimate. Holds the
+        # last estimate while the device is away, since no new gaps arrive.
+        per_scanner_gap_medians: list[float] = []
+        for advert in self.adverts.values():
+            if not isinstance(advert, BermudaAdvert):
+                continue
+            gaps = sorted(gap for gap in advert.hist_interval if gap is not None and gap > 0)
+            if len(gaps) < 2:
+                continue
+            midpoint = len(gaps) // 2
+            if len(gaps) % 2:
+                per_scanner_gap_medians.append(gaps[midpoint])
+            else:
+                per_scanner_gap_medians.append((gaps[midpoint - 1] + gaps[midpoint]) / 2)
+        if per_scanner_gap_medians:
+            self.broadcast_interval_estimate_s = min(per_scanner_gap_medians)
 
         # Update whether this device has been seen recently, for device_tracker:
         if (
