@@ -23,6 +23,11 @@ class _DummyScanner(SimpleNamespace):
         return hash(self.address)
 
 
+class _DummyHaScanner(SimpleNamespace):
+    def time_since_last_detection(self):
+        return self.backend_age_s
+
+
 class _DummyDevice:
     def __init__(self, address: str, mobility_type: str = "moving"):
         self.address = address
@@ -85,6 +90,7 @@ class _DummyDevice:
         self.area_last_seen_id = None
         self.area_is_unknown = False
         self.diag_area_switch = None
+        self.last_seen = 0.0
 
     def get_mobility_type(self):
         return self.mobility_type
@@ -195,6 +201,33 @@ def _make_coordinator():
     return coordinator
 
 
+@pytest.mark.asyncio
+async def test_async_update_data_returns_internal_result():
+    """Coordinator update should return the internal data payload to HA."""
+    coordinator = _make_coordinator()
+    coordinator._async_update_data_internal = lambda: {"updated": True}
+
+    assert await coordinator._async_update_data() == {"updated": True}
+
+
+@pytest.mark.asyncio
+async def test_async_update_data_logs_failure_context():
+    """Coordinator failures should leave one Bermuda-specific breadcrumb before HA marks entities unavailable."""
+    coordinator = _make_coordinator()
+    coordinator._async_update_data_internal = lambda: (_ for _ in ()).throw(RuntimeError("boom"))
+
+    with (
+        patch("custom_components.ble_trilateration.coordinator._LOGGER_SPAM_LESS.error") as log_error,
+        pytest.raises(RuntimeError, match="boom"),
+    ):
+        await coordinator._async_update_data()
+
+    args = log_error.call_args.args
+    assert args[0] == "coordinator_update_failed"
+    assert "coordinator entities will be unavailable" in args[1]
+    assert "tracked_devices=0" in args[2]
+
+
 def test_trilat_unknown_when_inputs_stale():
     """No fresh adverts should yield explicit stale_inputs."""
     coordinator = _make_coordinator()
@@ -209,6 +242,45 @@ def test_trilat_unknown_when_inputs_stale():
 
     assert device.trilat_status == "unknown"
     assert device.trilat_reason == "stale_inputs"
+
+
+def test_refresh_trilateration_logs_stale_input_wave():
+    """A synchronized stale-input cycle should log scanner/backend context once."""
+    coordinator = _make_coordinator()
+    coordinator._async_manage_repair_calibration_layout_mismatch = lambda: None
+    coordinator._async_manage_repair_trilat_without_anchors = lambda _scannerlist: None
+
+    scanner = _make_scanner(coordinator, "scanner-a", "f1", 0.0, 0.0)
+    scanner.create_sensor = False
+    scanner.last_seen = 65.0
+    scanner.timestamp_sync_diagnostics = lambda: {"state": "synchronized"}
+    coordinator._hascanners = [
+        _DummyHaScanner(
+            source=scanner.address,
+            backend_age_s=35.0,
+            discovered_devices_and_advertisement_data={},
+        )
+    ]
+
+    for address in ("dev-stale-a", "dev-stale-b"):
+        device = _DummyDevice(address)
+        device.last_seen = 60.0
+        device.adverts = {(address, scanner.address): _make_advert(scanner, 60.0, -70.0, 4.0)}
+        coordinator.devices[address] = device
+
+    with (
+        patch("custom_components.ble_trilateration.coordinator._LOGGER_SPAM_LESS.warning") as log_warning,
+        patch("custom_components.ble_trilateration.coordinator.monotonic_time_coarse", return_value=100.0),
+    ):
+        coordinator._refresh_trilateration()
+
+    args = log_warning.call_args.args
+    assert args[0] == "trilat_stale_inputs_wave"
+    assert args[2] == 2
+    assert args[3] == 2
+    assert "dev-stale-a" in args[5]
+    assert "ha_scanners=1" in args[6]
+    assert "backend=_DummyHaScanner" in args[6]
 
 
 def _make_scanner(coordinator, address, floor_id, x_m, y_m, z_m=None):
@@ -1257,6 +1329,38 @@ def test_area_from_trilat_holds_previous_room_on_weak_evidence():
 
     assert device.area_id == "kitchen"
     assert "hold=weak_evidence" in device.diag_area_switch
+
+
+def test_refresh_areas_logs_area_unknown_wave():
+    """A synchronized known-area to Unknown transition should log the shared context."""
+    coordinator = _make_coordinator()
+    coordinator.devices = {}
+    coordinator._scanners = set()
+    coordinator._hascanners = []
+
+    for address in ("dev-area-a", "dev-area-b"):
+        device = _DummyDevice(address)
+        device.trilat_status = "unknown"
+        device.trilat_reason = "stale_inputs"
+        device.area_id = "kitchen"
+        device.area_name = "Kitchen"
+        device.area_last_seen_id = "kitchen"
+        device.last_seen = 1.0
+        coordinator.devices[address] = device
+
+    with (
+        patch("custom_components.ble_trilateration.coordinator._LOGGER_SPAM_LESS.warning") as log_warning,
+        patch("custom_components.ble_trilateration.coordinator.monotonic_time_coarse", return_value=200.0),
+    ):
+        coordinator._refresh_areas_from_trilat()
+
+    args = log_warning.call_args.args
+    assert args[0] == "area_unknown_wave"
+    assert args[2] == 2
+    assert args[3] == 2
+    assert args[4] == "stale_inputs=2"
+    assert "trilat_unavailable=2" in args[5]
+    assert "Kitchen->Unknown" in args[6]
 
 
 def test_area_switch_accumulates_evidence_before_switching():

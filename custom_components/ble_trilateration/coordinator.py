@@ -1193,8 +1193,17 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
 
     async def _async_update_data(self):
         """Implementation of DataUpdateCoordinator update_data function."""
-        # return False
-        self._async_update_data_internal()
+        try:
+            return self._async_update_data_internal()
+        except Exception:
+            _LOGGER_SPAM_LESS.error(
+                "coordinator_update_failed",
+                "Bermuda coordinator update failed; all Bermuda coordinator entities will be unavailable until the "
+                "next successful update. %s",
+                self._format_update_failure_context(),
+                exc_info=True,
+            )
+            raise
 
     def _async_update_data_internal(self):
         """
@@ -1794,13 +1803,22 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
     def _refresh_areas_from_trilat(self) -> None:
         """Set room/area for tracked devices from trilat output."""
         layout_hash = self.current_anchor_layout_hash()
+        nowstamp = monotonic_time_coarse()
+        tracked_count = 0
+        unknown_changes = []
         for device in self.devices.values():
             if not device.create_sensor:
                 continue
+            tracked_count += 1
+            was_unknown = bool(getattr(device, "area_is_unknown", False))
+            previous_area = getattr(device, "area_name", None) or getattr(device, "area_id", None)
             state = self._get_trilat_decision_state(device)
             self._refresh_area_from_trilat(device, layout_hash)
+            if previous_area is not None and not was_unknown and bool(getattr(device, "area_is_unknown", False)):
+                unknown_changes.append((device, previous_area))
             self._refresh_transition_sample_diagnostics(device, layout_hash)
             self._schedule_trilat_bootstrap_save(device, state, layout_hash=layout_hash)
+        self._log_area_unknown_wave(unknown_changes, tracked_count, nowstamp)
 
     def _refresh_area_from_trilat(self, device: BermudaDevice, layout_hash: str) -> None:
         """Resolve one device room from trilat position and trained samples."""
@@ -3455,6 +3473,182 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 latest[advert.scanner_address] = advert
         return latest
 
+    @staticmethod
+    def _format_seconds(age_s: float | None) -> str:
+        """Return a compact age string for diagnostics."""
+        if age_s is None:
+            return "unknown"
+        return f"{age_s:.1f}s"
+
+    @staticmethod
+    def _format_value_counts(values) -> str:
+        """Return compact counts for log summaries."""
+        counts: dict[str, int] = {}
+        for value in values:
+            key = str(value or "none")
+            counts[key] = counts.get(key, 0) + 1
+        return ", ".join(f"{key}={counts[key]}" for key in sorted(counts)) or "none"
+
+    def _scanner_health_snapshot(self, nowstamp: float | None = None, *, limit: int = 8) -> str:
+        """Return a compact scanner/backend health snapshot for incident logs."""
+        if nowstamp is None:
+            nowstamp = monotonic_time_coarse()
+
+        ha_scanners = list(getattr(self, "_hascanners", ()) or ())
+        ha_by_source: dict[str, dict[str, object]] = {}
+        for ha_scanner in ha_scanners:
+            source = mac_norm(str(getattr(ha_scanner, "source", "unknown")))
+            time_since_last_detection = getattr(ha_scanner, "time_since_last_detection", None)
+            backend_age_s = None
+            if callable(time_since_last_detection):
+                try:
+                    backend_age_s = float(time_since_last_detection())
+                except Exception:
+                    backend_age_s = None
+            try:
+                adverts = getattr(ha_scanner, "discovered_devices_and_advertisement_data", None)
+                advert_count = len(adverts) if adverts is not None else None
+            except Exception:
+                advert_count = None
+            ha_by_source[source] = {
+                "backend": ha_scanner.__class__.__name__,
+                "advert_count": advert_count,
+                "backend_age_s": backend_age_s,
+            }
+
+        rows: list[str] = []
+        scanners = list(getattr(self, "_scanners", ()) or ())
+        for scanner in sorted(
+            scanners, key=lambda item: (str(getattr(item, "name", "")), str(getattr(item, "address", "")))
+        ):
+            address = str(getattr(scanner, "address", "unknown")).lower()
+            ha_diag = ha_by_source.get(mac_norm(address)) or ha_by_source.get(address)
+            backend = ha_diag["backend"] if ha_diag is not None else "missing_backend"
+            advert_count = ha_diag["advert_count"] if ha_diag is not None else "unknown"
+            backend_age_s = ha_diag["backend_age_s"] if ha_diag is not None else None
+            last_seen = float(getattr(scanner, "last_seen", 0.0) or 0.0)
+            scanner_age_s = nowstamp - last_seen if last_seen > 0 else None
+            sync_state = "unknown"
+            timestamp_sync_diagnostics = getattr(scanner, "timestamp_sync_diagnostics", None)
+            if callable(timestamp_sync_diagnostics):
+                try:
+                    sync_state = str(timestamp_sync_diagnostics().get("state", "unknown"))
+                except Exception:
+                    sync_state = "unknown"
+            rows.append(
+                f"{getattr(scanner, 'name', address)}[{address}] backend={backend} adverts={advert_count} "
+                f"backend_age={self._format_seconds(backend_age_s)} "
+                f"scanner_age={self._format_seconds(scanner_age_s)} sync={sync_state}"
+            )
+
+        if not rows:
+            for source, ha_diag in sorted(ha_by_source.items()):
+                rows.append(
+                    f"{source} backend={ha_diag['backend']} adverts={ha_diag['advert_count']} "
+                    f"backend_age={self._format_seconds(ha_diag['backend_age_s'])}"
+                )
+
+        detail = "; ".join(rows[:limit])
+        if len(rows) > limit:
+            detail = f"{detail}; +{len(rows) - limit} more"
+        return f"ha_scanners={len(ha_scanners)} bermuda_scanners={len(scanners)} detail={detail or 'none'}"
+
+    def _tracked_device_snapshot(self, devices, nowstamp: float, *, limit: int = 8) -> str:
+        """Return a compact tracked-device snapshot for incident logs."""
+        rows: list[str] = []
+        for device in sorted(
+            devices, key=lambda item: (str(getattr(item, "name", "")), str(getattr(item, "address", "")))
+        ):
+            last_seen = float(getattr(device, "last_seen", 0.0) or 0.0)
+            age_s = nowstamp - last_seen if last_seen > 0 else None
+            area = getattr(device, "area_name", None) or getattr(device, "area_id", None) or "none"
+            rows.append(
+                f"{getattr(device, 'name', getattr(device, 'address', 'unknown'))}"
+                f"[{getattr(device, 'address', 'unknown')}] age={self._format_seconds(age_s)} area={area} "
+                f"trilat={getattr(device, 'trilat_status', 'unknown')}/{getattr(device, 'trilat_reason', 'unknown')}"
+            )
+        detail = "; ".join(rows[:limit])
+        if len(rows) > limit:
+            detail = f"{detail}; +{len(rows) - limit} more"
+        return detail or "none"
+
+    def _area_unknown_device_snapshot(self, unknown_changes, nowstamp: float, *, limit: int = 8) -> str:
+        """Return a compact summary of devices that just changed to Unknown."""
+        rows: list[str] = []
+        for device, previous_area in sorted(
+            unknown_changes,
+            key=lambda item: (str(getattr(item[0], "name", "")), str(getattr(item[0], "address", ""))),
+        ):
+            last_seen = float(getattr(device, "last_seen", 0.0) or 0.0)
+            age_s = nowstamp - last_seen if last_seen > 0 else None
+            rows.append(
+                f"{getattr(device, 'name', getattr(device, 'address', 'unknown'))}"
+                f"[{getattr(device, 'address', 'unknown')}] {previous_area}->Unknown "
+                f"age={self._format_seconds(age_s)} "
+                f"trilat={getattr(device, 'trilat_status', 'unknown')}/{getattr(device, 'trilat_reason', 'unknown')}"
+            )
+        detail = "; ".join(rows[:limit])
+        if len(rows) > limit:
+            detail = f"{detail}; +{len(rows) - limit} more"
+        return detail or "none"
+
+    def _format_update_failure_context(self) -> str:
+        """Return context for coordinator failures that make all entities unavailable."""
+        nowstamp = monotonic_time_coarse()
+        tracked_devices = [
+            device for device in getattr(self, "devices", {}).values() if bool(getattr(device, "create_sensor", False))
+        ]
+        return (
+            f"tracked_devices={len(tracked_devices)} "
+            f"devices={self._tracked_device_snapshot(tracked_devices, nowstamp)}; "
+            f"scanners={self._scanner_health_snapshot(nowstamp)}"
+        )
+
+    def _log_trilat_stale_input_wave(self, tracked_devices, nowstamp: float) -> None:
+        """Log when many tracked devices simultaneously lose fresh trilat inputs."""
+        tracked_count = len(tracked_devices)
+        if tracked_count < 2:
+            return
+        stale_devices = [
+            device
+            for device in tracked_devices
+            if getattr(device, "trilat_status", None) == "unknown"
+            and getattr(device, "trilat_reason", None) == "stale_inputs"
+        ]
+        stale_count = len(stale_devices)
+        if stale_count < 2 or (stale_count < tracked_count and stale_count / tracked_count < 0.75):
+            return
+        _LOGGER_SPAM_LESS.warning(
+            "trilat_stale_inputs_wave",
+            "Trilateration stale-input wave: %d/%d tracked devices have no fresh adverts "
+            "(fresh threshold %.1fs); devices=%s; scanners=%s",
+            stale_count,
+            tracked_count,
+            DISTANCE_TIMEOUT,
+            self._tracked_device_snapshot(stale_devices, nowstamp),
+            self._scanner_health_snapshot(nowstamp),
+        )
+
+    def _log_area_unknown_wave(self, unknown_changes, tracked_count: int, nowstamp: float) -> None:
+        """Log when many tracked area sensors change to Unknown in one update."""
+        unknown_count = len(unknown_changes)
+        if tracked_count < 2 or unknown_count < 2:
+            return
+        if unknown_count < tracked_count and unknown_count / tracked_count < 0.75:
+            return
+        devices = [device for device, _previous_area in unknown_changes]
+        _LOGGER_SPAM_LESS.warning(
+            "area_unknown_wave",
+            "Area Unknown wave: %d/%d tracked devices changed to Unknown in one update; "
+            "trilat_reasons=%s area_reasons=%s devices=%s; scanners=%s",
+            unknown_count,
+            tracked_count,
+            self._format_value_counts(getattr(device, "trilat_reason", None) for device in devices),
+            self._format_value_counts(getattr(device, "diag_area_switch", None) for device in devices),
+            self._area_unknown_device_snapshot(unknown_changes, nowstamp),
+            self._scanner_health_snapshot(nowstamp),
+        )
+
     def _resolve_floor_name(self, floor_id: str | None) -> str | None:
         """Resolve floor name from floor id."""
         if floor_id is None:
@@ -3646,10 +3840,13 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         else:
             self._async_manage_repair_trilat_without_anchors([])
 
+        tracked_devices = []
         for device in self.devices.values():
             if not device.create_sensor:
                 continue
+            tracked_devices.append(device)
             self._refresh_trilateration_for_device(device)
+        self._log_trilat_stale_input_wave(tracked_devices, monotonic_time_coarse())
 
     def _update_floor_confidence(
         self,
