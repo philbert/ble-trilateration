@@ -164,6 +164,17 @@ DISTANCE_TIMEOUT = 30  # seconds to wait before marking a sensor distance measur
 # as unknown/none/stale/away. Separate from device_tracker.
 DISTANCE_INFINITE = 999  # arbitrary distance for infinite/unknown rssi range
 
+# Slow-advertising devices get an Area hold proportional to their observed
+# advert cadence (multiplier x estimated interval), capped so a vanished
+# device still goes Unknown within a bounded time.
+AREA_HOLD_INTERVAL_MULTIPLIER: Final = 4.0
+AREA_HOLD_MAX: Final = 300.0
+
+# Per-update-cycle upward relaxation of the advert-interval baseline used for
+# battery/drift heuristics (~1% per hour at the 1.05s cycle), so a one-off
+# short gap cannot pin the baseline low forever.
+BROADCAST_BASELINE_RELAX_PER_CYCLE: Final = 1.0000029
+
 AREA_MAX_AD_AGE: Final = max(DISTANCE_TIMEOUT / 3, UPDATE_INTERVAL * 2)
 # Adverts older than this can not win an area contest.
 
@@ -265,6 +276,11 @@ DOCS[CONF_MAX_VELOCITY] = (
 
 CONF_DEVTRACK_TIMEOUT, DEFAULT_DEVTRACK_TIMEOUT = "devtracker_nothome_timeout", 30
 DOCS[CONF_DEVTRACK_TIMEOUT] = "Timeout in seconds for setting devices as `Not Home` / `Away`."  # fmt: skip
+
+CONF_AREA_HOLD_TIMEOUT, DEFAULT_AREA_HOLD_TIMEOUT = "area_hold_timeout", 120
+DOCS[CONF_AREA_HOLD_TIMEOUT] = (
+    "Seconds to keep showing the last room after advertisements stop, before the Area sensor goes Unknown."
+)
 
 CONF_SAVE_AND_CLOSE = "save_and_close"
 CONF_SCANNER_INFO = "scanner_info"

@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from homeassistant.core import HomeAssistant
 from homeassistant.helpers.storage import Store
+
+if TYPE_CHECKING:
+    from homeassistant.core import HomeAssistant
 
 STORAGE_VERSION = 1
 STORAGE_KEY = "ble_trilateration/trilat_bootstrap"
@@ -26,6 +28,8 @@ class TrilatBootstrapRecord:
     layout_hash: str
     floor_confidence: float
     geometry_quality_01: float
+    # Fastest sustained advert cadence seen; battery/RF history, not geometry.
+    broadcast_interval_baseline_s: float | None = None
 
 
 class BermudaTrilatBootstrapStore:
@@ -58,6 +62,11 @@ class BermudaTrilatBootstrapStore:
                             layout_hash=str(raw.get("layout_hash") or ""),
                             floor_confidence=float(raw.get("floor_confidence") or 0.0),
                             geometry_quality_01=float(raw.get("geometry_quality_01") or 0.0),
+                            broadcast_interval_baseline_s=(
+                                float(raw["broadcast_interval_baseline_s"])
+                                if raw.get("broadcast_interval_baseline_s") is not None
+                                else None
+                            ),
                         )
                     except (KeyError, TypeError, ValueError):
                         continue
@@ -82,9 +91,4 @@ class BermudaTrilatBootstrapStore:
         await self._store.async_save(self._data_to_save())
 
     def _data_to_save(self) -> dict[str, Any]:
-        return {
-            "devices": {
-                address: asdict(record)
-                for address, record in self._records.items()
-            }
-        }
+        return {"devices": {address: asdict(record) for address, record in self._records.items()}}

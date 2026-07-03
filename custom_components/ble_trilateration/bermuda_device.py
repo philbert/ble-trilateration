@@ -44,6 +44,7 @@ from .const import (
     BDADDR_TYPE_RANDOM_STATIC,
     BDADDR_TYPE_RANDOM_UNRESOLVABLE,
     BDADDR_TYPE_UNKNOWN,
+    BROADCAST_BASELINE_RELAX_PER_CYCLE,
     CONF_DEVICES,
     CONF_DEVTRACK_TIMEOUT,
     DEFAULT_DEVTRACK_TIMEOUT,
@@ -174,6 +175,11 @@ class BermudaDevice(dict):
         self.room_hold_reason: str | None = None
         # Estimated advertising cadence in seconds, from observed inter-advert gaps.
         self.broadcast_interval_estimate_s: float | None = None
+        # Fastest sustained cadence seen for this device, and the current
+        # estimate's ratio to it - a rising ratio on a stationary beacon is a
+        # battery-decline heuristic.
+        self.broadcast_interval_baseline_s: float | None = None
+        self.broadcast_interval_drift: float | None = None
         # Per-scanner trilateration anchor settings (only meaningful for scanners).
         self.anchor_x_m: float | None = None
         self.anchor_y_m: float | None = None
@@ -1117,7 +1123,19 @@ class BermudaDevice(dict):
             else:
                 per_scanner_gap_medians.append((gaps[midpoint - 1] + gaps[midpoint]) / 2)
         if per_scanner_gap_medians:
-            self.broadcast_interval_estimate_s = min(per_scanner_gap_medians)
+            estimate = min(per_scanner_gap_medians)
+            self.broadcast_interval_estimate_s = estimate
+            # The baseline follows the estimate down immediately but only
+            # relaxes upward very slowly, so a genuine cadence slow-down
+            # keeps showing as drift instead of being absorbed.
+            baseline = self.broadcast_interval_baseline_s
+            if baseline is None:
+                baseline = estimate
+            else:
+                baseline = min(estimate, baseline * BROADCAST_BASELINE_RELAX_PER_CYCLE)
+            self.broadcast_interval_baseline_s = baseline
+            if baseline > 0:
+                self.broadcast_interval_drift = estimate / baseline
 
         # Update whether this device has been seen recently, for device_tracker:
         if (

@@ -105,6 +105,7 @@ async def async_setup_entry(
             entities.append(BermudaSensorNormalizedResidualRms(coordinator, entry, address))
             entities.append(BermudaSensorResidualRms(coordinator, entry, address))
             entities.append(BermudaSensorBroadcastInterval(coordinator, entry, address))
+            entities.append(BermudaSensorAdvertIntervalDrift(coordinator, entry, address))
             entities.append(BermudaSensorValidAnchorCount(coordinator, entry, address))
             entities.append(BermudaSensorStaleAnchorCount(coordinator, entry, address))
             entities.append(BermudaSensorNoAdvertAnchorCount(coordinator, entry, address))
@@ -1112,6 +1113,36 @@ class BermudaSensorBroadcastInterval(BermudaSensorNumericDiagnostic):
     @property
     def native_unit_of_measurement(self):
         return UnitOfTime.SECONDS
+
+
+class BermudaSensorAdvertIntervalDrift(BermudaSensorNumericDiagnostic):
+    """Diagnostic sensor for advert-interval drift against the device's healthy baseline."""
+
+    _diag_suffix = "advert_interval_drift"
+    _diag_name = "Advert - Interval Drift"
+    _device_attr = "broadcast_interval_drift"
+    _round_digits = 2
+    _meaning = (
+        "Current advert interval divided by this device's fastest sustained cadence. "
+        "For a beacon that has not moved, a sustained rise often means its battery is weakening."
+    )
+    _better = "lower"
+    _expected_range = "1+"
+    _bands = "1-1.3 nominal; 1.3-2 elevated; 2-4 degraded - check battery; >4 failing or out of range"
+    _level_thresholds = (
+        (1.3, "nominal"),
+        (2.0, "elevated"),
+        (4.0, "degraded_check_battery"),
+        (999999.0, "failing"),
+    )
+
+    @property
+    def extra_state_attributes(self) -> Mapping[str, Any] | None:
+        attrs = dict(super().extra_state_attributes or {})
+        baseline = getattr(self._device, "broadcast_interval_baseline_s", None)
+        if baseline is not None:
+            attrs["baseline_interval_s"] = round(float(baseline), 2)
+        return attrs
 
 
 class BermudaSensorValidAnchorCount(BermudaSensorAnchorStatusCount):
