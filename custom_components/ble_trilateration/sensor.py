@@ -593,7 +593,7 @@ class BermudaSensorTrilatAnchorCount(BermudaSensor):
 
     @property
     def name(self):
-        return "Trilat Anchor Count"
+        return "Anchor - Used Count"
 
     @property
     def native_value(self):
@@ -674,7 +674,7 @@ class BermudaSensorGeometryQuality(BermudaSensorPositionConfidence):
 
     @property
     def name(self):
-        return "Geometry Quality"
+        return "Geometry - Quality"
 
     @property
     def native_value(self):
@@ -701,7 +701,7 @@ class BermudaSensorResidualConsistency(BermudaSensorPositionConfidence):
 
     @property
     def name(self):
-        return "Residual Consistency"
+        return "Residual - Consistency"
 
     @property
     def entity_registry_enabled_default(self) -> bool:
@@ -796,7 +796,7 @@ class BermudaSensorRoomDecisionReason(BermudaSensorStringDiagnostic):
     """Diagnostic sensor for the latest room-classification reason."""
 
     _diag_suffix = "room_decision_reason"
-    _diag_name = "Room Decision Reason"
+    _diag_name = "Room - Decision Reason"
     _device_attr = "room_decision_reason"
 
 
@@ -804,7 +804,7 @@ class BermudaSensorRoomCandidate(BermudaSensorStringDiagnostic):
     """Diagnostic sensor for the current best room candidate."""
 
     _diag_suffix = "room_candidate"
-    _diag_name = "Room Candidate"
+    _diag_name = "Room - Candidate"
     _device_attr = "room_candidate_name"
 
 
@@ -812,7 +812,7 @@ class BermudaSensorRoomChallenger(BermudaSensorStringDiagnostic):
     """Diagnostic sensor for the room challenger accumulating switch evidence."""
 
     _diag_suffix = "room_challenger"
-    _diag_name = "Room Challenger"
+    _diag_name = "Room - Challenger"
     _device_attr = "room_challenger_name"
 
 
@@ -820,7 +820,7 @@ class BermudaSensorRoomChallengerEvidence(BermudaSensorNumericDiagnostic):
     """Diagnostic sensor for accumulated same-floor room-switch evidence."""
 
     _diag_suffix = "room_challenger_evidence"
-    _diag_name = "Room Challenger Evidence"
+    _diag_name = "Room - Challenger Evidence"
     _device_attr = "room_challenger_evidence"
     _round_digits = 2
 
@@ -829,7 +829,7 @@ class BermudaSensorRoomScoreMargin(BermudaSensorNumericDiagnostic):
     """Diagnostic sensor for blended room best-vs-second score margin."""
 
     _diag_suffix = "room_score_margin"
-    _diag_name = "Room Score Margin"
+    _diag_name = "Room - Score Margin"
     _device_attr = "room_score_margin"
 
 
@@ -837,7 +837,7 @@ class BermudaSensorGeometryRoomScore(BermudaSensorNumericDiagnostic):
     """Diagnostic sensor for geometry-only support of the selected room."""
 
     _diag_suffix = "geometry_room_score"
-    _diag_name = "Geometry Room Score"
+    _diag_name = "Geometry - Room Score"
     _device_attr = "room_geometry_score"
 
 
@@ -845,7 +845,7 @@ class BermudaSensorFingerprintRoomScore(BermudaSensorNumericDiagnostic):
     """Diagnostic sensor for fingerprint support of the selected room."""
 
     _diag_suffix = "fingerprint_room_score"
-    _diag_name = "Fingerprint Room Score"
+    _diag_name = "Fingerprint - Room Score"
     _device_attr = "room_fingerprint_score"
 
 
@@ -853,7 +853,7 @@ class BermudaSensorFingerprintBestRoom(BermudaSensorStringDiagnostic):
     """Diagnostic sensor for the top RSSI-fingerprint room."""
 
     _diag_suffix = "fingerprint_best_room"
-    _diag_name = "Fingerprint Best Room"
+    _diag_name = "Fingerprint - Best Room"
     _device_attr = "room_fingerprint_best_name"
 
 
@@ -861,7 +861,7 @@ class BermudaSensorFingerprintMargin(BermudaSensorNumericDiagnostic):
     """Diagnostic sensor for RSSI-fingerprint best-vs-second score margin."""
 
     _diag_suffix = "fingerprint_margin"
-    _diag_name = "Fingerprint Margin"
+    _diag_name = "Fingerprint - Margin"
     _device_attr = "room_fingerprint_margin"
 
 
@@ -869,7 +869,7 @@ class BermudaSensorFingerprintCoverage(BermudaSensorNumericDiagnostic):
     """Diagnostic sensor for current live-scanner coverage of candidate room samples."""
 
     _diag_suffix = "fingerprint_coverage"
-    _diag_name = "Fingerprint Coverage"
+    _diag_name = "Fingerprint - Coverage"
     _device_attr = "room_fingerprint_coverage"
 
 
@@ -877,7 +877,7 @@ class BermudaSensorFingerprintBlendWeight(BermudaSensorNumericDiagnostic):
     """Diagnostic sensor for how strongly room allocation weights fingerprinting."""
 
     _diag_suffix = "fingerprint_blend_weight"
-    _diag_name = "Fingerprint Blend Weight"
+    _diag_name = "Fingerprint - Blend Weight"
     _device_attr = "room_fingerprint_blend_weight"
 
 
@@ -885,7 +885,7 @@ class BermudaSensorRoomSampleCount(BermudaSensorIntegerDiagnostic):
     """Diagnostic sensor for sample count in the current candidate room."""
 
     _diag_suffix = "room_sample_count"
-    _diag_name = "Room Sample Count"
+    _diag_name = "Room - Sample Count"
     _device_attr = "room_sample_count"
 
 
@@ -893,7 +893,7 @@ class BermudaSensorRoomHoldReason(BermudaSensorStringDiagnostic):
     """Diagnostic sensor for the latest reason a room switch was held."""
 
     _diag_suffix = "room_hold_reason"
-    _diag_name = "Room Hold Reason"
+    _diag_name = "Room - Hold Reason"
     _device_attr = "room_hold_reason"
 
 
@@ -901,7 +901,7 @@ class BermudaSensorGeometryGdop(BermudaSensorNumericDiagnostic):
     """Diagnostic sensor for trilateration geometric dilution of precision."""
 
     _diag_suffix = "geometry_gdop"
-    _diag_name = "Geometry GDOP"
+    _diag_name = "Geometry - GDOP"
     _device_attr = "trilat_geometry_gdop"
     _round_digits = 2
 
@@ -910,7 +910,7 @@ class BermudaSensorGeometryConditionNumber(BermudaSensorNumericDiagnostic):
     """Diagnostic sensor for trilateration geometry condition number."""
 
     _diag_suffix = "geometry_condition_number"
-    _diag_name = "Geometry Condition Number"
+    _diag_name = "Geometry - Condition Number"
     _device_attr = "trilat_geometry_condition"
     _round_digits = 2
 
@@ -919,7 +919,7 @@ class BermudaSensorNormalizedResidualRms(BermudaSensorNumericDiagnostic):
     """Diagnostic sensor for normalized residual RMS."""
 
     _diag_suffix = "normalized_residual_rms"
-    _diag_name = "Normalized Residual RMS"
+    _diag_name = "Residual - Normalized RMS"
     _device_attr = "trilat_normalized_residual_rms"
     _round_digits = 3
 
@@ -928,7 +928,7 @@ class BermudaSensorResidualRms(BermudaSensorNumericDiagnostic):
     """Diagnostic sensor for residual RMS in metres."""
 
     _diag_suffix = "residual_rms"
-    _diag_name = "Residual RMS"
+    _diag_name = "Residual - RMS"
     _device_attr = "trilat_residual_m"
     _round_digits = 2
 
@@ -945,7 +945,7 @@ class BermudaSensorValidAnchorCount(BermudaSensorAnchorStatusCount):
     """Diagnostic sensor for same-floor anchors currently used by trilat."""
 
     _diag_suffix = "valid_anchor_count"
-    _diag_name = "Valid Anchor Count"
+    _diag_name = "Anchor - Valid Count"
     _anchor_status = "valid"
 
 
@@ -953,7 +953,7 @@ class BermudaSensorStaleAnchorCount(BermudaSensorAnchorStatusCount):
     """Diagnostic sensor for anchors rejected because their advert is stale."""
 
     _diag_suffix = "stale_anchor_count"
-    _diag_name = "Stale Anchor Count"
+    _diag_name = "Anchor - Stale Count"
     _anchor_status = "rejected_stale"
 
 
@@ -961,7 +961,7 @@ class BermudaSensorNoAdvertAnchorCount(BermudaSensorAnchorStatusCount):
     """Diagnostic sensor for configured anchors with no advert from this device."""
 
     _diag_suffix = "no_advert_anchor_count"
-    _diag_name = "No Advert Anchor Count"
+    _diag_name = "Anchor - No Advert Count"
     _anchor_status = "no_advert"
 
 
@@ -969,7 +969,7 @@ class BermudaSensorValidOtherFloorAnchorCount(BermudaSensorAnchorStatusCount):
     """Diagnostic sensor for live anchors seen on floors other than the selected floor."""
 
     _diag_suffix = "valid_other_floor_anchor_count"
-    _diag_name = "Valid Other-Floor Anchor Count"
+    _diag_name = "Anchor - Valid Other-Floor Count"
     _anchor_status = "valid_other_floor"
 
 

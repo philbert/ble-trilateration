@@ -148,8 +148,10 @@ async def test_trilat_confidence_sensors_expose_numeric_confidence(hass) -> None
     assert tracking_confidence.native_value == 6.8
     assert tracking_confidence.state_class == SensorStateClass.MEASUREMENT
     assert geometry_quality.native_value == 4.3
+    assert geometry_quality.name == "Geometry - Quality"
     assert geometry_quality.extra_state_attributes is None
     assert residual_consistency.native_value == 7.7
+    assert residual_consistency.name == "Residual - Consistency"
     assert residual_consistency.extra_state_attributes is None
     assert raw_confidence.entity_category is None
     assert tracking_confidence.entity_category is None
@@ -191,25 +193,33 @@ async def test_room_classifier_diagnostic_sensors_expose_compact_values(hass) ->
     coordinator.devices[device.address] = device
 
     assert BermudaSensorRoomDecisionReason(coordinator, entry, device.address).native_value == "ok"
-    assert BermudaSensorRoomCandidate(coordinator, entry, device.address).native_value == "Living Room"
+    room_candidate = BermudaSensorRoomCandidate(coordinator, entry, device.address)
+    assert room_candidate.name == "Room - Candidate"
+    assert room_candidate.native_value == "Living Room"
     assert BermudaSensorRoomChallenger(coordinator, entry, device.address).native_value == "Kitchen"
     assert BermudaSensorRoomChallengerEvidence(coordinator, entry, device.address).native_value == 0.34
     assert BermudaSensorRoomScoreMargin(coordinator, entry, device.address).native_value == 0.123
     assert BermudaSensorGeometryRoomScore(coordinator, entry, device.address).native_value == 0.457
-    assert BermudaSensorFingerprintRoomScore(coordinator, entry, device.address).native_value == 0.568
+    fingerprint_score = BermudaSensorFingerprintRoomScore(coordinator, entry, device.address)
+    assert fingerprint_score.name == "Fingerprint - Room Score"
+    assert fingerprint_score.native_value == 0.568
     assert BermudaSensorFingerprintBestRoom(coordinator, entry, device.address).native_value == "Living Room"
     assert BermudaSensorFingerprintMargin(coordinator, entry, device.address).native_value == 0.235
     assert BermudaSensorFingerprintCoverage(coordinator, entry, device.address).native_value == 0.789
     assert BermudaSensorFingerprintBlendWeight(coordinator, entry, device.address).native_value == 0.65
     assert BermudaSensorRoomSampleCount(coordinator, entry, device.address).native_value == 7
     assert BermudaSensorRoomHoldReason(coordinator, entry, device.address).native_value == "room_evidence(0.35/0.50)"
-    assert BermudaSensorGeometryGdop(coordinator, entry, device.address).native_value == 1.23
+    geometry_gdop = BermudaSensorGeometryGdop(coordinator, entry, device.address)
+    assert geometry_gdop.name == "Geometry - GDOP"
+    assert geometry_gdop.native_value == 1.23
     assert BermudaSensorGeometryConditionNumber(coordinator, entry, device.address).native_value == 12.35
     assert BermudaSensorNormalizedResidualRms(coordinator, entry, device.address).native_value == 0.988
     residual_rms = BermudaSensorResidualRms(coordinator, entry, device.address)
     assert residual_rms.native_value == 1.23
     assert residual_rms.native_unit_of_measurement == UnitOfLength.METERS
-    assert BermudaSensorValidAnchorCount(coordinator, entry, device.address).native_value == 2
+    valid_anchor_count = BermudaSensorValidAnchorCount(coordinator, entry, device.address)
+    assert valid_anchor_count.name == "Anchor - Valid Count"
+    assert valid_anchor_count.native_value == 2
     assert BermudaSensorStaleAnchorCount(coordinator, entry, device.address).native_value == 1
     assert BermudaSensorNoAdvertAnchorCount(coordinator, entry, device.address).native_value == 1
     assert BermudaSensorValidOtherFloorAnchorCount(coordinator, entry, device.address).native_value == 1
@@ -435,6 +445,7 @@ async def test_trilat_anchor_count_sensor_exposes_anchor_status_lines(hass) -> N
     sensor = BermudaSensorTrilatAnchorCount(coordinator, entry, device.address)
 
     assert sensor.native_value == 2
+    assert sensor.name == "Anchor - Used Count"
     assert sensor.extra_state_attributes == {
         "cross_floor_candidate_count": 1,
     }
