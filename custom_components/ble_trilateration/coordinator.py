@@ -2511,6 +2511,11 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
     _TRILAT_MIN_ANCHORS: int = 3
     _TRILAT_MIN_ANCHORS_3D: int = 4
     _TRILAT_MAX_RESIDUAL_M: float = 5.0
+    # Solved positions are clamped to the calibrated floor envelope plus this
+    # margin. Inflated live ranges (body attenuation) otherwise extrapolate the
+    # solve many metres outside the building, where every geometry kernel
+    # scores ~zero and the room classifier loses its tiebreaker.
+    _TRILAT_ENVELOPE_MARGIN_M: float = 2.0
     _TRILAT_MAX_ANCHOR_SIGMA_M: float = 6.0
     _TRILAT_DEFAULT_ANCHOR_SIGMA_M: float = 8.0
     _TRILAT_DIAGNOSTIC_OTHER_FLOOR_SIGMA_MULTIPLIER: float = 4.0
@@ -2668,6 +2673,35 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         clamped = round(max(0.0, min(10.0, score)), 1)
         device.trilat_tracking_confidence = clamped
         device.trilat_tracking_confidence_level = self._trilat_confidence_band(clamped)
+
+    def _clamp_xy_to_floor_envelope(
+        self,
+        *,
+        layout_hash: str,
+        floor_id: str | None,
+        x_m: float,
+        y_m: float,
+    ) -> tuple[float, float]:
+        """
+        Clamp a solved XY onto the calibrated floor envelope plus margin.
+
+        The envelope comes from calibration sample positions (sigma-expanded),
+        so it only constrains floors that have samples; unknown floors pass
+        through unclamped.
+        """
+        classifier = getattr(self, "room_classifier", None)
+        envelope_fn = getattr(classifier, "floor_xy_envelope", None)
+        if not callable(envelope_fn) or not layout_hash:
+            return x_m, y_m
+        envelope = envelope_fn(layout_hash, floor_id)
+        if envelope is None:
+            return x_m, y_m
+        x_min, x_max, y_min, y_max = envelope
+        margin = self._TRILAT_ENVELOPE_MARGIN_M
+        return (
+            min(max(x_m, x_min - margin), x_max + margin),
+            min(max(y_m, y_min - margin), y_max + margin),
+        )
 
     def _apply_trilat_position_adjustment(
         self,
@@ -4665,7 +4699,12 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             fallback_xy = state.last_solution_xy
             fallback_z = state.last_solution_z
             if solve_result.x_m is not None and solve_result.y_m is not None:
-                fallback_xy = (solve_result.x_m, solve_result.y_m)
+                fallback_xy = self._clamp_xy_to_floor_envelope(
+                    layout_hash=layout_hash,
+                    floor_id=selected_floor_id,
+                    x_m=solve_result.x_m,
+                    y_m=solve_result.y_m,
+                )
             elif fallback_xy is None:
                 fallback_xy = anchor_centroid(anchors)
             if solver_dimension == "3d":
@@ -4758,11 +4797,17 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 )
             return
 
+        measurement_xy = self._clamp_xy_to_floor_envelope(
+            layout_hash=layout_hash,
+            floor_id=selected_floor_id,
+            x_m=solve_result.x_m,
+            y_m=solve_result.y_m,
+        )
         filtered_xy, filtered_z = self._apply_trilat_motion_filter(
             state,
             nowstamp=nowstamp,
             mobility_type=device.get_mobility_type(),
-            measurement_xy=(solve_result.x_m, solve_result.y_m),
+            measurement_xy=measurement_xy,
             measurement_z=(solve_result.z_m if solver_dimension == "3d" else None),
             anchor_z_bounds=anchor_z_bounds,
             residual_m=solve_result.residual_rms_m,

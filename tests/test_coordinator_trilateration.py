@@ -2596,3 +2596,73 @@ def test_geometry_guardrail_passes_at_live_p75_quality():
     assert device.area_id == "kitchen"  # still held (challenger just started)
     assert state.room_challenger_id == "living_room"
     assert "hold=weak_geometry_guardrail" not in device.diag_area_switch
+
+
+def test_clamp_xy_to_floor_envelope_bounds_point():
+    """The clamp helper bounds points to the envelope plus margin and passes through otherwise."""
+    coordinator = _make_coordinator()
+    coordinator.room_classifier = SimpleNamespace(
+        floor_xy_envelope=lambda _layout_hash, floor_id: (0.0, 6.0, 0.0, 8.0) if floor_id == "f1" else None,
+    )
+
+    # Far outside: clamped to envelope + 2 m margin.
+    assert coordinator._clamp_xy_to_floor_envelope(layout_hash="layout-a", floor_id="f1", x_m=23.7, y_m=-9.0) == (
+        8.0,
+        -2.0,
+    )
+    # Inside: untouched.
+    assert coordinator._clamp_xy_to_floor_envelope(layout_hash="layout-a", floor_id="f1", x_m=3.0, y_m=4.0) == (
+        3.0,
+        4.0,
+    )
+    # No envelope for the floor: untouched.
+    assert coordinator._clamp_xy_to_floor_envelope(layout_hash="layout-a", floor_id="f9", x_m=23.7, y_m=-9.0) == (
+        23.7,
+        -9.0,
+    )
+    # No classifier at all: untouched.
+    coordinator.room_classifier = None
+    assert coordinator._clamp_xy_to_floor_envelope(layout_hash="layout-a", floor_id="f1", x_m=23.7, y_m=-9.0) == (
+        23.7,
+        -9.0,
+    )
+
+
+def test_out_of_hull_solve_is_clamped_to_floor_envelope():
+    """Inflated live ranges must not place the device metres outside the calibrated envelope."""
+    from custom_components.ble_trilateration.trilateration import AnchorMeasurement, solve_2d_soft_l1
+
+    coordinator = _make_coordinator()
+    device = _DummyDevice("dev-envelope-clamp")
+
+    sc_a = _make_scanner(coordinator, "env-a", "f1", 0.0, 0.0)
+    sc_b = _make_scanner(coordinator, "env-b", "f1", 6.0, 0.0)
+    sc_c = _make_scanner(coordinator, "env-c", "f1", 0.0, 8.0)
+
+    coordinator.room_classifier = SimpleNamespace(
+        floor_xy_envelope=lambda _layout_hash, _floor_id: (0.0, 6.0, 0.0, 8.0),
+    )
+
+    # Wildly inconsistent ranges (as body attenuation produces live) push the
+    # raw solve far outside the anchor hull. Verify that precondition first.
+    ranges = {"env-a": 1.0, "env-b": 20.0, "env-c": 20.0}
+    raw_solve = solve_2d_soft_l1(
+        [
+            AnchorMeasurement(scanner_address=address, x_m=x, y_m=y, range_m=ranges[address], sigma_m=0.8)
+            for address, x, y in (("env-a", 0.0, 0.0), ("env-b", 6.0, 0.0), ("env-c", 0.0, 8.0))
+        ]
+    )
+    assert raw_solve.ok
+    assert not (-2.0 <= raw_solve.x_m <= 8.0) or not (-2.0 <= raw_solve.y_m <= 10.0)
+
+    fresh = time.monotonic()
+    device.adverts = {
+        ("dev-envelope-clamp", sc_a.address): _make_advert(sc_a, fresh, -50.0, ranges["env-a"]),
+        ("dev-envelope-clamp", sc_b.address): _make_advert(sc_b, fresh, -80.0, ranges["env-b"]),
+        ("dev-envelope-clamp", sc_c.address): _make_advert(sc_c, fresh, -80.0, ranges["env-c"]),
+    }
+    coordinator._refresh_trilateration_for_device(device)
+
+    assert device.trilat_x_m is not None
+    assert -2.0 <= device.trilat_x_m <= 8.0
+    assert -2.0 <= device.trilat_y_m <= 10.0
