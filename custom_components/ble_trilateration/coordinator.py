@@ -8,7 +8,7 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import aiofiles
 import voluptuous as vol
@@ -2365,6 +2365,14 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         geometry_quality_01: float = 0.0,
     ) -> None:
         """Emit one sparse log line when the room decision state changes materially."""
+        self._set_room_decision_diagnostics(
+            device,
+            state,
+            event=event,
+            candidate_area_id=candidate_area_id,
+            hold_reason=hold_reason,
+            classification=classification,
+        )
         signature = self._room_decision_log_signature(
             event=event,
             stable_area_id=stable_area_id,
@@ -2451,6 +2459,63 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         if weak_axis_aligned:
             increment *= 0.67
         return increment
+
+    def _set_room_decision_diagnostics(
+        self,
+        device: BermudaDevice,
+        state: BermudaDataUpdateCoordinator.TrilatDecisionState,
+        *,
+        event: str,
+        candidate_area_id: str | None,
+        hold_reason: str | None,
+        classification=None,
+    ) -> None:
+        """Store compact room-classification diagnostics for diagnostic sensors."""
+        decision_reason = getattr(classification, "reason", None) or event
+        fingerprint_best_area_id = getattr(classification, "fingerprint_best_area_id", None)
+        device.room_decision_reason = decision_reason
+        device.room_candidate_area_id = candidate_area_id
+        device.room_candidate_name = (
+            (self.resolve_area_name(candidate_area_id) or candidate_area_id) if candidate_area_id else None
+        )
+        device.room_challenger_area_id = state.room_challenger_id
+        device.room_challenger_name = (
+            (self.resolve_area_name(state.room_challenger_id) or state.room_challenger_id)
+            if state.room_challenger_id
+            else None
+        )
+        device.room_challenger_evidence = float(state.room_challenger_evidence or 0.0)
+        device.room_hold_reason = hold_reason
+
+        if classification is None:
+            device.room_score_margin = None
+            device.room_geometry_score = None
+            device.room_fingerprint_score = None
+            device.room_fingerprint_best_area_id = None
+            device.room_fingerprint_best_name = None
+            device.room_fingerprint_margin = None
+            device.room_fingerprint_coverage = None
+            device.room_fingerprint_blend_weight = None
+            device.room_sample_count = 0
+            return
+
+        device.room_score_margin = max(
+            0.0,
+            float(getattr(classification, "best_score", 0.0))
+            - float(getattr(classification, "second_score", 0.0)),
+        )
+        device.room_geometry_score = float(getattr(classification, "geometry_score", 0.0))
+        device.room_fingerprint_score = float(getattr(classification, "fingerprint_score", 0.0))
+        device.room_fingerprint_best_area_id = fingerprint_best_area_id
+        device.room_fingerprint_best_name = (
+            (self.resolve_area_name(fingerprint_best_area_id) or fingerprint_best_area_id)
+            if fingerprint_best_area_id
+            else None
+        )
+        device.room_fingerprint_margin = float(getattr(classification, "fingerprint_confidence", 0.0))
+        device.room_fingerprint_coverage = float(getattr(classification, "fingerprint_coverage", 0.0))
+        device.room_fingerprint_blend_weight = float(getattr(classification, "fingerprint_blend_weight", 0.0))
+        device.room_sample_count = int(getattr(classification, "sample_count", 0) or 0)
 
     def _room_transition_strength(
         self,

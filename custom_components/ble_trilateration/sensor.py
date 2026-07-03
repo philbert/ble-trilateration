@@ -86,6 +86,27 @@ async def async_setup_entry(
             entities.append(BermudaSensorTrackingConfidence(coordinator, entry, address))
             entities.append(BermudaSensorGeometryQuality(coordinator, entry, address))
             entities.append(BermudaSensorResidualConsistency(coordinator, entry, address))
+            entities.append(BermudaSensorRoomDecisionReason(coordinator, entry, address))
+            entities.append(BermudaSensorRoomCandidate(coordinator, entry, address))
+            entities.append(BermudaSensorRoomChallenger(coordinator, entry, address))
+            entities.append(BermudaSensorRoomChallengerEvidence(coordinator, entry, address))
+            entities.append(BermudaSensorRoomScoreMargin(coordinator, entry, address))
+            entities.append(BermudaSensorGeometryRoomScore(coordinator, entry, address))
+            entities.append(BermudaSensorFingerprintRoomScore(coordinator, entry, address))
+            entities.append(BermudaSensorFingerprintBestRoom(coordinator, entry, address))
+            entities.append(BermudaSensorFingerprintMargin(coordinator, entry, address))
+            entities.append(BermudaSensorFingerprintCoverage(coordinator, entry, address))
+            entities.append(BermudaSensorFingerprintBlendWeight(coordinator, entry, address))
+            entities.append(BermudaSensorRoomSampleCount(coordinator, entry, address))
+            entities.append(BermudaSensorRoomHoldReason(coordinator, entry, address))
+            entities.append(BermudaSensorGeometryGdop(coordinator, entry, address))
+            entities.append(BermudaSensorGeometryConditionNumber(coordinator, entry, address))
+            entities.append(BermudaSensorNormalizedResidualRms(coordinator, entry, address))
+            entities.append(BermudaSensorResidualRms(coordinator, entry, address))
+            entities.append(BermudaSensorValidAnchorCount(coordinator, entry, address))
+            entities.append(BermudaSensorStaleAnchorCount(coordinator, entry, address))
+            entities.append(BermudaSensorNoAdvertAnchorCount(coordinator, entry, address))
+            entities.append(BermudaSensorValidOtherFloorAnchorCount(coordinator, entry, address))
             entities.append(BermudaSensorHorizontalSpeed(coordinator, entry, address))
             entities.append(BermudaSensorVerticalSpeed(coordinator, entry, address))
 
@@ -696,6 +717,260 @@ class BermudaSensorResidualConsistency(BermudaSensorPositionConfidence):
     def extra_state_attributes(self) -> Mapping[str, Any] | None:
         # Raw residual floats omitted — they changed every tick.
         return None
+
+
+class BermudaSensorRateLimitedDiagnostic(BermudaSensor):
+    """Base class for compact disabled-by-default diagnostic sensors."""
+
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _diag_suffix = ""
+    _diag_name = ""
+
+    @property
+    def unique_id(self):
+        return f"{self._device.unique_id}_{self._diag_suffix}"
+
+    @property
+    def name(self):
+        return self._diag_name
+
+    @property
+    def entity_registry_enabled_default(self) -> bool:
+        return False
+
+
+class BermudaSensorStringDiagnostic(BermudaSensorRateLimitedDiagnostic):
+    """Rate-limited diagnostic sensor for enum/string values."""
+
+    _device_attr = ""
+    _none_state = "none"
+
+    @property
+    def native_value(self):
+        value = getattr(self._device, self._device_attr, None)
+        return self._cached_ratelimit(value or self._none_state, fast_falling=False, fast_rising=False)
+
+
+class BermudaSensorNumericDiagnostic(BermudaSensorRateLimitedDiagnostic):
+    """Rate-limited diagnostic sensor for numeric values."""
+
+    _device_attr = ""
+    _round_digits = 3
+
+    @property
+    def native_value(self):
+        value = getattr(self._device, self._device_attr, None)
+        if value is None:
+            return None
+        return self._cached_ratelimit(round(float(value), self._round_digits), fast_falling=False, fast_rising=False)
+
+    @property
+    def state_class(self):
+        return SensorStateClass.MEASUREMENT
+
+
+class BermudaSensorIntegerDiagnostic(BermudaSensorNumericDiagnostic):
+    """Rate-limited diagnostic sensor for integer values."""
+
+    @property
+    def native_value(self):
+        value = getattr(self._device, self._device_attr, None)
+        if value is None:
+            return None
+        return self._cached_ratelimit(int(value), fast_falling=False, fast_rising=False)
+
+
+class BermudaSensorAnchorStatusCount(BermudaSensorIntegerDiagnostic):
+    """Count per-anchor diagnostic statuses without exposing all volatile details."""
+
+    _anchor_status = ""
+
+    @property
+    def native_value(self):
+        statuses = getattr(self._device, "trilat_anchor_statuses", {})
+        count = sum(1 for entry in statuses.values() if entry.get("status") == self._anchor_status)
+        return self._cached_ratelimit(count, fast_falling=False, fast_rising=False)
+
+
+class BermudaSensorRoomDecisionReason(BermudaSensorStringDiagnostic):
+    """Diagnostic sensor for the latest room-classification reason."""
+
+    _diag_suffix = "room_decision_reason"
+    _diag_name = "Room Decision Reason"
+    _device_attr = "room_decision_reason"
+
+
+class BermudaSensorRoomCandidate(BermudaSensorStringDiagnostic):
+    """Diagnostic sensor for the current best room candidate."""
+
+    _diag_suffix = "room_candidate"
+    _diag_name = "Room Candidate"
+    _device_attr = "room_candidate_name"
+
+
+class BermudaSensorRoomChallenger(BermudaSensorStringDiagnostic):
+    """Diagnostic sensor for the room challenger accumulating switch evidence."""
+
+    _diag_suffix = "room_challenger"
+    _diag_name = "Room Challenger"
+    _device_attr = "room_challenger_name"
+
+
+class BermudaSensorRoomChallengerEvidence(BermudaSensorNumericDiagnostic):
+    """Diagnostic sensor for accumulated same-floor room-switch evidence."""
+
+    _diag_suffix = "room_challenger_evidence"
+    _diag_name = "Room Challenger Evidence"
+    _device_attr = "room_challenger_evidence"
+    _round_digits = 2
+
+
+class BermudaSensorRoomScoreMargin(BermudaSensorNumericDiagnostic):
+    """Diagnostic sensor for blended room best-vs-second score margin."""
+
+    _diag_suffix = "room_score_margin"
+    _diag_name = "Room Score Margin"
+    _device_attr = "room_score_margin"
+
+
+class BermudaSensorGeometryRoomScore(BermudaSensorNumericDiagnostic):
+    """Diagnostic sensor for geometry-only support of the selected room."""
+
+    _diag_suffix = "geometry_room_score"
+    _diag_name = "Geometry Room Score"
+    _device_attr = "room_geometry_score"
+
+
+class BermudaSensorFingerprintRoomScore(BermudaSensorNumericDiagnostic):
+    """Diagnostic sensor for fingerprint support of the selected room."""
+
+    _diag_suffix = "fingerprint_room_score"
+    _diag_name = "Fingerprint Room Score"
+    _device_attr = "room_fingerprint_score"
+
+
+class BermudaSensorFingerprintBestRoom(BermudaSensorStringDiagnostic):
+    """Diagnostic sensor for the top RSSI-fingerprint room."""
+
+    _diag_suffix = "fingerprint_best_room"
+    _diag_name = "Fingerprint Best Room"
+    _device_attr = "room_fingerprint_best_name"
+
+
+class BermudaSensorFingerprintMargin(BermudaSensorNumericDiagnostic):
+    """Diagnostic sensor for RSSI-fingerprint best-vs-second score margin."""
+
+    _diag_suffix = "fingerprint_margin"
+    _diag_name = "Fingerprint Margin"
+    _device_attr = "room_fingerprint_margin"
+
+
+class BermudaSensorFingerprintCoverage(BermudaSensorNumericDiagnostic):
+    """Diagnostic sensor for current live-scanner coverage of candidate room samples."""
+
+    _diag_suffix = "fingerprint_coverage"
+    _diag_name = "Fingerprint Coverage"
+    _device_attr = "room_fingerprint_coverage"
+
+
+class BermudaSensorFingerprintBlendWeight(BermudaSensorNumericDiagnostic):
+    """Diagnostic sensor for how strongly room allocation weights fingerprinting."""
+
+    _diag_suffix = "fingerprint_blend_weight"
+    _diag_name = "Fingerprint Blend Weight"
+    _device_attr = "room_fingerprint_blend_weight"
+
+
+class BermudaSensorRoomSampleCount(BermudaSensorIntegerDiagnostic):
+    """Diagnostic sensor for sample count in the current candidate room."""
+
+    _diag_suffix = "room_sample_count"
+    _diag_name = "Room Sample Count"
+    _device_attr = "room_sample_count"
+
+
+class BermudaSensorRoomHoldReason(BermudaSensorStringDiagnostic):
+    """Diagnostic sensor for the latest reason a room switch was held."""
+
+    _diag_suffix = "room_hold_reason"
+    _diag_name = "Room Hold Reason"
+    _device_attr = "room_hold_reason"
+
+
+class BermudaSensorGeometryGdop(BermudaSensorNumericDiagnostic):
+    """Diagnostic sensor for trilateration geometric dilution of precision."""
+
+    _diag_suffix = "geometry_gdop"
+    _diag_name = "Geometry GDOP"
+    _device_attr = "trilat_geometry_gdop"
+    _round_digits = 2
+
+
+class BermudaSensorGeometryConditionNumber(BermudaSensorNumericDiagnostic):
+    """Diagnostic sensor for trilateration geometry condition number."""
+
+    _diag_suffix = "geometry_condition_number"
+    _diag_name = "Geometry Condition Number"
+    _device_attr = "trilat_geometry_condition"
+    _round_digits = 2
+
+
+class BermudaSensorNormalizedResidualRms(BermudaSensorNumericDiagnostic):
+    """Diagnostic sensor for normalized residual RMS."""
+
+    _diag_suffix = "normalized_residual_rms"
+    _diag_name = "Normalized Residual RMS"
+    _device_attr = "trilat_normalized_residual_rms"
+    _round_digits = 3
+
+
+class BermudaSensorResidualRms(BermudaSensorNumericDiagnostic):
+    """Diagnostic sensor for residual RMS in metres."""
+
+    _diag_suffix = "residual_rms"
+    _diag_name = "Residual RMS"
+    _device_attr = "trilat_residual_m"
+    _round_digits = 2
+
+    @property
+    def device_class(self):
+        return SensorDeviceClass.DISTANCE
+
+    @property
+    def native_unit_of_measurement(self):
+        return UnitOfLength.METERS
+
+
+class BermudaSensorValidAnchorCount(BermudaSensorAnchorStatusCount):
+    """Diagnostic sensor for same-floor anchors currently used by trilat."""
+
+    _diag_suffix = "valid_anchor_count"
+    _diag_name = "Valid Anchor Count"
+    _anchor_status = "valid"
+
+
+class BermudaSensorStaleAnchorCount(BermudaSensorAnchorStatusCount):
+    """Diagnostic sensor for anchors rejected because their advert is stale."""
+
+    _diag_suffix = "stale_anchor_count"
+    _diag_name = "Stale Anchor Count"
+    _anchor_status = "rejected_stale"
+
+
+class BermudaSensorNoAdvertAnchorCount(BermudaSensorAnchorStatusCount):
+    """Diagnostic sensor for configured anchors with no advert from this device."""
+
+    _diag_suffix = "no_advert_anchor_count"
+    _diag_name = "No Advert Anchor Count"
+    _anchor_status = "no_advert"
+
+
+class BermudaSensorValidOtherFloorAnchorCount(BermudaSensorAnchorStatusCount):
+    """Diagnostic sensor for live anchors seen on floors other than the selected floor."""
+
+    _diag_suffix = "valid_other_floor_anchor_count"
+    _diag_name = "Valid Other-Floor Anchor Count"
+    _anchor_status = "valid_other_floor"
 
 
 class BermudaSensorHorizontalSpeed(BermudaSensor):

@@ -14,13 +14,33 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 from custom_components.ble_trilateration.bermuda_device import BermudaDevice
 from custom_components.ble_trilateration.const import DOMAIN, NAME
 from custom_components.ble_trilateration.sensor import (
+    BermudaSensorFingerprintBestRoom,
+    BermudaSensorFingerprintBlendWeight,
+    BermudaSensorFingerprintCoverage,
+    BermudaSensorFingerprintMargin,
+    BermudaSensorFingerprintRoomScore,
+    BermudaSensorGeometryConditionNumber,
+    BermudaSensorGeometryGdop,
     BermudaSensorGeometryQuality,
+    BermudaSensorGeometryRoomScore,
     BermudaSensorHorizontalSpeed,
+    BermudaSensorNoAdvertAnchorCount,
+    BermudaSensorNormalizedResidualRms,
     BermudaSensorPositionUncertaintyXBand,
     BermudaSensorPositionUncertaintyYBand,
     BermudaSensorPositionConfidence,
     BermudaSensorResidualConsistency,
+    BermudaSensorResidualRms,
+    BermudaSensorRoomCandidate,
+    BermudaSensorRoomChallenger,
+    BermudaSensorRoomChallengerEvidence,
+    BermudaSensorRoomDecisionReason,
+    BermudaSensorRoomHoldReason,
+    BermudaSensorRoomSampleCount,
+    BermudaSensorRoomScoreMargin,
     BermudaSensorScannerAdvertStatus,
+    BermudaSensorScannerTimestampSync,
+    BermudaSensorStaleAnchorCount,
     BermudaSensorTrackedDeviceAdvertStatus,
     BermudaSensorTrackingConfidence,
     BermudaSensorTrilatAnchorCount,
@@ -28,6 +48,8 @@ from custom_components.ble_trilateration.sensor import (
     BermudaSensorTrilatX,
     BermudaSensorTrilatY,
     BermudaSensorTrilatZ,
+    BermudaSensorValidAnchorCount,
+    BermudaSensorValidOtherFloorAnchorCount,
     BermudaSensorVerticalSpeed,
     async_setup_entry as sensor_async_setup_entry,
     _remove_retired_sensor_entities,
@@ -69,18 +91,12 @@ async def test_scanner_timestamp_sync_sensor_exposes_runtime_health(hass) -> Non
     scanner.record_scanner_timestamp_regression(3.2)
     scanner.record_stale_advert_drop(1.1)
 
-    await hass.async_block_till_done()
-    coordinator.async_update_listeners()
-    await hass.async_block_till_done()
+    sensor = BermudaSensorScannerTimestampSync(coordinator, entry, scanner.address)
 
-    ent_reg = er.async_get(hass)
-    entity_id = ent_reg.async_get_entity_id("sensor", DOMAIN, f"{scanner.unique_id}_timestamp_sync")
-    state = hass.states.get(entity_id)
-    assert state is not None
-    assert state.state == "unstable"
-    assert state.attributes["recent_scanner_regressions"] == 1
-    assert state.attributes["recent_stale_advert_drops"] == 1
-    assert state.attributes["recent_max_backward_s"] == 3.2
+    assert sensor.native_value == "unstable"
+    assert sensor.extra_state_attributes["recent_regressions"] == 1
+    assert sensor.extra_state_attributes["recent_stale_drops"] == 1
+    assert sensor.extra_state_attributes["recent_max_backward_s"] == 3.2
 
 
 async def test_trilat_speed_sensors_expose_filtered_motion(hass) -> None:
@@ -97,8 +113,8 @@ async def test_trilat_speed_sensors_expose_filtered_motion(hass) -> None:
     horizontal = BermudaSensorHorizontalSpeed(coordinator, entry, device.address)
     vertical = BermudaSensorVerticalSpeed(coordinator, entry, device.address)
 
-    assert horizontal.native_value == 1.235
-    assert vertical.native_value == 0.457
+    assert horizontal.native_value == 1.23
+    assert vertical.native_value == 0.46
     assert horizontal.name == "Speed Horizontal"
     assert vertical.name == "Speed Vertical"
 
@@ -132,16 +148,78 @@ async def test_trilat_confidence_sensors_expose_numeric_confidence(hass) -> None
     assert tracking_confidence.native_value == 6.8
     assert tracking_confidence.state_class == SensorStateClass.MEASUREMENT
     assert geometry_quality.native_value == 4.3
-    assert geometry_quality.extra_state_attributes == {"gdop": 1.8, "condition_number": 12.5}
+    assert geometry_quality.extra_state_attributes is None
     assert residual_consistency.native_value == 7.7
-    assert residual_consistency.extra_state_attributes == {
-        "normalized_residual_rms": 1.234,
-        "residual_m": 0.9,
-    }
+    assert residual_consistency.extra_state_attributes is None
     assert raw_confidence.entity_category is None
     assert tracking_confidence.entity_category is None
     assert geometry_quality.entity_category is None
     assert residual_consistency.entity_category == EntityCategory.DIAGNOSTIC
+
+
+async def test_room_classifier_diagnostic_sensors_expose_compact_values(hass) -> None:
+    """Room-classifier diagnostics should expose compact rate-limited values."""
+    entry = await setup_integration(hass)
+    coordinator = entry.runtime_data.coordinator
+
+    device = BermudaDevice("AA:BB:CC:DD:EE:78", coordinator)
+    device.create_sensor = True
+    device.room_decision_reason = "ok"
+    device.room_candidate_name = "Living Room"
+    device.room_challenger_name = "Kitchen"
+    device.room_challenger_evidence = 0.345
+    device.room_score_margin = 0.12345
+    device.room_geometry_score = 0.45678
+    device.room_fingerprint_score = 0.56789
+    device.room_fingerprint_best_name = "Living Room"
+    device.room_fingerprint_margin = 0.23456
+    device.room_fingerprint_coverage = 0.78901
+    device.room_fingerprint_blend_weight = 0.65
+    device.room_sample_count = 7
+    device.room_hold_reason = "room_evidence(0.35/0.50)"
+    device.trilat_geometry_gdop = 1.234
+    device.trilat_geometry_condition = 12.345
+    device.trilat_normalized_residual_rms = 0.98765
+    device.trilat_residual_m = 1.234
+    device.trilat_anchor_statuses = {
+        "scanner-1": {"status": "valid"},
+        "scanner-2": {"status": "rejected_stale"},
+        "scanner-3": {"status": "no_advert"},
+        "scanner-4": {"status": "valid_other_floor"},
+        "scanner-5": {"status": "valid"},
+    }
+    coordinator.devices[device.address] = device
+
+    assert BermudaSensorRoomDecisionReason(coordinator, entry, device.address).native_value == "ok"
+    assert BermudaSensorRoomCandidate(coordinator, entry, device.address).native_value == "Living Room"
+    assert BermudaSensorRoomChallenger(coordinator, entry, device.address).native_value == "Kitchen"
+    assert BermudaSensorRoomChallengerEvidence(coordinator, entry, device.address).native_value == 0.34
+    assert BermudaSensorRoomScoreMargin(coordinator, entry, device.address).native_value == 0.123
+    assert BermudaSensorGeometryRoomScore(coordinator, entry, device.address).native_value == 0.457
+    assert BermudaSensorFingerprintRoomScore(coordinator, entry, device.address).native_value == 0.568
+    assert BermudaSensorFingerprintBestRoom(coordinator, entry, device.address).native_value == "Living Room"
+    assert BermudaSensorFingerprintMargin(coordinator, entry, device.address).native_value == 0.235
+    assert BermudaSensorFingerprintCoverage(coordinator, entry, device.address).native_value == 0.789
+    assert BermudaSensorFingerprintBlendWeight(coordinator, entry, device.address).native_value == 0.65
+    assert BermudaSensorRoomSampleCount(coordinator, entry, device.address).native_value == 7
+    assert BermudaSensorRoomHoldReason(coordinator, entry, device.address).native_value == "room_evidence(0.35/0.50)"
+    assert BermudaSensorGeometryGdop(coordinator, entry, device.address).native_value == 1.23
+    assert BermudaSensorGeometryConditionNumber(coordinator, entry, device.address).native_value == 12.35
+    assert BermudaSensorNormalizedResidualRms(coordinator, entry, device.address).native_value == 0.988
+    residual_rms = BermudaSensorResidualRms(coordinator, entry, device.address)
+    assert residual_rms.native_value == 1.23
+    assert residual_rms.native_unit_of_measurement == UnitOfLength.METERS
+    assert BermudaSensorValidAnchorCount(coordinator, entry, device.address).native_value == 2
+    assert BermudaSensorStaleAnchorCount(coordinator, entry, device.address).native_value == 1
+    assert BermudaSensorNoAdvertAnchorCount(coordinator, entry, device.address).native_value == 1
+    assert BermudaSensorValidOtherFloorAnchorCount(coordinator, entry, device.address).native_value == 1
+
+    margin_sensor = BermudaSensorRoomScoreMargin(coordinator, entry, device.address)
+    assert margin_sensor.entity_category == EntityCategory.DIAGNOSTIC
+    assert margin_sensor.entity_registry_enabled_default is False
+    assert margin_sensor.native_value == 0.123
+    device.room_score_margin = 0.999
+    assert margin_sensor.native_value == 0.123
 
 
 async def test_promoted_trilat_sensors_are_normal_sensors(hass) -> None:
@@ -189,20 +267,12 @@ async def test_position_uncertainty_band_sensors_expose_band_widths(hass) -> Non
     sensor_x = BermudaSensorPositionUncertaintyXBand(coordinator, entry, device.address)
     sensor_y = BermudaSensorPositionUncertaintyYBand(coordinator, entry, device.address)
 
-    assert sensor_x.native_value == 5.432
-    assert sensor_y.native_value == 3.211
+    assert sensor_x.native_value == 5.43
+    assert sensor_y.native_value == 3.21
     assert sensor_x.entity_category == EntityCategory.DIAGNOSTIC
     assert sensor_y.entity_category == EntityCategory.DIAGNOSTIC
-    assert sensor_x.extra_state_attributes == {
-        "source": "mixed",
-        "correction_m": 0.3456,
-        "raw_trilat_x_m": 1.2345,
-    }
-    assert sensor_y.extra_state_attributes == {
-        "source": "mixed",
-        "correction_m": -0.1234,
-        "raw_trilat_y_m": 6.7891,
-    }
+    assert sensor_x.extra_state_attributes == {"source": "mixed"}
+    assert sensor_y.extra_state_attributes == {"source": "mixed"}
 
 
 async def test_trilat_floor_sensor_exposes_phase0_diagnostics(hass) -> None:
@@ -212,6 +282,7 @@ async def test_trilat_floor_sensor_exposes_phase0_diagnostics(hass) -> None:
 
     device = BermudaDevice("AA:BB:CC:DD:EE:6A", coordinator)
     device.create_sensor = True
+    device.trilat_floor_id = "ground_floor"
     device.trilat_floor_name = "Ground floor"
     device.trilat_floor_diagnostics = {
         "reason": "floor_switch_cold_reset",
@@ -236,20 +307,7 @@ async def test_trilat_floor_sensor_exposes_phase0_diagnostics(hass) -> None:
     sensor = BermudaSensorTrilatFloor(coordinator, entry, device.address)
 
     assert sensor.native_value == "Ground floor"
-    assert sensor.extra_state_attributes == {
-        "reason": "floor_switch_cold_reset",
-        "selected_floor_id": "ground_floor",
-        "selected_floor_name": "Ground floor",
-        "best_floor_id": "ground_floor",
-        "best_floor_name": "Ground floor",
-        "challenger_floor_id": "street_level",
-        "challenger_floor_name": "Street level",
-        "floor_switch_reset_count": 2,
-        "floor_evidence": [
-            {"floor_id": "ground_floor", "floor_name": "Ground floor", "score": 10.123},
-            {"floor_id": "street_level", "floor_name": "Street level", "score": 8.432},
-        ],
-    }
+    assert sensor.extra_state_attributes == {"floor_id": "ground_floor"}
 
 
 async def test_retired_legacy_sensor_entities_are_pruned(hass) -> None:
@@ -312,21 +370,15 @@ async def test_per_scanner_ble_status_sensors_expose_structured_status(hass) -> 
 
     assert tracked_side.native_value == "valid_other_floor"
     assert tracked_side.extra_state_attributes == {
-        "scanner_address": "AA:BB:CC:DD:EE:09",
+        "scanner_address": "aa:bb:cc:dd:ee:09",
         "scanner_name": "Kitchen Proxy",
-        "status": "valid_other_floor",
-        "sync_state": "drifting",
-        "affects_position": True,
     }
     assert scanner_side.native_value == "valid_other_floor"
     assert scanner_side.extra_state_attributes == {
-        "scanner_address": "AA:BB:CC:DD:EE:09",
-        "scanner_name": "Kitchen Proxy",
-        "status": "valid_other_floor",
-        "sync_state": "drifting",
-        "affects_position": True,
         "tracked_device_name": tracked.name,
         "tracked_device_address": tracked.address,
+        "scanner_address": "aa:bb:cc:dd:ee:09",
+        "scanner_name": "Kitchen Proxy",
     }
 
 
@@ -384,11 +436,5 @@ async def test_trilat_anchor_count_sensor_exposes_anchor_status_lines(hass) -> N
 
     assert sensor.native_value == 2
     assert sensor.extra_state_attributes == {
-        "used_anchors": 2,
         "cross_floor_candidate_count": 1,
-        "cross_floor_candidates": [
-            "Garage proxy: valid_other_floor (selected=ground_floor, scanner=street_level, other_floor_sigma=6.40m)",
-        ],
-        "1": "Living room light switch 1: valid",
-        "2": "Oven: rejected_no_range (sync=drifting)",
     }

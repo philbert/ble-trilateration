@@ -155,6 +155,23 @@ class BermudaDevice(dict):
         self.diag_area_switch: str | None = None  # saves room-classification diagnostics
         self.mobility_type: str = DEFAULT_MOBILITY_TYPE
         self.area_is_unknown: bool = False
+        # Per-device room-classification diagnostics.
+        self.room_decision_reason: str | None = None
+        self.room_candidate_area_id: str | None = None
+        self.room_candidate_name: str | None = None
+        self.room_challenger_area_id: str | None = None
+        self.room_challenger_name: str | None = None
+        self.room_challenger_evidence: float = 0.0
+        self.room_score_margin: float | None = None
+        self.room_geometry_score: float | None = None
+        self.room_fingerprint_score: float | None = None
+        self.room_fingerprint_best_area_id: str | None = None
+        self.room_fingerprint_best_name: str | None = None
+        self.room_fingerprint_margin: float | None = None
+        self.room_fingerprint_coverage: float | None = None
+        self.room_fingerprint_blend_weight: float | None = None
+        self.room_sample_count: int = 0
+        self.room_hold_reason: str | None = None
         # Per-scanner trilateration anchor settings (only meaningful for scanners).
         self.anchor_x_m: float | None = None
         self.anchor_y_m: float | None = None

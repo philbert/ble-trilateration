@@ -1777,6 +1777,17 @@ def test_area_switch_emits_target_room_diag_logging():
     assert "geom=0.41" in args[8]
     assert "fp=0.73" in args[8]
     assert "fp_rooms=living_room:0.73/1.00/3,kitchen:0.40/0.75/2" in args[8]
+    assert device.room_decision_reason == "ok"
+    assert device.room_candidate_area_id == "living_room"
+    assert device.room_challenger_area_id == "living_room"
+    assert device.room_score_margin == pytest.approx(0.50)
+    assert device.room_geometry_score == pytest.approx(0.41)
+    assert device.room_fingerprint_score == pytest.approx(0.73)
+    assert device.room_fingerprint_best_area_id == "living_room"
+    assert device.room_fingerprint_margin == pytest.approx(0.33)
+    assert device.room_fingerprint_coverage == pytest.approx(1.0)
+    assert device.room_sample_count == 3
+    assert device.room_hold_reason.startswith("room_evidence")
 
 
 def test_trilat_floor_switch_preserves_state_and_ewma():
