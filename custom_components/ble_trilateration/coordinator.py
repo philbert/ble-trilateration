@@ -1902,9 +1902,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                     geometry_quality_01=geometry_quality_01,
                 )
                 if guardrail_reason is not None:
-                    state.room_challenger_id = None
-                    state.room_challenger_since = 0.0
-                    state.room_challenger_evidence = 0.0
+                    self._decay_room_challenger(state, supporting_area_id=classification.area_id)
                     device.diag_area_switch += f" hold={guardrail_reason}"
                     device.apply_position_classification(
                         stable_area_id,
@@ -1951,9 +1949,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                     device.diag_area_switch += " weak_axis_aligned=yes"
                 sample_margin = self._room_switch_min_sample_margin(classification.sample_count)
                 if (classification.best_score - classification.second_score) < sample_margin:
-                    state.room_challenger_id = None
-                    state.room_challenger_since = 0.0
-                    state.room_challenger_evidence = 0.0
+                    self._decay_room_challenger(state, supporting_area_id=classification.area_id)
                     device.diag_area_switch += f" hold=min_sample_margin({sample_margin:.2f})"
                     device.apply_position_classification(
                         stable_area_id,
@@ -2044,9 +2040,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             return
 
         if stable_area_id is not None and classification.reason in {"weak_room_evidence", "room_ambiguity"}:
-            state.room_challenger_id = None
-            state.room_challenger_since = 0.0
-            state.room_challenger_evidence = 0.0
+            self._decay_room_challenger(state, supporting_area_id=classification.best_area_id)
             device.diag_area_switch += " hold=weak_evidence"
             device.apply_position_classification(
                 stable_area_id,
@@ -2202,6 +2196,35 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         if weak_axis == "x":
             return dx > dy
         return dy > dx
+
+    def _decay_room_challenger(
+        self,
+        state: BermudaDataUpdateCoordinator.TrilatDecisionState,
+        *,
+        supporting_area_id: str | None = None,
+    ) -> None:
+        """
+        Soften challenger evidence on a non-confirming cycle instead of zeroing it.
+
+        A cycle that cannot confirm a switch (ambiguous classification, weak
+        guardrail, sparse-sample margin) still carries information: when its
+        best-ranked room matches the standing challenger it weakly supports the
+        move; otherwise the accumulated evidence decays. The challenger is only
+        dropped once evidence decays to noise.
+        """
+        if state.room_challenger_id is None:
+            return
+        if supporting_area_id is not None and supporting_area_id == state.room_challenger_id:
+            state.room_challenger_evidence = min(
+                state.room_challenger_evidence + self._ROOM_SWITCH_EVIDENCE_AMBIENT_INCREMENT,
+                self._ROOM_SWITCH_EVIDENCE_THRESHOLD,
+            )
+            return
+        state.room_challenger_evidence *= self._ROOM_SWITCH_EVIDENCE_DECAY
+        if state.room_challenger_evidence < self._ROOM_SWITCH_EVIDENCE_EPSILON:
+            state.room_challenger_id = None
+            state.room_challenger_since = 0.0
+            state.room_challenger_evidence = 0.0
 
     def _room_switch_guardrail_reason(
         self,
@@ -2517,7 +2540,11 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
     _ZONE_TRAVERSAL_RECENCY_S: float = 30.0
     _TRILAT_BOOTSTRAP_MAX_AGE_S: float = 6 * 3600.0
     _TRILAT_BOOTSTRAP_HOLD_S: float = 60.0
-    _ROOM_SWITCH_GEOMETRY_QUALITY_MIN: float = 0.30
+    # Live geometry quality rarely clears this bar (log P50 ~0.13, P90 ~0.25 in
+    # real deployments), so it is tuned near the live P75 rather than an ideal:
+    # above it geometry is trusted to form challengers on its own; below it the
+    # fingerprint side must be decisive.
+    _ROOM_SWITCH_GEOMETRY_QUALITY_MIN: float = 0.20
     _ROOM_SWITCH_FP_CONFIDENCE_DECISIVE: float = 0.05
     _ROOM_SWITCH_FP_COVERAGE_FLOOR: float = 0.50
     _ROOM_SWITCH_MIN_SAMPLE_MARGIN_ONE: float = 0.10
@@ -2525,6 +2552,16 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
     _ROOM_SWITCH_EVIDENCE_THRESHOLD: float = 0.45
     _ROOM_SWITCH_EVIDENCE_MIN_INCREMENT: float = 0.08
     _ROOM_SWITCH_EVIDENCE_MAX_INCREMENT: float = 0.50
+    # Non-confirming cycles decay challenger evidence instead of zeroing it.
+    # Under weak fingerprint margins most cycles classify as ambiguous, and a
+    # hard reset forced a run of consecutive unambiguous cycles before any
+    # switch — minutes of latency for a genuine room change.
+    _ROOM_SWITCH_EVIDENCE_DECAY: float = 0.5
+    # An ambiguous/blocked cycle whose best-ranked room still matches the
+    # standing challenger weakly supports the move rather than decaying it.
+    _ROOM_SWITCH_EVIDENCE_AMBIENT_INCREMENT: float = 0.04
+    # Evidence below this is noise; the challenger is dropped.
+    _ROOM_SWITCH_EVIDENCE_EPSILON: float = 0.02
 
     def trilat_max_horizontal_speed_mps(self) -> float:
         """Return the configured horizontal trilat speed limit."""

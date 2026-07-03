@@ -1360,7 +1360,7 @@ def test_area_switch_holds_when_geometry_is_weak_and_fingerprint_is_not_decisive
     device.trilat_z_m = 3.0
     device.trilat_floor_id = "f1"
     device.trilat_floor_name = "Floor f1"
-    device.trilat_geometry_quality = 2.0
+    device.trilat_geometry_quality = 1.5
     device.area_id = "kitchen"
     device.area_name = "kitchen"
     device.area_last_seen_id = "kitchen"
@@ -1404,7 +1404,7 @@ def test_area_switch_logs_guardrail_hold_once_per_state():
     device.trilat_z_m = 3.0
     device.trilat_floor_id = "f1"
     device.trilat_floor_name = "Floor f1"
-    device.trilat_geometry_quality = 2.0
+    device.trilat_geometry_quality = 1.5
     device.area_id = "kitchen"
     device.area_name = "kitchen"
     device.area_last_seen_id = "kitchen"
@@ -1455,7 +1455,7 @@ def test_area_switch_allows_decisive_fingerprint_challenger_when_geometry_is_wea
     device.trilat_z_m = 3.0
     device.trilat_floor_id = "f1"
     device.trilat_floor_name = "Floor f1"
-    device.trilat_geometry_quality = 2.0
+    device.trilat_geometry_quality = 1.5
     device.area_id = "kitchen"
     device.area_name = "kitchen"
     device.area_last_seen_id = "kitchen"
@@ -1500,7 +1500,7 @@ def test_area_switch_logs_suspicious_low_geometry_switch_at_warning():
     device.trilat_z_m = 3.0
     device.trilat_floor_id = "f1"
     device.trilat_floor_name = "Floor f1"
-    device.trilat_geometry_quality = 2.0
+    device.trilat_geometry_quality = 1.5
     device.area_id = "kitchen"
     device.area_name = "kitchen"
     device.area_last_seen_id = "kitchen"
@@ -1539,7 +1539,7 @@ def test_area_switch_logs_suspicious_low_geometry_switch_at_warning():
     assert args[4] == "switch_applied"
     assert args[8] == "living_room"
     assert args[9] == "none"
-    assert "geom_q=0.20" in args[15]
+    assert "geom_q=0.15" in args[15]
     assert "fp_best=living_room" in args[15]
 
 
@@ -2436,3 +2436,163 @@ def test_restart_bootstrap_skips_low_quality_record():
     assert state.bootstrap_restored_at == 0.0
     assert state.last_solution_xy is None
     assert device.area_last_seen_id is None
+
+
+def _decay_test_device(coordinator, name, geometry_quality=5.0):
+    """Build a stable-in-kitchen device for room-switch evidence tests."""
+    device = _DummyDevice(name)
+    device.trilat_status = "ok"
+    device.trilat_x_m = 10.0
+    device.trilat_y_m = 2.0
+    device.trilat_z_m = 3.0
+    device.trilat_floor_id = "f1"
+    device.trilat_floor_name = "Floor f1"
+    device.trilat_geometry_quality = geometry_quality
+    device.area_id = "kitchen"
+    device.area_name = "kitchen"
+    device.area_last_seen_id = "kitchen"
+    return device
+
+
+def _unambiguous(area_id, margin=0.15):
+    return RoomClassification(
+        area_id=area_id,
+        reason="ok",
+        best_area_id=area_id,
+        best_score=0.40 + margin,
+        second_score=0.40,
+        topk_used=3,
+        geometry_score=0.30,
+        fingerprint_score=0.55,
+        fingerprint_best_area_id=area_id,
+        fingerprint_best_score=0.55,
+        fingerprint_second_score=0.40,
+        fingerprint_confidence=0.15,
+        fingerprint_coverage=1.0,
+        sample_count=3,
+    )
+
+
+def _ambiguous(best_area_id):
+    return RoomClassification(
+        area_id=None,
+        reason="room_ambiguity",
+        best_area_id=best_area_id,
+        best_score=0.40,
+        second_score=0.38,
+        topk_used=3,
+        geometry_score=0.10,
+        fingerprint_score=0.45,
+        fingerprint_best_area_id=best_area_id,
+        fingerprint_best_score=0.45,
+        fingerprint_second_score=0.43,
+        fingerprint_confidence=0.02,
+        fingerprint_coverage=1.0,
+        sample_count=3,
+    )
+
+
+def _run_classification_sequence(coordinator, device, sequence):
+    """Feed a scripted classification per cycle through the room decision path."""
+    remaining = list(sequence)
+    coordinator.room_classifier = SimpleNamespace(
+        has_trained_rooms=lambda _layout_hash, _floor_id: True,
+        classify=lambda **_kwargs: remaining.pop(0),
+        room_reference_point=lambda *_args, **_kwargs: (0.0, 0.0, 0.0),
+    )
+    with patch("custom_components.ble_trilateration.coordinator.monotonic_time_coarse", return_value=100.0):
+        while remaining:
+            coordinator._refresh_area_from_trilat(device, "layout-a")
+
+
+def test_ambiguous_cycle_decays_challenger_evidence_instead_of_reset():
+    """An ambiguous cycle must soften challenger evidence, not wipe it."""
+    coordinator = _make_coordinator()
+    device = _decay_test_device(coordinator, "dev-evidence-decay")
+
+    _run_classification_sequence(
+        coordinator,
+        device,
+        [
+            _unambiguous("living_room"),  # challenger starts: evidence 0.15
+            _unambiguous("living_room"),  # waiting: evidence 0.30
+            _ambiguous("guest_room"),  # non-supporting ambiguity: decay to 0.15
+        ],
+    )
+
+    state = coordinator._get_trilat_decision_state(device)
+    assert device.area_id == "kitchen"
+    assert state.room_challenger_id == "living_room"
+    assert state.room_challenger_evidence == pytest.approx(0.15)
+
+
+def test_supporting_ambiguity_preserves_and_builds_evidence_to_switch():
+    """Sustained ambiguous-but-consistent cycles plus one clean cycle complete a switch."""
+    coordinator = _make_coordinator()
+    device = _decay_test_device(coordinator, "dev-evidence-switch")
+
+    _run_classification_sequence(
+        coordinator,
+        device,
+        [
+            _unambiguous("living_room"),  # start: 0.15
+            _unambiguous("living_room"),  # waiting: 0.30
+            _ambiguous("living_room"),  # supporting ambiguity: 0.34
+            _ambiguous("living_room"),  # 0.38
+            _ambiguous("living_room"),  # 0.42
+            _unambiguous("living_room"),  # 0.57 >= 0.45: switch applies
+        ],
+    )
+
+    assert device.area_id == "living_room"
+
+
+def test_repeated_non_supporting_ambiguity_clears_challenger():
+    """Evidence that keeps decaying eventually drops the challenger entirely."""
+    coordinator = _make_coordinator()
+    device = _decay_test_device(coordinator, "dev-evidence-clear")
+
+    _run_classification_sequence(
+        coordinator,
+        device,
+        [
+            _unambiguous("living_room"),  # start: 0.15
+            _ambiguous("kitchen"),  # 0.075
+            _ambiguous("kitchen"),  # 0.0375
+            _ambiguous("kitchen"),  # 0.01875 < epsilon: dropped
+        ],
+    )
+
+    state = coordinator._get_trilat_decision_state(device)
+    assert device.area_id == "kitchen"
+    assert state.room_challenger_id is None
+    assert state.room_challenger_evidence == 0.0
+
+
+def test_geometry_guardrail_passes_at_live_p75_quality():
+    """Geometry quality at ~0.25 now clears the guardrail (was blocked at the 0.30 bar)."""
+    coordinator = _make_coordinator()
+    device = _decay_test_device(coordinator, "dev-guardrail-p75", geometry_quality=2.5)
+
+    classification = RoomClassification(
+        area_id="living_room",
+        reason="ok",
+        best_area_id="living_room",
+        best_score=0.52,
+        second_score=0.40,
+        topk_used=2,
+        geometry_score=0.08,
+        fingerprint_score=0.55,
+        fingerprint_best_area_id="living_room",
+        fingerprint_best_score=0.55,
+        fingerprint_second_score=0.53,
+        fingerprint_confidence=0.02,  # not decisive: old bar would have blocked
+        fingerprint_coverage=0.80,
+        sample_count=3,
+    )
+    _run_classification_sequence(coordinator, device, [classification])
+
+    state = coordinator._get_trilat_decision_state(device)
+    assert device.area_id == "kitchen"  # still held (challenger just started)
+    assert state.room_challenger_id == "living_room"
+    assert "hold=weak_geometry_guardrail" not in device.diag_area_switch
