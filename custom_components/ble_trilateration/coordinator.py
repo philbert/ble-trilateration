@@ -795,10 +795,17 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
 
     @staticmethod
     def _timestamp_health_penalty(scanner: BermudaDevice | None) -> float:
-        """Map scanner timestamp health into an uncertainty inflation factor."""
+        """
+        Map scanner timestamp health into an uncertainty inflation factor.
+
+        This only ever widens uncertainty — scanners are no longer excluded
+        outright. Broken-stamp scanners ingest via the stampless fallback, so
+        their RSSI is genuine and merely deserves a wide sigma.
+        """
         if scanner is None or not getattr(scanner, "is_scanner", False):
             return 0.0
-        sync_state = scanner.timestamp_sync_diagnostics().get("state")
+        state_fn = getattr(scanner, "timestamp_sync_state", None)
+        sync_state = state_fn() if callable(state_fn) else scanner.timestamp_sync_diagnostics().get("state")
         if sync_state in {"local", "synchronized"}:
             return 0.0
         if sync_state == "recovered":
@@ -1843,8 +1850,6 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 continue
             scanner = advert.scanner_device
             if scanner.floor_id != device.trilat_floor_id:
-                continue
-            if self._timestamp_health_penalty(scanner) >= 1.0:
                 continue
             live_floor_adverts.append(advert)
             window_rssi = getattr(advert, "rssi_window_median", None)
@@ -3793,10 +3798,10 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             if scanner_floor_id is None:
                 continue
             health_penalty = self._timestamp_health_penalty(advert.scanner_device)
-            if health_penalty >= 1.0:
-                # Broken-timestamp scanners contribute nothing to floor evidence
-                # or fingerprint matching; their data is replayed/stale.
-                continue
+            # Broken-stamp scanners now ingest via the stampless fallback, so their
+            # RSSI is genuine; they contribute at reduced weight instead of being
+            # excluded (frozen/replayed data never refreshes stamps and ages out
+            # via DISTANCE_TIMEOUT above regardless).
             health_weight = 1.0 / (1.0 + health_penalty)
             rssi_for_score = getattr(advert, "rssi_window_median", None)
             if rssi_for_score is None:
@@ -4323,8 +4328,6 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             if advert.stamp < nowstamp - DISTANCE_TIMEOUT:
                 continue
             scanner = advert.scanner_device
-            if self._timestamp_health_penalty(scanner) >= 1.0:
-                continue
             other_floor = scanner.floor_id != selected_floor_id
             anchor_x = self.get_scanner_anchor_x(scanner.address)
             anchor_y = self.get_scanner_anchor_y(scanner.address)

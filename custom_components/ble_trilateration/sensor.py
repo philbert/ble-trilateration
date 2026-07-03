@@ -13,8 +13,8 @@ from homeassistant.const import (
     UnitOfSpeed,
 )
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers.dispatcher import async_dispatcher_connect
 
 from .const import (
     _LOGGER,
@@ -657,7 +657,9 @@ class BermudaSensorGeometryQuality(BermudaSensorPositionConfidence):
 
     @property
     def native_value(self):
-        return self._cached_ratelimit(round(getattr(self._device, "trilat_geometry_quality", 0.0), 1), fast_falling=False, fast_rising=False)
+        return self._cached_ratelimit(
+            round(getattr(self._device, "trilat_geometry_quality", 0.0), 1), fast_falling=False, fast_rising=False
+        )
 
     @property
     def extra_state_attributes(self) -> Mapping[str, Any] | None:
@@ -686,7 +688,9 @@ class BermudaSensorResidualConsistency(BermudaSensorPositionConfidence):
 
     @property
     def native_value(self):
-        return self._cached_ratelimit(round(getattr(self._device, "trilat_residual_consistency", 0.0), 1), fast_falling=False, fast_rising=False)
+        return self._cached_ratelimit(
+            round(getattr(self._device, "trilat_residual_consistency", 0.0), 1), fast_falling=False, fast_rising=False
+        )
 
     @property
     def extra_state_attributes(self) -> Mapping[str, Any] | None:
@@ -768,10 +772,32 @@ class BermudaSensorScannerTimestampSync(BermudaSensor):
 
     @property
     def extra_state_attributes(self) -> Mapping[str, Any] | None:
-        # Full diagnostics dict contained rolling timestamps/counters and was the
-        # largest per-scanner contributor to state_attributes growth. Drop it;
-        # use the HA diagnostics download for on-demand detail.
-        return None
+        # Deliberately compact: the full rolling diagnostics dict was the largest
+        # per-scanner contributor to state_attributes growth, so only slow-moving
+        # values are exposed (counters move only while problems occur, and the
+        # accepted-advert age is bucketed so "proxy silent" vs "packets rejected"
+        # is visible without per-second churn). Full detail remains available in
+        # the HA diagnostics download.
+        diagnostics = self._device.timestamp_sync_diagnostics()
+        age_s = diagnostics.get("last_accepted_advert_age_s")
+        if age_s is None:
+            accepted_bucket = "never"
+        elif age_s < 60.0:
+            accepted_bucket = "under_1m"
+        elif age_s < 300.0:
+            accepted_bucket = "1m_to_5m"
+        elif age_s < 1800.0:
+            accepted_bucket = "5m_to_30m"
+        else:
+            accepted_bucket = "over_30m"
+        return {
+            "last_accepted_advert": accepted_bucket,
+            "recent_regressions": diagnostics["recent_scanner_regressions"],
+            "recent_stale_drops": diagnostics["recent_stale_advert_drops"],
+            "recent_rebases": diagnostics["recent_stamp_rebases"],
+            "recent_future_clamps": diagnostics["recent_future_stamp_clamps"],
+            "recent_max_backward_s": diagnostics["recent_max_backward_s"],
+        }
 
 
 class BermudaGlobalSensor(BermudaGlobalEntity, SensorEntity):

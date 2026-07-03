@@ -13,8 +13,8 @@ for them, so we can use them to contribute towards measurements.
 from __future__ import annotations
 
 import binascii
-from collections import deque
 import re
+from collections import deque
 from typing import TYPE_CHECKING, Final
 
 from bluetooth_data_tools import monotonic_time_coarse
@@ -46,8 +46,8 @@ from .const import (
     BDADDR_TYPE_UNKNOWN,
     CONF_DEVICES,
     CONF_DEVTRACK_TIMEOUT,
-    DEFAULT_MOBILITY_TYPE,
     DEFAULT_DEVTRACK_TIMEOUT,
+    DEFAULT_MOBILITY_TYPE,
     DOMAIN,
     ICON_DEFAULT_AREA,
     ICON_DEFAULT_FLOOR,
@@ -79,6 +79,13 @@ class BermudaDevice(dict):
 
     _TIMESTAMP_SYNC_WINDOW_S: Final = 300.0
     _TIMESTAMP_SYNC_RECOVERY_S: Final = 900.0
+    # A scanner only counts as actively broken/unstable while its most recent
+    # timestamp problem is younger than this. Older events decay to "drifting"
+    # so a single reboot glitch does not exile an anchor for the whole window.
+    _TIMESTAMP_SYNC_ONGOING_S: Final = 60.0
+    # Stamps this far ahead of local monotonic time are counted as clock-mapping
+    # glitches; anything smaller is common jitter and clamped silently.
+    _FUTURE_STAMP_TOLERANCE_S: Final = 2.0
 
     def __hash__(self) -> int:
         """A BermudaDevice can be uniquely identified by the address used."""
@@ -210,6 +217,15 @@ class BermudaDevice(dict):
         self.scanner_stale_advert_drop_last_s: float | None = None
         self.scanner_stale_advert_drop_last_at: float | None = None
         self.scanner_stale_advert_drop_recent_s: deque[tuple[float, float]] = deque(maxlen=256)
+        self.scanner_stamp_rebase_count: int = 0
+        self.scanner_stamp_rebase_last_s: float | None = None
+        self.scanner_stamp_rebase_last_at: float | None = None
+        self.scanner_stamp_rebase_recent_s: deque[tuple[float, float]] = deque(maxlen=256)
+        self.scanner_future_stamp_clamp_count: int = 0
+        self.scanner_future_stamp_clamp_last_s: float | None = None
+        self.scanner_future_stamp_clamp_last_at: float | None = None
+        self.scanner_future_stamp_clamp_recent_s: deque[tuple[float, float]] = deque(maxlen=256)
+        self.scanner_last_accepted_advert_at: float | None = None
         self.adverts: dict[
             tuple[str, str], BermudaAdvert
         ] = {}  # str will be a scanner address OR a deviceaddress__scanneraddress
@@ -579,7 +595,16 @@ class BermudaDevice(dict):
 
         # This needs to be recalculated each run, since we don't have access to _last_update
         # and need to use a derived value rather than reference.
-        scannerstamp = 0 - ha_scanner.time_since_last_detection() + monotonic_time_coarse()
+        nowstamp = monotonic_time_coarse()
+        scannerstamp = nowstamp - ha_scanner.time_since_last_detection()
+        if scannerstamp > nowstamp:
+            # A detection "in the future" means the backend's clock mapping is off.
+            # The truthful upper bound is right now; clamping stops the bogus value
+            # from poisoning last_seen and rejecting every later (correct) stamp.
+            # Sub-tolerance future offsets are common jitter and not worth counting.
+            if scannerstamp - nowstamp > self._FUTURE_STAMP_TOLERANCE_S:
+                self.record_future_stamp_clamp(scannerstamp - nowstamp)
+            scannerstamp = nowstamp
         if scannerstamp > self.last_seen:
             self.last_seen = scannerstamp
         elif self.last_seen - scannerstamp > 0.8:  # For some reason small future-offsets are common.
@@ -641,6 +666,10 @@ class BermudaDevice(dict):
             self.scanner_timestamp_regression_recent_s.popleft()
         while self.scanner_stale_advert_drop_recent_s and self.scanner_stale_advert_drop_recent_s[0][0] < cutoff:
             self.scanner_stale_advert_drop_recent_s.popleft()
+        while self.scanner_stamp_rebase_recent_s and self.scanner_stamp_rebase_recent_s[0][0] < cutoff:
+            self.scanner_stamp_rebase_recent_s.popleft()
+        while self.scanner_future_stamp_clamp_recent_s and self.scanner_future_stamp_clamp_recent_s[0][0] < cutoff:
+            self.scanner_future_stamp_clamp_recent_s.popleft()
 
     def record_scanner_timestamp_regression(self, delta_s: float) -> None:
         """Record a backwards jump in the scanner-level timestamp feed."""
@@ -664,41 +693,97 @@ class BermudaDevice(dict):
         self.scanner_stale_advert_drop_recent_s.append((nowstamp, delta_s))
         self._prune_timestamp_sync_events(nowstamp)
 
-    def timestamp_sync_diagnostics(self) -> dict[str, object]:
-        """Return a compact runtime summary of scanner timestamp health."""
+    def record_stamp_rebase(self, delta_s: float) -> None:
+        """Record an accepted clock rebase after consistent backwards stamps."""
         nowstamp = monotonic_time_coarse()
+        delta_s = float(max(delta_s, 0.0))
+        self.scanner_stamp_rebase_count += 1
+        self.scanner_stamp_rebase_last_s = delta_s
+        self.scanner_stamp_rebase_last_at = nowstamp
+        self.scanner_stamp_rebase_recent_s.append((nowstamp, delta_s))
         self._prune_timestamp_sync_events(nowstamp)
-        recent_scanner_events = len(self.scanner_timestamp_regression_recent_s)
-        recent_drop_events = len(self.scanner_stale_advert_drop_recent_s)
-        recent_max_scanner_delta = max((delta for _stamp, delta in self.scanner_timestamp_regression_recent_s), default=0.0)
-        recent_max_drop_delta = max((delta for _stamp, delta in self.scanner_stale_advert_drop_recent_s), default=0.0)
-        recent_max_delta = max(recent_max_scanner_delta, recent_max_drop_delta)
-        last_problem_at = max(
+
+    def record_future_stamp_clamp(self, delta_s: float) -> None:
+        """Record a stamp that arrived from the future and was clamped to now."""
+        nowstamp = monotonic_time_coarse()
+        delta_s = float(max(delta_s, 0.0))
+        self.scanner_future_stamp_clamp_count += 1
+        self.scanner_future_stamp_clamp_last_s = delta_s
+        self.scanner_future_stamp_clamp_last_at = nowstamp
+        self.scanner_future_stamp_clamp_recent_s.append((nowstamp, delta_s))
+        self._prune_timestamp_sync_events(nowstamp)
+
+    def _timestamp_sync_last_problem_at(self) -> float | None:
+        """Return the stamp of the most recent timestamp problem of any kind."""
+        return max(
             (
                 stamp
-                for stamp in (self.scanner_timestamp_regression_last_at, self.scanner_stale_advert_drop_last_at)
+                for stamp in (
+                    self.scanner_timestamp_regression_last_at,
+                    self.scanner_stale_advert_drop_last_at,
+                    self.scanner_stamp_rebase_last_at,
+                    self.scanner_future_stamp_clamp_last_at,
+                )
                 if stamp is not None
             ),
             default=None,
         )
+
+    def timestamp_sync_state(self, nowstamp: float | None = None) -> str:
+        """
+        Return the current scanner timestamp health state.
+
+        Hard events (backward scanner stamps, dropped stale adverts) mean timing
+        was untrusted; soft events (rebases, future-stamp clamps) mean the clock
+        base moved but the data was salvaged. "broken"/"unstable" only apply while
+        problems are ongoing — a single reboot glitch decays to "drifting" once
+        the stream is quiet, instead of exiling the anchor for the whole window.
+        """
+        if nowstamp is None:
+            nowstamp = monotonic_time_coarse()
+        self._prune_timestamp_sync_events(nowstamp)
         if not self.is_scanner:
-            state = "not_scanner"
-        elif not self.is_remote_scanner:
-            state = "local"
-        elif recent_max_delta >= 60.0:
-            state = "broken"
-        elif recent_max_delta >= 2.0 or (recent_scanner_events + recent_drop_events) >= 5:
-            state = "unstable"
-        elif (recent_scanner_events + recent_drop_events) > 0:
-            state = "drifting"
-        elif (
-            (self.scanner_timestamp_regression_count or self.scanner_stale_advert_drop_count)
+            return "not_scanner"
+        if not self.is_remote_scanner:
+            return "local"
+        hard_events = len(self.scanner_timestamp_regression_recent_s) + len(self.scanner_stale_advert_drop_recent_s)
+        soft_events = len(self.scanner_stamp_rebase_recent_s) + len(self.scanner_future_stamp_clamp_recent_s)
+        recent_max_delta = max(
+            max((delta for _stamp, delta in self.scanner_timestamp_regression_recent_s), default=0.0),
+            max((delta for _stamp, delta in self.scanner_stale_advert_drop_recent_s), default=0.0),
+        )
+        last_problem_at = self._timestamp_sync_last_problem_at()
+        ongoing = last_problem_at is not None and (nowstamp - last_problem_at) < self._TIMESTAMP_SYNC_ONGOING_S
+        if ongoing and recent_max_delta >= 60.0 and hard_events >= 2:
+            return "broken"
+        if ongoing and (recent_max_delta >= 2.0 or (hard_events + soft_events) >= 5):
+            return "unstable"
+        if (hard_events + soft_events) > 0:
+            return "drifting"
+        if (
+            (
+                self.scanner_timestamp_regression_count
+                or self.scanner_stale_advert_drop_count
+                or self.scanner_stamp_rebase_count
+                or self.scanner_future_stamp_clamp_count
+            )
             and last_problem_at is not None
             and (nowstamp - last_problem_at) < self._TIMESTAMP_SYNC_RECOVERY_S
         ):
-            state = "recovered"
-        else:
-            state = "synchronized"
+            return "recovered"
+        return "synchronized"
+
+    def timestamp_sync_diagnostics(self) -> dict[str, object]:
+        """Return a compact runtime summary of scanner timestamp health."""
+        nowstamp = monotonic_time_coarse()
+        state = self.timestamp_sync_state(nowstamp)
+        recent_scanner_events = len(self.scanner_timestamp_regression_recent_s)
+        recent_drop_events = len(self.scanner_stale_advert_drop_recent_s)
+        recent_max_scanner_delta = max(
+            (delta for _stamp, delta in self.scanner_timestamp_regression_recent_s), default=0.0
+        )
+        recent_max_drop_delta = max((delta for _stamp, delta in self.scanner_stale_advert_drop_recent_s), default=0.0)
+        recent_max_delta = max(recent_max_scanner_delta, recent_max_drop_delta)
         return {
             "state": state,
             "is_remote_scanner": self.is_remote_scanner,
@@ -723,6 +808,20 @@ class BermudaDevice(dict):
             "last_stale_advert_drop_age_s": None
             if self.scanner_stale_advert_drop_last_at is None
             else round(nowstamp - self.scanner_stale_advert_drop_last_at, 1),
+            "ongoing_window_s": self._TIMESTAMP_SYNC_ONGOING_S,
+            "recent_stamp_rebases": len(self.scanner_stamp_rebase_recent_s),
+            "recent_future_stamp_clamps": len(self.scanner_future_stamp_clamp_recent_s),
+            "lifetime_stamp_rebases": self.scanner_stamp_rebase_count,
+            "lifetime_future_stamp_clamps": self.scanner_future_stamp_clamp_count,
+            "last_stamp_rebase_s": None
+            if self.scanner_stamp_rebase_last_s is None
+            else round(self.scanner_stamp_rebase_last_s, 3),
+            "last_future_stamp_clamp_s": None
+            if self.scanner_future_stamp_clamp_last_s is None
+            else round(self.scanner_future_stamp_clamp_last_s, 3),
+            "last_accepted_advert_age_s": None
+            if self.scanner_last_accepted_advert_at is None
+            else round(nowstamp - self.scanner_last_accepted_advert_at, 1),
         }
 
     @callback
@@ -783,10 +882,13 @@ class BermudaDevice(dict):
         For metadevice sources (Private BLE rotating MACs), returns the parent
         metadevice's friendly name. Otherwise returns this device's name.
         """
-        from .const import METADEVICE_TYPE_PRIVATE_BLE_SOURCE, METADEVICE_TYPE_IBEACON_SOURCE
+        from .const import METADEVICE_TYPE_IBEACON_SOURCE, METADEVICE_TYPE_PRIVATE_BLE_SOURCE
 
         # If this is a metadevice source, try to find the parent metadevice
-        if METADEVICE_TYPE_PRIVATE_BLE_SOURCE in self.metadevice_type or METADEVICE_TYPE_IBEACON_SOURCE in self.metadevice_type:
+        if (
+            METADEVICE_TYPE_PRIVATE_BLE_SOURCE in self.metadevice_type
+            or METADEVICE_TYPE_IBEACON_SOURCE in self.metadevice_type
+        ):
             # Search metadevices for one that has this address in its sources
             for metadevice in self._coordinator.metadevices.values():
                 if self.address in metadevice.metadevice_sources:

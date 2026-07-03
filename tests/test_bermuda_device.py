@@ -179,3 +179,69 @@ def test_repr(bermuda_device):
     """Test __repr__ method."""
     repr_str = repr(bermuda_device)
     assert repr_str == f"{bermuda_device.name} [{bermuda_device.address}]"
+
+
+def test_timestamp_sync_single_reboot_glitch_decays_quickly(bermuda_scanner):
+    """One huge backward jump must not mark the scanner broken for the whole window."""
+    bermuda_scanner._is_scanner = True  # noqa: SLF001 - test helper
+    bermuda_scanner._is_remote_scanner = True  # noqa: SLF001 - test helper
+
+    with patch("custom_components.ble_trilateration.bermuda_device.monotonic_time_coarse", return_value=1000.0):
+        bermuda_scanner.record_scanner_timestamp_regression(3600.0)
+        # A single hard event, even a massive one, is a reboot glitch: unstable, not broken.
+        assert bermuda_scanner.timestamp_sync_state() == "unstable"
+
+    with patch("custom_components.ble_trilateration.bermuda_device.monotonic_time_coarse", return_value=1061.0):
+        # Quiet for longer than the ongoing window: decay to drifting.
+        assert bermuda_scanner.timestamp_sync_state() == "drifting"
+
+    with patch("custom_components.ble_trilateration.bermuda_device.monotonic_time_coarse", return_value=1400.0):
+        # Outside the rolling window entirely: recovered.
+        assert bermuda_scanner.timestamp_sync_state() == "recovered"
+
+
+def test_timestamp_sync_repeated_large_events_are_broken_while_ongoing(bermuda_scanner):
+    """Repeated large backward events mean actively broken, until the stream goes quiet."""
+    bermuda_scanner._is_scanner = True  # noqa: SLF001 - test helper
+    bermuda_scanner._is_remote_scanner = True  # noqa: SLF001 - test helper
+
+    with patch("custom_components.ble_trilateration.bermuda_device.monotonic_time_coarse", return_value=1000.0):
+        bermuda_scanner.record_scanner_timestamp_regression(120.0)
+        bermuda_scanner.record_stale_advert_drop(90.0)
+        assert bermuda_scanner.timestamp_sync_state() == "broken"
+
+    with patch("custom_components.ble_trilateration.bermuda_device.monotonic_time_coarse", return_value=1061.0):
+        assert bermuda_scanner.timestamp_sync_state() == "drifting"
+
+
+def test_timestamp_sync_soft_events_count_toward_instability(bermuda_scanner):
+    """Rebases and future clamps signal a moving clock base without implying broken."""
+    bermuda_scanner._is_scanner = True  # noqa: SLF001 - test helper
+    bermuda_scanner._is_remote_scanner = True  # noqa: SLF001 - test helper
+
+    with patch("custom_components.ble_trilateration.bermuda_device.monotonic_time_coarse", return_value=1000.0):
+        bermuda_scanner.record_future_stamp_clamp(500.0)
+        assert bermuda_scanner.timestamp_sync_state() == "drifting"
+        for _ in range(4):
+            bermuda_scanner.record_stamp_rebase(45.0)
+        # Five soft events while ongoing: unstable, but never broken (data was salvaged).
+        assert bermuda_scanner.timestamp_sync_state() == "unstable"
+
+        diagnostics = bermuda_scanner.timestamp_sync_diagnostics()
+        assert diagnostics["recent_future_stamp_clamps"] == 1
+        assert diagnostics["recent_stamp_rebases"] == 4
+
+    # Lifetime counters survive the rolling window.
+    assert bermuda_scanner.timestamp_sync_diagnostics()["lifetime_stamp_rebases"] == 4
+
+
+def test_timestamp_sync_diagnostics_reports_accepted_advert_age(bermuda_scanner):
+    """Diagnostics expose how long ago this scanner last had an advert accepted."""
+    bermuda_scanner._is_scanner = True  # noqa: SLF001 - test helper
+    bermuda_scanner._is_remote_scanner = True  # noqa: SLF001 - test helper
+
+    assert bermuda_scanner.timestamp_sync_diagnostics()["last_accepted_advert_age_s"] is None
+
+    with patch("custom_components.ble_trilateration.bermuda_device.monotonic_time_coarse", return_value=2000.0):
+        bermuda_scanner.scanner_last_accepted_advert_at = 1993.5
+        assert bermuda_scanner.timestamp_sync_diagnostics()["last_accepted_advert_age_s"] == 6.5

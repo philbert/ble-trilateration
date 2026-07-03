@@ -250,3 +250,123 @@ def test_sampled_range_estimate_takes_priority(bermuda_advert, mock_coordinator)
     assert bermuda_advert.rssi_distance_raw == pytest.approx(2.75)
     assert bermuda_advert.rssi_distance_sigma_m == pytest.approx(0.6)
     assert bermuda_advert.ranging_source == "learned"
+
+
+def test_future_stamp_clamped_and_recorded(bermuda_advert, mock_advertisement_data, mock_scanner_device):
+    """Stamps from the future are clamped to arrival time and counted, not stored raw."""
+    from bluetooth_data_tools import monotonic_time_coarse
+
+    nowstamp = monotonic_time_coarse()
+    mock_scanner_device.async_as_scanner_get_stamp.return_value = nowstamp + 3600.0
+    bermuda_advert.update_advertisement(mock_advertisement_data, mock_scanner_device)
+
+    assert bermuda_advert.stamp <= monotonic_time_coarse()
+    clamp_delta = mock_scanner_device.record_future_stamp_clamp.call_args[0][0]
+    assert clamp_delta == pytest.approx(3600.0, abs=5.0)
+
+    # A later, correct stamp must still be accepted (self.stamp was not poisoned).
+    mock_scanner_device.async_as_scanner_get_stamp.return_value = monotonic_time_coarse()
+    bermuda_advert.update_advertisement(mock_advertisement_data, mock_scanner_device)
+    assert not mock_scanner_device.record_stale_advert_drop.called
+
+
+def test_backward_stamps_rebase_after_streak(bermuda_advert, mock_advertisement_data, mock_scanner_device):
+    """Consistent backwards stamps adopt the new clock base instead of dropping forever."""
+    mock_scanner_device.async_as_scanner_get_stamp.return_value = 1000.0
+    bermuda_advert.update_advertisement(mock_advertisement_data, mock_scanner_device)
+    assert bermuda_advert.stamp == 1000.0
+
+    # The scanner's time base shifts backwards ~500s (reboot); stamps keep
+    # progressing in the new base.
+    for backward_stamp in (500.0, 500.5):
+        mock_scanner_device.async_as_scanner_get_stamp.return_value = backward_stamp
+        bermuda_advert.update_advertisement(mock_advertisement_data, mock_scanner_device)
+        assert bermuda_advert.stamp == 1000.0  # still dropping
+    assert mock_scanner_device.record_stale_advert_drop.call_count == 2
+
+    mock_scanner_device.async_as_scanner_get_stamp.return_value = 501.0
+    bermuda_advert.update_advertisement(mock_advertisement_data, mock_scanner_device)
+
+    assert mock_scanner_device.record_stamp_rebase.called
+    assert bermuda_advert.stamp == 501.0
+    assert bermuda_advert.backward_drop_streak == 0
+    # History spanning the discontinuity was discarded; only the fresh reading remains.
+    assert bermuda_advert.hist_stamp == [501.0]
+
+    # Subsequent stamps in the new base flow normally.
+    mock_scanner_device.async_as_scanner_get_stamp.return_value = 502.0
+    bermuda_advert.update_advertisement(mock_advertisement_data, mock_scanner_device)
+    assert bermuda_advert.stamp == 502.0
+    assert mock_scanner_device.record_stale_advert_drop.call_count == 2
+
+
+def test_isolated_backward_stamp_still_dropped(bermuda_advert, mock_advertisement_data, mock_scanner_device):
+    """A single out-of-order packet is still rejected; rebase needs a consistent streak."""
+    mock_scanner_device.async_as_scanner_get_stamp.return_value = 1000.0
+    bermuda_advert.update_advertisement(mock_advertisement_data, mock_scanner_device)
+
+    mock_scanner_device.async_as_scanner_get_stamp.return_value = 999.0
+    bermuda_advert.update_advertisement(mock_advertisement_data, mock_scanner_device)
+    assert bermuda_advert.stamp == 1000.0
+    assert mock_scanner_device.record_stale_advert_drop.call_count == 1
+
+    # An in-order packet resets the streak.
+    mock_scanner_device.async_as_scanner_get_stamp.return_value = 1001.0
+    bermuda_advert.update_advertisement(mock_advertisement_data, mock_scanner_device)
+    assert bermuda_advert.stamp == 1001.0
+    assert bermuda_advert.backward_drop_streak == 0
+    assert not mock_scanner_device.record_stamp_rebase.called
+
+
+def test_broken_scanner_falls_back_to_stampless_ingestion(bermuda_advert, mock_advertisement_data, mock_scanner_device):
+    """A broken-stamp scanner keeps ingesting via the RSSI-change heuristic."""
+    from bluetooth_data_tools import monotonic_time_coarse
+
+    mock_scanner_device.timestamp_sync_state.return_value = "broken"
+    stamp_calls_before = mock_scanner_device.async_as_scanner_get_stamp.call_count
+
+    mock_advertisement_data.rssi = -65  # changed reading arrives while broken
+    bermuda_advert.update_advertisement(mock_advertisement_data, mock_scanner_device)
+
+    assert bermuda_advert.rssi == -65
+    assert bermuda_advert.stamp_is_synthetic is True
+    assert bermuda_advert.stamp == pytest.approx(monotonic_time_coarse() - 3.0, abs=2.0)
+    # Stamps were never consulted while broken.
+    assert mock_scanner_device.async_as_scanner_get_stamp.call_count == stamp_calls_before
+
+    # Unchanged RSSI while broken means nothing provably new: no update.
+    previous_stamp = bermuda_advert.stamp
+    bermuda_advert.update_advertisement(mock_advertisement_data, mock_scanner_device)
+    assert bermuda_advert.stamp == previous_stamp
+
+
+def test_recovery_from_stampless_fallback_rebases_once(bermuda_advert, mock_advertisement_data, mock_scanner_device):
+    """Returning to trusted stamps after fallback rebases instead of drop-storming."""
+    from bluetooth_data_tools import monotonic_time_coarse
+
+    mock_scanner_device.timestamp_sync_state.return_value = "broken"
+    mock_advertisement_data.rssi = -65
+    bermuda_advert.update_advertisement(mock_advertisement_data, mock_scanner_device)
+    assert bermuda_advert.stamp_is_synthetic is True
+
+    # Scanner recovers; its real per-device stamp is older than our synthetic one.
+    mock_scanner_device.timestamp_sync_state.return_value = "synchronized"
+    real_stamp = monotonic_time_coarse() - 10.0
+    mock_scanner_device.async_as_scanner_get_stamp.return_value = real_stamp
+    bermuda_advert.update_advertisement(mock_advertisement_data, mock_scanner_device)
+
+    # One rebase, no stale-drop storm, stamp domain is trusted again.
+    assert mock_scanner_device.record_stamp_rebase.called
+    assert not mock_scanner_device.record_stale_advert_drop.called
+    assert bermuda_advert.stamp == real_stamp
+    assert bermuda_advert.stamp_is_synthetic is False
+
+
+def test_accepted_adverts_update_scanner_acceptance_stamp(bermuda_advert, mock_advertisement_data, mock_scanner_device):
+    """Every accepted advert refreshes the scanner's last-accepted tracker."""
+    from bluetooth_data_tools import monotonic_time_coarse
+
+    mock_scanner_device.async_as_scanner_get_stamp.return_value = monotonic_time_coarse()
+    bermuda_advert.update_advertisement(mock_advertisement_data, mock_scanner_device)
+    accepted_at = mock_scanner_device.scanner_last_accepted_advert_at
+    assert accepted_at == pytest.approx(monotonic_time_coarse(), abs=2.0)

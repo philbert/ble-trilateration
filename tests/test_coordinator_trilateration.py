@@ -173,9 +173,15 @@ def _make_coordinator():
     )
     coordinator.fr = SimpleNamespace(async_get_floor=lambda floor_id: SimpleNamespace(name=f"Floor {floor_id}"))
     coordinator.ar = SimpleNamespace(async_get_area=lambda _area_id: None)
-    coordinator.get_scanner_anchor_x = lambda scanner_addr: getattr(coordinator.devices.get(scanner_addr), "anchor_x_m", None)
-    coordinator.get_scanner_anchor_y = lambda scanner_addr: getattr(coordinator.devices.get(scanner_addr), "anchor_y_m", None)
-    coordinator.get_scanner_anchor_z = lambda scanner_addr: getattr(coordinator.devices.get(scanner_addr), "anchor_z_m", None)
+    coordinator.get_scanner_anchor_x = lambda scanner_addr: getattr(
+        coordinator.devices.get(scanner_addr), "anchor_x_m", None
+    )
+    coordinator.get_scanner_anchor_y = lambda scanner_addr: getattr(
+        coordinator.devices.get(scanner_addr), "anchor_y_m", None
+    )
+    coordinator.get_scanner_anchor_z = lambda scanner_addr: getattr(
+        coordinator.devices.get(scanner_addr), "anchor_z_m", None
+    )
     coordinator.trilat_cross_floor_penalty_db = lambda: 8.0
     coordinator.get_floor_z_m = lambda floor_id: None  # Phase 3: no Z config in unit tests
     coordinator.trilat_reachability_gate_enabled = lambda: False  # Phase 3: gate off in unit tests
@@ -709,7 +715,10 @@ def test_restart_bootstrap_holds_restored_floor_until_fingerprint_is_ready():
 
     with (
         patch("custom_components.ble_trilateration.coordinator.monotonic_time_coarse", return_value=100.0),
-        patch("custom_components.ble_trilateration.coordinator.now", return_value=datetime.fromisoformat("2026-03-15T03:00:20+00:00")),
+        patch(
+            "custom_components.ble_trilateration.coordinator.now",
+            return_value=datetime.fromisoformat("2026-03-15T03:00:20+00:00"),
+        ),
     ):
         device.adverts = {
             ("dev-bootstrap", sc_f1a.address): _make_advert(sc_f1a, 100.0, -82.0, 5.0),
@@ -1017,7 +1026,9 @@ def test_phase2_keeps_mean_sigma_and_z_bounds_same_floor_only():
         ("dev-phase2-bounds", sc_d.address): adv_d,
     }
 
-    with patch.object(coordinator, "_apply_trilat_motion_filter", wraps=coordinator._apply_trilat_motion_filter) as motion_filter:
+    with patch.object(
+        coordinator, "_apply_trilat_motion_filter", wraps=coordinator._apply_trilat_motion_filter
+    ) as motion_filter:
         coordinator._refresh_trilateration_for_device(device)
 
     call_kwargs = motion_filter.call_args.kwargs
@@ -1210,7 +1221,9 @@ def test_trilat_age_sigma_multiplier_grows_for_older_adverts():
     """Older-but-not-stale adverts should be downweighted by inflating sigma."""
     assert BermudaDataUpdateCoordinator._trilat_age_sigma_multiplier(0.1) == 1.0
     assert BermudaDataUpdateCoordinator._trilat_age_sigma_multiplier(3.0) > 1.0
-    assert BermudaDataUpdateCoordinator._trilat_age_sigma_multiplier(8.0) > BermudaDataUpdateCoordinator._trilat_age_sigma_multiplier(3.0)
+    assert BermudaDataUpdateCoordinator._trilat_age_sigma_multiplier(
+        8.0
+    ) > BermudaDataUpdateCoordinator._trilat_age_sigma_multiplier(3.0)
 
 
 def test_area_from_trilat_holds_previous_room_on_weak_evidence():
@@ -1323,7 +1336,9 @@ def test_area_switch_accumulates_evidence_slower_for_weak_transition():
         transition_strength=lambda **_kwargs: 0.2,
     )
 
-    with patch("custom_components.ble_trilateration.coordinator.monotonic_time_coarse", side_effect=[100.0, 102.0, 104.0]):
+    with patch(
+        "custom_components.ble_trilateration.coordinator.monotonic_time_coarse", side_effect=[100.0, 102.0, 104.0]
+    ):
         coordinator._refresh_area_from_trilat(device, "layout-a")
         assert device.area_id == "kitchen"
         assert "transition=0.20" in device.diag_area_switch
@@ -1563,7 +1578,9 @@ def test_area_switch_accumulates_evidence_slower_for_sparse_room_challenger():
         room_reference_point=lambda *_args, **_kwargs: (0.0, 0.0, 0.0),
     )
 
-    with patch("custom_components.ble_trilateration.coordinator.monotonic_time_coarse", side_effect=[100.0, 101.5, 103.1]):
+    with patch(
+        "custom_components.ble_trilateration.coordinator.monotonic_time_coarse", side_effect=[100.0, 101.5, 103.1]
+    ):
         coordinator._refresh_area_from_trilat(device, "layout-a")
         assert device.area_id == "kitchen"
         assert "hold=room_evidence(0.15/0.45)" in device.diag_area_switch
@@ -1688,7 +1705,9 @@ def test_area_switch_weak_axis_alignment_slows_evidence_end_to_end():
         }.get(area_id),
     )
 
-    with patch("custom_components.ble_trilateration.coordinator.monotonic_time_coarse", side_effect=[100.0, 102.0, 102.3]):
+    with patch(
+        "custom_components.ble_trilateration.coordinator.monotonic_time_coarse", side_effect=[100.0, 102.0, 102.3]
+    ):
         coordinator._refresh_area_from_trilat(device, "layout-a")
         assert device.area_id == "kitchen"
         assert "weak_axis_aligned=yes" in device.diag_area_switch
@@ -2294,8 +2313,13 @@ def test_trilat_solve_prior_is_weakened_after_floor_switch():
     assert switched.sigma_z_m > baseline.sigma_z_m
 
 
-def test_broken_timestamp_scanner_excluded_everywhere():
-    """A broken-timestamp scanner contributes nothing to floor evidence, fingerprints, or the solve."""
+def test_broken_timestamp_scanner_downweighted_not_excluded():
+    """A broken-timestamp scanner contributes at reduced weight instead of being exiled.
+
+    Its RSSI is genuine (the stampless fallback ingests real packets); only the
+    timing is suspect, so it must still feed fingerprints, floor evidence (at
+    reduced weight), and the solve (with inflated sigma) rather than vanishing.
+    """
     coordinator = _make_coordinator()
     device = _DummyDevice("dev-broken-scanner")
 
@@ -2319,15 +2343,15 @@ def test_broken_timestamp_scanner_excluded_everywhere():
         ("dev-broken-scanner", sc_a.address): _make_advert(sc_a, fresh, -60.0, 5.0),
         ("dev-broken-scanner", sc_b.address): _make_advert(sc_b, fresh, -60.0, 5.0),
         ("dev-broken-scanner", sc_c.address): _make_advert(sc_c, fresh, -60.0, 5.0),
-        ("dev-broken-scanner", sc_broken.address): _make_advert(sc_broken, fresh, -30.0, 1.0),
+        ("dev-broken-scanner", sc_broken.address): _make_advert(sc_broken, fresh, -60.0, 5.0),
     }
     coordinator._refresh_trilateration_for_device(device)
 
-    # The very loud broken scanner on f2 must not pull floor evidence or the solve.
+    # Three healthy same-strength anchors on f1 still outvote one down-weighted
+    # broken anchor on f2, but the broken anchor participates everywhere.
     assert device.trilat_floor_id == "f1"
-    assert "f2" not in device.trilat_floor_evidence
-    assert device.trilat_anchor_count == 3
-    assert seen_live_maps and all("bts-broken" not in live for live in seen_live_maps)
+    assert device.trilat_anchor_count == 4
+    assert seen_live_maps and all("bts-broken" in live for live in seen_live_maps)
 
 
 def test_stationary_noisy_classification_does_not_wander():

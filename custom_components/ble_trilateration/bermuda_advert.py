@@ -27,10 +27,10 @@ from .const import (
     CONF_MAX_VELOCITY,
     CONF_SMOOTHING_SAMPLES,
     DEFAULT_MAX_VELOCITY,
-    debug_device_match,
     DISTANCE_INFINITE,
     DISTANCE_TIMEOUT,
     HIST_KEEP_COUNT,
+    debug_device_match,
 )
 
 # from .const import _LOGGER_SPAM_LESS
@@ -46,6 +46,18 @@ if TYPE_CHECKING:
 # so we're just disabling it for the whole file.
 # https://github.com/astral-sh/ruff/issues/4244
 # ruff: noqa: PLR1730
+
+# Per-device stamps further ahead of local monotonic time than this are treated
+# as clock-mapping glitches (counted in sync diagnostics); smaller future offsets
+# are common jitter and clamped silently.
+FUTURE_STAMP_TOLERANCE_S: Final = 2.0
+# This many consecutive backwards per-device stamps means the scanner's time
+# base shifted (reboot/reconnect) rather than a packet arriving out of order,
+# so the advert adopts the new base instead of rejecting packets indefinitely.
+STAMP_REBASE_STREAK: Final = 3
+# Synthetic freshness age applied to readings that arrive without a trustworthy
+# stamp (stamp-less USB adaptors, or remote scanners in stamp fallback).
+STAMPLESS_AGE_S: Final = 3.0
 
 
 class BermudaAdvert(dict):
@@ -86,6 +98,8 @@ class BermudaAdvert(dict):
 
         self.stamp: float = 0
         self.new_stamp: float | None = None  # Set when a new advert is loaded from update
+        self.backward_drop_streak: int = 0  # Consecutive backwards-stamp drops; triggers a clock rebase
+        self.stamp_is_synthetic: bool = False  # self.stamp came from the stampless fallback, not the scanner
         self.rssi: float | None = None
         self.rssi_filtered: float | None = None
         self.rssi_dispersion: float = 0.0
@@ -147,8 +161,18 @@ class BermudaAdvert(dict):
 
         scanner = self.scanner_device
         new_stamp: float | None = None
+        nowstamp = monotonic_time_coarse()
+        rebased = False
 
-        if self.scanner_sends_stamps:
+        trust_stamps = self.scanner_sends_stamps
+        if trust_stamps and scanner.timestamp_sync_state(nowstamp) == "broken":
+            # The scanner's clock mapping is actively broken. Its RSSI readings are
+            # still genuine — only their timing is untrusted — so fall back to the
+            # same freshness heuristic used for stamp-less USB adaptors rather than
+            # discarding the data outright.
+            trust_stamps = False
+
+        if trust_stamps:
             new_stamp = scanner.async_as_scanner_get_stamp(self.device_address)
 
             if new_stamp is None:
@@ -156,24 +180,54 @@ class BermudaAdvert(dict):
                 _LOGGER.debug("Advert from %s for %s lacks stamp, unexpected.", scanner.name, self._device.name)
                 return
 
-            if self.stamp > new_stamp:
-                # The existing stamp is NEWER, bail but complain on the way.
-                self.stale_update_count += 1
-                self.scanner_device.record_stale_advert_drop(self.stamp - new_stamp)
-                _LOGGER.debug("Advert from %s for %s is OLDER than last recorded", scanner.name, self._device.name)
-                return
+            if new_stamp > nowstamp:
+                # A stamp from the future means the clock mapping is ahead. The
+                # truthful upper bound is arrival time; clamping keeps self.stamp
+                # from being poisoned with a value that every later (correct)
+                # stamp would lose against.
+                if new_stamp - nowstamp > FUTURE_STAMP_TOLERANCE_S:
+                    scanner.record_future_stamp_clamp(new_stamp - nowstamp)
+                new_stamp = nowstamp
 
-            if self.stamp == new_stamp:
+            if self.stamp > new_stamp:
+                self.backward_drop_streak += 1
+                if self.stamp_is_synthetic or self.backward_drop_streak >= STAMP_REBASE_STREAK:
+                    # Consistently backwards stamps mean the scanner's time base
+                    # shifted (reboot/reconnect) — or our stored stamp is a
+                    # synthetic fallback value — not that packets arrived out of
+                    # order. Adopt the new base instead of rejecting every packet
+                    # until wall time catches up; history spanning the
+                    # discontinuity is meaningless, so start fresh.
+                    scanner.record_stamp_rebase(self.stamp - new_stamp)
+                    self._reset_timing_history()
+                    self.backward_drop_streak = 0
+                    rebased = True
+                else:
+                    # An isolated older stamp is a genuinely stale packet; drop it.
+                    self.stale_update_count += 1
+                    scanner.record_stale_advert_drop(self.stamp - new_stamp)
+                    _LOGGER.debug("Advert from %s for %s is OLDER than last recorded", scanner.name, self._device.name)
+                    return
+            elif self.stamp == new_stamp:
                 # We've seen this stamp before. Bail.
                 self.stale_update_count += 1
                 return
+            else:
+                self.backward_drop_streak = 0
+            self.stamp_is_synthetic = False
 
         elif self.rssi != advertisementdata.rssi:
-            # If the rssi has changed from last time, consider it "new". Since this scanner does
-            # not send stamps, this is probably a USB bluetooth adaptor.
-            new_stamp = monotonic_time_coarse() - 3.0  # age usb adaptors slightly, since they are not "fresh"
+            # If the rssi has changed from last time, consider it "new". Either this
+            # scanner never sends stamps (USB adaptor) or its stamps are currently
+            # untrusted; age the reading slightly since we can't prove freshness.
+            new_stamp = nowstamp - STAMPLESS_AGE_S
+            if new_stamp <= self.stamp:
+                # Don't let a synthetic stamp collide with (or precede) the stored
+                # one — freshness must still progress for consumers downstream.
+                new_stamp = self.stamp + 0.001
+            self.stamp_is_synthetic = self.scanner_sends_stamps
         else:
-            # USB Adaptor has nothing new for us, bail.
+            # Nothing new for us, bail.
             return
 
         # Update our parent scanner's last_seen if we have a new stamp.
@@ -211,14 +265,17 @@ class BermudaAdvert(dict):
             # of the true inter-packet interval. For stamps from local bluetooth
             # adaptors (usb dongles) it reflects "Which update cycle last saw a
             # different rssi", which will be a multiple of our update interval.
-            if new_stamp is not None and self.stamp is not None:
+            if new_stamp is not None and self.stamp is not None and not rebased:
                 _interval = new_stamp - self.stamp
             else:
+                # No previous stamp, or the time base just shifted: an interval
+                # spanning the discontinuity would be meaningless.
                 _interval = None
             self.hist_interval.insert(0, _interval)
 
             self.stamp = new_stamp or 0
             self.hist_stamp.insert(0, self.stamp)
+            self.scanner_device.scanner_last_accepted_advert_at = nowstamp
 
         # if self.tx_power is not None and scandata.advertisement.tx_power != self.tx_power:
         #     # Not really an erorr, we just don't account for this happening -
@@ -278,6 +335,23 @@ class BermudaAdvert(dict):
 
         # Finally, save the new advert timestamp.
         self.new_stamp = new_stamp
+
+    def _reset_timing_history(self) -> None:
+        """
+        Discard per-advert history that would span a scanner clock discontinuity.
+
+        RSSI/stamp/distance histories are parallel arrays keyed to the old time
+        base; keeping them would pair readings with wrong ages. The EMA state
+        (rssi_filtered, rssi_distance) survives so estimates continue smoothly.
+        """
+        self.hist_stamp.clear()
+        self.hist_interval.clear()
+        self.hist_velocity.clear()
+        self.hist_rssi.clear()
+        self.hist_rssi_adjusted.clear()
+        self.hist_rssi_filtered.clear()
+        self.hist_distance.clear()
+        self.hist_distance_by_interval.clear()
 
     @dataclass(frozen=True)
     class _RssiFilterPolicy:
@@ -426,10 +500,13 @@ class BermudaAdvert(dict):
         self.rssi_window_median = statistics.median(adjusted_window) if adjusted_window else None
 
         if len(adjusted_window) >= 3:
-            self.rssi_dispersion = self._median_abs_deviation(
-                adjusted_window,
-                self.rssi_window_median,
-            ) * 1.4826
+            self.rssi_dispersion = (
+                self._median_abs_deviation(
+                    adjusted_window,
+                    self.rssi_window_median,
+                )
+                * 1.4826
+            )
         else:
             self.rssi_dispersion = 0.0
 
