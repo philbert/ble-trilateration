@@ -199,6 +199,39 @@ RETIRED_SENSOR_UNIQUE_ID_SUFFIXES = (
 )
 
 
+def _level_from_thresholds(value: float | None, thresholds: tuple[tuple[float, str], ...]) -> str | None:
+    """Return a coarse diagnostic level from ordered upper-bound thresholds."""
+    if value is None:
+        return None
+    numeric_value = float(value)
+    for upper_bound, level in thresholds:
+        if numeric_value <= upper_bound:
+            return level
+    return thresholds[-1][1] if thresholds else None
+
+
+def _diagnostic_guidance_attributes(
+    *,
+    meaning: str,
+    better: str,
+    expected_range: str,
+    bands: str,
+    level_value: float | None = None,
+    level_thresholds: tuple[tuple[float, str], ...] = (),
+) -> dict[str, Any]:
+    """Build stable explanatory attributes for numeric diagnostic sensors."""
+    attrs: dict[str, Any] = {
+        "meaning": meaning,
+        "better": better,
+        "expected_range": expected_range,
+        "bands": bands,
+    }
+    level = _level_from_thresholds(level_value, level_thresholds)
+    if level is not None:
+        attrs["level"] = level
+    return attrs
+
+
 def _remove_retired_sensor_entities(hass: HomeAssistant, entry_id: str) -> None:
     """Remove entity-registry entries for retired legacy sensor entities."""
     entity_registry = er.async_get(hass)
@@ -684,10 +717,15 @@ class BermudaSensorGeometryQuality(BermudaSensorPositionConfidence):
 
     @property
     def extra_state_attributes(self) -> Mapping[str, Any] | None:
-        # gdop / condition_number were raw floats that changed every solver cycle
-        # and produced a fresh state_attributes row on every state write. Rely on
-        # the rounded native_value; full detail is in diagnostics.
-        return None
+        level_value = self.bermuda_last_state if self.bermuda_last_stamp > 0 else self.native_value
+        return _diagnostic_guidance_attributes(
+            meaning="Combined 0-10 quality score for active anchor geometry.",
+            better="higher",
+            expected_range="0..10",
+            bands="0-2 weak; 2-4 usable; 4-7 good; 7-10 excellent",
+            level_value=level_value,
+            level_thresholds=((2.0, "weak"), (4.0, "usable"), (7.0, "good"), (10.0, "excellent")),
+        )
 
 
 class BermudaSensorResidualConsistency(BermudaSensorPositionConfidence):
@@ -715,8 +753,15 @@ class BermudaSensorResidualConsistency(BermudaSensorPositionConfidence):
 
     @property
     def extra_state_attributes(self) -> Mapping[str, Any] | None:
-        # Raw residual floats omitted — they changed every tick.
-        return None
+        level_value = self.bermuda_last_state if self.bermuda_last_stamp > 0 else self.native_value
+        return _diagnostic_guidance_attributes(
+            meaning="How well active anchor ranges agree with the solved position.",
+            better="higher",
+            expected_range="0..10",
+            bands="0-2 poor; 2-5 weak; 5-8 good; 8-10 excellent",
+            level_value=level_value,
+            level_thresholds=((2.0, "poor"), (5.0, "weak"), (8.0, "good"), (10.0, "excellent")),
+        )
 
 
 class BermudaSensorRateLimitedDiagnostic(BermudaSensor):
@@ -756,6 +801,11 @@ class BermudaSensorNumericDiagnostic(BermudaSensorRateLimitedDiagnostic):
 
     _device_attr = ""
     _round_digits = 3
+    _meaning = ""
+    _better = ""
+    _expected_range = ""
+    _bands = ""
+    _level_thresholds: tuple[tuple[float, str], ...] = ()
 
     @property
     def native_value(self):
@@ -767,6 +817,20 @@ class BermudaSensorNumericDiagnostic(BermudaSensorRateLimitedDiagnostic):
     @property
     def state_class(self):
         return SensorStateClass.MEASUREMENT
+
+    @property
+    def extra_state_attributes(self) -> Mapping[str, Any] | None:
+        if not (self._meaning and self._better and self._expected_range and self._bands):
+            return None
+        level_value = self.bermuda_last_state if self.bermuda_last_stamp > 0 else self.native_value
+        return _diagnostic_guidance_attributes(
+            meaning=self._meaning,
+            better=self._better,
+            expected_range=self._expected_range,
+            bands=self._bands,
+            level_value=level_value,
+            level_thresholds=self._level_thresholds,
+        )
 
 
 class BermudaSensorIntegerDiagnostic(BermudaSensorNumericDiagnostic):
@@ -823,6 +887,17 @@ class BermudaSensorRoomChallengerEvidence(BermudaSensorNumericDiagnostic):
     _diag_name = "Room - Challenger Evidence"
     _device_attr = "room_challenger_evidence"
     _round_digits = 2
+    _meaning = "Accumulated evidence toward switching from the stable room to the challenger."
+    _better = "contextual: higher means closer to switching room"
+    _expected_range = "0..0.45 before switch"
+    _bands = "0 none; 0-0.15 weak; 0.15-0.30 building; 0.30-0.45 near switch; >=0.45 switch-ready"
+    _level_thresholds = (
+        (0.0, "none"),
+        (0.15, "weak"),
+        (0.30, "building"),
+        (0.45, "near_switch"),
+        (999999.0, "switch_ready"),
+    )
 
 
 class BermudaSensorRoomScoreMargin(BermudaSensorNumericDiagnostic):
@@ -831,6 +906,11 @@ class BermudaSensorRoomScoreMargin(BermudaSensorNumericDiagnostic):
     _diag_suffix = "room_score_margin"
     _diag_name = "Room - Score Margin"
     _device_attr = "room_score_margin"
+    _meaning = "Difference between the best and second-best blended room scores."
+    _better = "higher"
+    _expected_range = "0..1"
+    _bands = "0-0.05 ambiguous; 0.05-0.15 weak; 0.15-0.35 moderate; >0.35 strong"
+    _level_thresholds = ((0.05, "ambiguous"), (0.15, "weak"), (0.35, "moderate"), (999999.0, "strong"))
 
 
 class BermudaSensorGeometryRoomScore(BermudaSensorNumericDiagnostic):
@@ -839,6 +919,11 @@ class BermudaSensorGeometryRoomScore(BermudaSensorNumericDiagnostic):
     _diag_suffix = "geometry_room_score"
     _diag_name = "Geometry - Room Score"
     _device_attr = "room_geometry_score"
+    _meaning = "How strongly solved x/y/z position alone supports the selected room."
+    _better = "higher"
+    _expected_range = "0..1"
+    _bands = "0-0.15 weak; 0.15-0.35 low; 0.35-0.60 moderate; 0.60-0.80 strong; >0.80 excellent"
+    _level_thresholds = ((0.15, "weak"), (0.35, "low"), (0.60, "moderate"), (0.80, "strong"), (999999.0, "excellent"))
 
 
 class BermudaSensorFingerprintRoomScore(BermudaSensorNumericDiagnostic):
@@ -847,6 +932,11 @@ class BermudaSensorFingerprintRoomScore(BermudaSensorNumericDiagnostic):
     _diag_suffix = "fingerprint_room_score"
     _diag_name = "Fingerprint - Room Score"
     _device_attr = "room_fingerprint_score"
+    _meaning = "How strongly RSSI fingerprinting supports the selected room."
+    _better = "higher"
+    _expected_range = "0..1"
+    _bands = "0-0.15 weak; 0.15-0.35 low; 0.35-0.60 moderate; 0.60-0.80 strong; >0.80 excellent"
+    _level_thresholds = ((0.15, "weak"), (0.35, "low"), (0.60, "moderate"), (0.80, "strong"), (999999.0, "excellent"))
 
 
 class BermudaSensorFingerprintBestRoom(BermudaSensorStringDiagnostic):
@@ -863,6 +953,17 @@ class BermudaSensorFingerprintMargin(BermudaSensorNumericDiagnostic):
     _diag_suffix = "fingerprint_margin"
     _diag_name = "Fingerprint - Margin"
     _device_attr = "room_fingerprint_margin"
+    _meaning = "Difference between the best and second-best fingerprint-only room scores."
+    _better = "higher"
+    _expected_range = "0..1"
+    _bands = "0-0.03 ambiguous; 0.03-0.05 weak; 0.05-0.15 moderate; 0.15-0.30 strong; >0.30 decisive"
+    _level_thresholds = (
+        (0.03, "ambiguous"),
+        (0.05, "weak"),
+        (0.15, "moderate"),
+        (0.30, "strong"),
+        (999999.0, "decisive"),
+    )
 
 
 class BermudaSensorFingerprintCoverage(BermudaSensorNumericDiagnostic):
@@ -871,6 +972,11 @@ class BermudaSensorFingerprintCoverage(BermudaSensorNumericDiagnostic):
     _diag_suffix = "fingerprint_coverage"
     _diag_name = "Fingerprint - Coverage"
     _device_attr = "room_fingerprint_coverage"
+    _meaning = "Fraction of candidate-room calibration samples that have enough live scanner overlap to score."
+    _better = "higher"
+    _expected_range = "0..1"
+    _bands = "0-0.25 poor; 0.25-0.50 weak; 0.50-0.75 usable; 0.75-0.90 good; >0.90 excellent"
+    _level_thresholds = ((0.25, "poor"), (0.50, "weak"), (0.75, "usable"), (0.90, "good"), (999999.0, "excellent"))
 
 
 class BermudaSensorFingerprintBlendWeight(BermudaSensorNumericDiagnostic):
@@ -879,6 +985,11 @@ class BermudaSensorFingerprintBlendWeight(BermudaSensorNumericDiagnostic):
     _diag_suffix = "fingerprint_blend_weight"
     _diag_name = "Fingerprint - Blend Weight"
     _device_attr = "room_fingerprint_blend_weight"
+    _meaning = "Weight given to fingerprinting in the final hybrid room score; the remainder is geometry."
+    _better = "contextual: higher trusts fingerprinting more, lower trusts geometry more"
+    _expected_range = "0..1"
+    _bands = "around 0.65 normal; 0.65-0.75 elevated; 0.75-0.85 fingerprint-heavy"
+    _level_thresholds = ((0.65, "normal"), (0.75, "elevated"), (0.85, "fingerprint_heavy"), (999999.0, "unexpected"))
 
 
 class BermudaSensorRoomSampleCount(BermudaSensorIntegerDiagnostic):
@@ -887,6 +998,11 @@ class BermudaSensorRoomSampleCount(BermudaSensorIntegerDiagnostic):
     _diag_suffix = "room_sample_count"
     _diag_name = "Room - Sample Count"
     _device_attr = "room_sample_count"
+    _meaning = "Number of calibration samples for the current candidate room."
+    _better = "higher until the room is well covered"
+    _expected_range = "0+"
+    _bands = "0 none; 1 sparse; 2 limited; 3-4 usable; >=5 good"
+    _level_thresholds = ((0.0, "none"), (1.0, "sparse"), (2.0, "limited"), (4.0, "usable"), (999999.0, "good"))
 
 
 class BermudaSensorRoomHoldReason(BermudaSensorStringDiagnostic):
@@ -904,6 +1020,11 @@ class BermudaSensorGeometryGdop(BermudaSensorNumericDiagnostic):
     _diag_name = "Geometry - GDOP"
     _device_attr = "trilat_geometry_gdop"
     _round_digits = 2
+    _meaning = "How much active anchor layout amplifies range error in the position solve."
+    _better = "lower"
+    _expected_range = "1+"
+    _bands = "1-1.5 excellent; 1.5-2 good; 2-3 usable; 3-5 weak; >5 poor"
+    _level_thresholds = ((1.5, "excellent"), (2.0, "good"), (3.0, "usable"), (5.0, "weak"), (999999.0, "poor"))
 
 
 class BermudaSensorGeometryConditionNumber(BermudaSensorNumericDiagnostic):
@@ -913,6 +1034,11 @@ class BermudaSensorGeometryConditionNumber(BermudaSensorNumericDiagnostic):
     _diag_name = "Geometry - Condition Number"
     _device_attr = "trilat_geometry_condition"
     _round_digits = 2
+    _meaning = "Numerical conditioning of the active anchor geometry; high values mean stretched or one-sided geometry."
+    _better = "lower"
+    _expected_range = "1+"
+    _bands = "1-3 excellent; 3-10 good; 10-30 usable; 30-100 weak; >100 poor"
+    _level_thresholds = ((3.0, "excellent"), (10.0, "good"), (30.0, "usable"), (100.0, "weak"), (999999.0, "poor"))
 
 
 class BermudaSensorNormalizedResidualRms(BermudaSensorNumericDiagnostic):
@@ -922,6 +1048,11 @@ class BermudaSensorNormalizedResidualRms(BermudaSensorNumericDiagnostic):
     _diag_name = "Residual - Normalized RMS"
     _device_attr = "trilat_normalized_residual_rms"
     _round_digits = 3
+    _meaning = "Range residual size relative to each anchor's expected uncertainty."
+    _better = "lower"
+    _expected_range = "0+"
+    _bands = "0-0.5 excellent; 0.5-1 good; 1-2 usable; 2-3 weak; >3 poor"
+    _level_thresholds = ((0.5, "excellent"), (1.0, "good"), (2.0, "usable"), (3.0, "weak"), (999999.0, "poor"))
 
 
 class BermudaSensorResidualRms(BermudaSensorNumericDiagnostic):
@@ -931,6 +1062,11 @@ class BermudaSensorResidualRms(BermudaSensorNumericDiagnostic):
     _diag_name = "Residual - RMS"
     _device_attr = "trilat_residual_m"
     _round_digits = 2
+    _meaning = "Metre-level RMS mismatch between active anchor ranges and the solved position."
+    _better = "lower"
+    _expected_range = "0+ m"
+    _bands = "0-1 m excellent; 1-2 m good; 2-3 m usable; 3-5 m weak; >5 m poor"
+    _level_thresholds = ((1.0, "excellent"), (2.0, "good"), (3.0, "usable"), (5.0, "weak"), (999999.0, "poor"))
 
     @property
     def device_class(self):
@@ -947,6 +1083,11 @@ class BermudaSensorValidAnchorCount(BermudaSensorAnchorStatusCount):
     _diag_suffix = "valid_anchor_count"
     _diag_name = "Anchor - Valid Count"
     _anchor_status = "valid"
+    _meaning = "Number of same-floor anchors currently usable for the position solve."
+    _better = "higher"
+    _expected_range = "0+"
+    _bands = "0-2 insufficient; 3 minimum; 4-5 good; >=6 strong"
+    _level_thresholds = ((2.0, "insufficient"), (3.0, "minimum"), (5.0, "good"), (999999.0, "strong"))
 
 
 class BermudaSensorStaleAnchorCount(BermudaSensorAnchorStatusCount):
@@ -955,6 +1096,11 @@ class BermudaSensorStaleAnchorCount(BermudaSensorAnchorStatusCount):
     _diag_suffix = "stale_anchor_count"
     _diag_name = "Anchor - Stale Count"
     _anchor_status = "rejected_stale"
+    _meaning = "Number of anchors rejected because the latest advert aged out."
+    _better = "lower"
+    _expected_range = "0+"
+    _bands = "0 none; 1-2 minor; 3-5 high; >5 severe"
+    _level_thresholds = ((0.0, "none"), (2.0, "minor"), (5.0, "high"), (999999.0, "severe"))
 
 
 class BermudaSensorNoAdvertAnchorCount(BermudaSensorAnchorStatusCount):
@@ -963,6 +1109,11 @@ class BermudaSensorNoAdvertAnchorCount(BermudaSensorAnchorStatusCount):
     _diag_suffix = "no_advert_anchor_count"
     _diag_name = "Anchor - No Advert Count"
     _anchor_status = "no_advert"
+    _meaning = "Number of configured anchors that have no recent advert for this tracked device."
+    _better = "lower"
+    _expected_range = "0+"
+    _bands = "0 none; 1-2 minor; 3-5 high; >5 severe"
+    _level_thresholds = ((0.0, "none"), (2.0, "minor"), (5.0, "high"), (999999.0, "severe"))
 
 
 class BermudaSensorValidOtherFloorAnchorCount(BermudaSensorAnchorStatusCount):
@@ -971,6 +1122,11 @@ class BermudaSensorValidOtherFloorAnchorCount(BermudaSensorAnchorStatusCount):
     _diag_suffix = "valid_other_floor_anchor_count"
     _diag_name = "Anchor - Valid Other-Floor Count"
     _anchor_status = "valid_other_floor"
+    _meaning = "Number of live anchors from floors other than the currently selected floor."
+    _better = "lower for a same-floor solve; contextual during real floor transitions"
+    _expected_range = "0+"
+    _bands = "0 none; 1-2 some; >2 many"
+    _level_thresholds = ((0.0, "none"), (2.0, "some"), (999999.0, "many"))
 
 
 class BermudaSensorHorizontalSpeed(BermudaSensor):

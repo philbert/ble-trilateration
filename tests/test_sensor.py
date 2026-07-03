@@ -149,10 +149,12 @@ async def test_trilat_confidence_sensors_expose_numeric_confidence(hass) -> None
     assert tracking_confidence.state_class == SensorStateClass.MEASUREMENT
     assert geometry_quality.native_value == 4.3
     assert geometry_quality.name == "Geometry - Quality"
-    assert geometry_quality.extra_state_attributes is None
+    assert geometry_quality.extra_state_attributes["better"] == "higher"
+    assert geometry_quality.extra_state_attributes["level"] == "good"
     assert residual_consistency.native_value == 7.7
     assert residual_consistency.name == "Residual - Consistency"
-    assert residual_consistency.extra_state_attributes is None
+    assert residual_consistency.extra_state_attributes["better"] == "higher"
+    assert residual_consistency.extra_state_attributes["level"] == "good"
     assert raw_confidence.entity_category is None
     assert tracking_confidence.entity_category is None
     assert geometry_quality.entity_category is None
@@ -203,6 +205,8 @@ async def test_room_classifier_diagnostic_sensors_expose_compact_values(hass) ->
     fingerprint_score = BermudaSensorFingerprintRoomScore(coordinator, entry, device.address)
     assert fingerprint_score.name == "Fingerprint - Room Score"
     assert fingerprint_score.native_value == 0.568
+    assert fingerprint_score.extra_state_attributes["better"] == "higher"
+    assert fingerprint_score.extra_state_attributes["level"] == "moderate"
     assert BermudaSensorFingerprintBestRoom(coordinator, entry, device.address).native_value == "Living Room"
     assert BermudaSensorFingerprintMargin(coordinator, entry, device.address).native_value == 0.235
     assert BermudaSensorFingerprintCoverage(coordinator, entry, device.address).native_value == 0.789
@@ -212,6 +216,8 @@ async def test_room_classifier_diagnostic_sensors_expose_compact_values(hass) ->
     geometry_gdop = BermudaSensorGeometryGdop(coordinator, entry, device.address)
     assert geometry_gdop.name == "Geometry - GDOP"
     assert geometry_gdop.native_value == 1.23
+    assert geometry_gdop.extra_state_attributes["better"] == "lower"
+    assert geometry_gdop.extra_state_attributes["level"] == "excellent"
     assert BermudaSensorGeometryConditionNumber(coordinator, entry, device.address).native_value == 12.35
     assert BermudaSensorNormalizedResidualRms(coordinator, entry, device.address).native_value == 0.988
     residual_rms = BermudaSensorResidualRms(coordinator, entry, device.address)
@@ -220,6 +226,7 @@ async def test_room_classifier_diagnostic_sensors_expose_compact_values(hass) ->
     valid_anchor_count = BermudaSensorValidAnchorCount(coordinator, entry, device.address)
     assert valid_anchor_count.name == "Anchor - Valid Count"
     assert valid_anchor_count.native_value == 2
+    assert valid_anchor_count.extra_state_attributes["level"] == "insufficient"
     assert BermudaSensorStaleAnchorCount(coordinator, entry, device.address).native_value == 1
     assert BermudaSensorNoAdvertAnchorCount(coordinator, entry, device.address).native_value == 1
     assert BermudaSensorValidOtherFloorAnchorCount(coordinator, entry, device.address).native_value == 1
@@ -228,8 +235,10 @@ async def test_room_classifier_diagnostic_sensors_expose_compact_values(hass) ->
     assert margin_sensor.entity_category == EntityCategory.DIAGNOSTIC
     assert margin_sensor.entity_registry_enabled_default is False
     assert margin_sensor.native_value == 0.123
+    assert margin_sensor.extra_state_attributes["level"] == "weak"
     device.room_score_margin = 0.999
     assert margin_sensor.native_value == 0.123
+    assert margin_sensor.extra_state_attributes["level"] == "weak"
 
 
 async def test_promoted_trilat_sensors_are_normal_sensors(hass) -> None:
