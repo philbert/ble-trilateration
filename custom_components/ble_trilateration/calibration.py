@@ -670,13 +670,34 @@ class BermudaCalibrationManager:
 
     def current_anchor_geometry(self) -> dict[str, dict[str, float | None]]:
         """
-        Return current configured anchor geometry by canonical scanner identity.
+        Return the configured anchor geometry by canonical scanner identity.
 
         Keys are canonical physical scanner identities so the derived layout hash
         is stable across BLE/Wi-Fi MAC alias flips. An unconfigured Z stays None;
         it must never be silently coerced to 0.0.
+
+        The geometry is seeded from the anchor store, so a temporarily offline
+        scanner (proxy reboot, backend init failure) keeps its place in the
+        layout. Deriving the layout from live scanners only meant one missing
+        proxy shifted the layout hash and orphaned every calibration sample that
+        referenced it. Live scanner values overlay stored ones so in-progress
+        coordinate edits take effect immediately.
         """
         geometry: dict[str, dict[str, float | None]] = {}
+        anchor_store = getattr(self._coordinator, "scanner_anchor_store", None)
+        stored_scanners = anchor_store.scanners if anchor_store is not None else {}
+        for storage_key, payload in stored_scanners.items():
+            coords = payload.get("coordinates") or {}
+            anchor_x = coords.get("anchor_x_m")
+            anchor_y = coords.get("anchor_y_m")
+            if anchor_x is None or anchor_y is None:
+                continue
+            anchor_z = coords.get("anchor_z_m")
+            geometry[self.canonical_scanner_key(storage_key)] = {
+                "x_m": float(anchor_x),
+                "y_m": float(anchor_y),
+                "z_m": float(anchor_z) if anchor_z is not None else None,
+            }
         for scanner_address in sorted(self._coordinator.scanner_list):
             scanner = self._coordinator.devices.get(scanner_address)
             if scanner is None:
@@ -696,9 +717,33 @@ class BermudaCalibrationManager:
     def _current_anchor_identity_index(
         self,
     ) -> dict[str, tuple[dict[str, float | None], str | None]]:
-        """Return current anchor geometry keyed by every known scanner identity alias."""
+        """
+        Return the configured anchor geometry keyed by every known scanner identity alias.
+
+        Seeded from the anchor store so samples referencing a temporarily
+        offline scanner still resolve against its configured coordinates
+        instead of being misclassified as a physical layout change. Live
+        scanner values overlay stored ones.
+        """
         index: dict[str, tuple[dict[str, float | None], str | None]] = {}
         stored_scanners = self._coordinator.scanner_anchor_store.scanners
+
+        for storage_key, payload in stored_scanners.items():
+            coords = payload.get("coordinates") or {}
+            anchor_x = coords.get("anchor_x_m")
+            anchor_y = coords.get("anchor_y_m")
+            if anchor_x is None or anchor_y is None:
+                continue
+            anchor_z = coords.get("anchor_z_m")
+            stored_anchor: dict[str, float | None] = {
+                "x_m": float(anchor_x),
+                "y_m": float(anchor_y),
+                "z_m": float(anchor_z) if anchor_z is not None else None,
+            }
+            record_aliases = {mac_norm(str(storage_key))}
+            record_aliases.update(mac_norm(str(alias)) for alias in payload.get("aliases", []) if alias)
+            for alias in record_aliases:
+                index[alias] = (stored_anchor, payload.get("name"))
 
         for scanner_address in sorted(self._coordinator.scanner_list):
             scanner = self._coordinator.devices.get(scanner_address)

@@ -569,6 +569,39 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             _finish_grace,
         )
 
+    def _warn_offline_configured_anchors(self) -> None:
+        """
+        Warn (spam-limited) when configured anchor scanners are not currently registered.
+
+        The layout survives an offline anchor since it is seeded from the anchor
+        store, but the missing scanner still weakens live coverage — and a proxy
+        that fails to register at boot (e.g. a Shelly BLE init hiccup) is
+        otherwise invisible until someone inspects its device page.
+        """
+        if self._calibration_layout_mismatch_grace_active:
+            # Scanners register progressively during startup; don't cry wolf.
+            return
+        calibration = getattr(self, "calibration", None)
+        anchor_store = getattr(self, "scanner_anchor_store", None)
+        if calibration is None or anchor_store is None:
+            return
+        live_keys = {calibration.canonical_scanner_key(address) for address in self.scanner_list}
+        offline: list[str] = []
+        for storage_key, payload in anchor_store.scanners.items():
+            coords = payload.get("coordinates") or {}
+            if coords.get("anchor_x_m") is None or coords.get("anchor_y_m") is None:
+                continue
+            if calibration.canonical_scanner_key(storage_key) not in live_keys:
+                offline.append(str(payload.get("name") or storage_key))
+        if offline:
+            _LOGGER_SPAM_LESS.warning(
+                "configured_anchors_offline",
+                "Configured anchor scanner(s) not currently registered as Bluetooth backends: %s. "
+                "Their stored coordinates keep the calibration layout intact, but live coverage is "
+                "reduced until they reconnect (check the proxy device/integration).",
+                ", ".join(sorted(offline)),
+            )
+
     def _restore_scanner_anchor_from_store(self, scanner: BermudaDevice) -> bool:
         """Hydrate one scanner's anchor coordinates from Bermuda storage when available."""
         if not scanner.is_scanner:
@@ -1200,6 +1233,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             self._refresh_trilateration()
             self._refresh_areas_from_trilat()
             self.calibration.capture_update()
+            self._warn_offline_configured_anchors()
 
             # We might need to freshen deliberately on first start if no new scanners
             # were discovered in the first scan update. This is likely if nothing has changed

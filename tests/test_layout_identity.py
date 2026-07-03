@@ -61,9 +61,7 @@ def _anchor(name, x_m, y_m, z_m, rssi_median=-70.0, packet_count=42):
     }
 
 
-async def test_canonical_layout_hash_stable_across_ble_wifi_alias_flip(
-    hass: HomeAssistant, setup_bermuda_entry
-):
+async def test_canonical_layout_hash_stable_across_ble_wifi_alias_flip(hass: HomeAssistant, setup_bermuda_entry):
     """The layout hash must not change when a scanner re-registers under another MAC."""
     coordinator = setup_bermuda_entry.runtime_data.coordinator
 
@@ -84,9 +82,7 @@ async def test_canonical_layout_hash_stable_across_ble_wifi_alias_flip(
     assert hash_under_wifi == hash_under_ble
 
 
-async def test_classify_stored_samples_reports_explicit_buckets(
-    hass: HomeAssistant, setup_bermuda_entry
-):
+async def test_classify_stored_samples_reports_explicit_buckets(hass: HomeAssistant, setup_bermuda_entry):
     """Ordinary, transition, and bootstrap data get explicit current/stale classifications."""
     coordinator = setup_bermuda_entry.runtime_data.coordinator
     scanner = _add_scanner(coordinator, "aa:bb:cc:dd:21:01", "Bucket Proxy", 8.0, 2.0, 1.0)
@@ -139,9 +135,7 @@ async def test_classify_stored_samples_reports_explicit_buckets(
     assert summary["current_geometry_complete"] is True
 
 
-async def test_repair_not_offered_when_blockers_present(
-    hass: HomeAssistant, setup_bermuda_entry
-):
+async def test_repair_not_offered_when_blockers_present(hass: HomeAssistant, setup_bermuda_entry):
     """Unknown scanners or corrupted geometry block the coordinate-correction repair."""
     coordinator = setup_bermuda_entry.runtime_data.coordinator
     scanner = _add_scanner(coordinator, "aa:bb:cc:dd:22:01", "Blocker Proxy", 8.0, 2.0, 1.0)
@@ -164,9 +158,7 @@ async def test_repair_not_offered_when_blockers_present(
     assert coordinator.calibration.get_layout_mismatch_summary() is not None
 
 
-async def test_repair_not_offered_when_current_geometry_incomplete(
-    hass: HomeAssistant, setup_bermuda_entry
-):
+async def test_repair_not_offered_when_current_geometry_incomplete(hass: HomeAssistant, setup_bermuda_entry):
     """A configured anchor missing its Z blocks the repair offer entirely."""
     coordinator = setup_bermuda_entry.runtime_data.coordinator
     scanner = _add_scanner(coordinator, "aa:bb:cc:dd:23:01", "NoZ Proxy", 8.0, 2.0, None)
@@ -181,9 +173,7 @@ async def test_repair_not_offered_when_current_geometry_incomplete(
     assert coordinator.calibration.get_layout_mismatch_summary() is None
 
 
-async def test_repair_mutation_refuses_missing_z_and_unknown_scanners(
-    hass: HomeAssistant, setup_bermuda_entry
-):
+async def test_repair_mutation_refuses_missing_z_and_unknown_scanners(hass: HomeAssistant, setup_bermuda_entry):
     """The repair mutation must never run against unprovable geometry."""
     coordinator = setup_bermuda_entry.runtime_data.coordinator
     scanner = _add_scanner(coordinator, "aa:bb:cc:dd:24:01", "Refuse Proxy", 8.0, 2.0, None)
@@ -208,9 +198,7 @@ async def test_repair_mutation_refuses_missing_z_and_unknown_scanners(
         await coordinator.calibration.async_update_samples_to_current_geometry()
 
 
-async def test_repair_mutation_updates_all_stores_and_preserves_statistics(
-    hass: HomeAssistant, setup_bermuda_entry
-):
+async def test_repair_mutation_updates_all_stores_and_preserves_statistics(hass: HomeAssistant, setup_bermuda_entry):
     """Repair rewrites ordinary samples, transition samples, and zone hashes; stats survive."""
     coordinator = setup_bermuda_entry.runtime_data.coordinator
     scanner = _add_scanner(coordinator, "aa:bb:cc:dd:25:01", "Repair Proxy", 8.0, 2.0, 1.0)
@@ -275,9 +263,7 @@ async def test_repair_mutation_updates_all_stores_and_preserves_statistics(
     assert zones[0].anchor_layout_hash == current_hash
 
 
-async def test_transition_null_z_repaired_or_flagged(
-    hass: HomeAssistant, setup_bermuda_entry
-):
+async def test_transition_null_z_repaired_or_flagged(hass: HomeAssistant, setup_bermuda_entry):
     """Null-z transition anchors are backfilled when x/y prove identity, else flagged."""
     coordinator = setup_bermuda_entry.runtime_data.coordinator
     scanner = _add_scanner(coordinator, "aa:bb:cc:dd:26:01", "NullZ Proxy", 8.0, 2.0, 1.0)
@@ -334,9 +320,7 @@ async def test_transition_null_z_repaired_or_flagged(
     }
 
 
-async def test_transition_support_accepts_geometry_equivalent_old_hash(
-    hass: HomeAssistant, setup_bermuda_entry
-):
+async def test_transition_support_accepts_geometry_equivalent_old_hash(hass: HomeAssistant, setup_bermuda_entry):
     """Transition samples under an alias-churned hash still provide transition support."""
     coordinator = setup_bermuda_entry.runtime_data.coordinator
     scanner = _add_scanner(coordinator, "aa:bb:cc:dd:27:01", "Support Proxy", 8.0, 2.0, 1.0)
@@ -369,9 +353,7 @@ async def test_transition_support_accepts_geometry_equivalent_old_hash(
     assert diagnostics["transition_support_01"] == 1.0
 
 
-async def test_equivalent_layout_hashes_require_full_geometry_match(
-    hass: HomeAssistant, setup_bermuda_entry
-):
+async def test_equivalent_layout_hashes_require_full_geometry_match(hass: HomeAssistant, setup_bermuda_entry):
     """A hash carried by any geometry-mismatched sample is not treated as equivalent."""
     coordinator = setup_bermuda_entry.runtime_data.coordinator
     scanner = _add_scanner(coordinator, "aa:bb:cc:dd:28:01", "Equiv Proxy", 8.0, 2.0, 1.0)
@@ -395,9 +377,7 @@ async def test_equivalent_layout_hashes_require_full_geometry_match(
     assert "hash_c" not in equivalent
 
 
-async def test_calibration_capture_refuses_misconfigured_anchor(
-    hass: HomeAssistant, setup_bermuda_entry
-):
+async def test_calibration_capture_refuses_misconfigured_anchor(hass: HomeAssistant, setup_bermuda_entry):
     """A capture must fail to start while any scanner anchor lacks an axis value."""
     coordinator = setup_bermuda_entry.runtime_data.coordinator
     _add_scanner(coordinator, "aa:bb:cc:dd:30:01", "Good Proxy", 8.0, 2.0, 1.0)
@@ -422,9 +402,7 @@ async def test_calibration_capture_refuses_misconfigured_anchor(
     assert coordinator.calibration.misconfigured_anchor_scanners() == []
 
 
-async def test_transition_capture_refuses_misconfigured_anchor(
-    hass: HomeAssistant, setup_bermuda_entry
-):
+async def test_transition_capture_refuses_misconfigured_anchor(hass: HomeAssistant, setup_bermuda_entry):
     """Transition captures hard-fail the same way when a scanner anchor Z is missing."""
     coordinator = setup_bermuda_entry.runtime_data.coordinator
     _add_scanner(coordinator, "aa:bb:cc:dd:31:01", "NoZ Capture Proxy", 8.0, 2.0, None)
@@ -442,9 +420,7 @@ async def test_transition_capture_refuses_misconfigured_anchor(
         )
 
 
-async def test_zone_migration_pairs_room_floor_with_transition_floors(
-    hass: HomeAssistant, setup_bermuda_entry
-):
+async def test_zone_migration_pairs_room_floor_with_transition_floors(hass: HomeAssistant, setup_bermuda_entry):
     """Zone migration must pair the capture room's floor with each transition floor."""
     coordinator = setup_bermuda_entry.runtime_data.coordinator
     scanner = _add_scanner(coordinator, "aa:bb:cc:dd:32:01", "Zone Proxy", 8.0, 2.0, 1.0)
@@ -493,9 +469,7 @@ async def test_zone_migration_pairs_room_floor_with_transition_floors(
     assert stairwell.covers_pair("top_floor", "ground_floor")
 
 
-async def test_null_z_repair_retries_when_scanners_arrive_after_startup(
-    hass: HomeAssistant, setup_bermuda_entry
-):
+async def test_null_z_repair_retries_when_scanners_arrive_after_startup(hass: HomeAssistant, setup_bermuda_entry):
     """The repair must succeed on a later pass once scanner anchors become available."""
     coordinator = setup_bermuda_entry.runtime_data.coordinator
     coordinator.calibration.refresh_layout_identity()
@@ -524,9 +498,7 @@ async def test_null_z_repair_retries_when_scanners_arrive_after_startup(
     assert repaired["anchor_layout_hash"] == coordinator.calibration.current_anchor_layout_hash
 
 
-async def test_null_z_repair_skips_while_anchor_restore_is_partial(
-    hass: HomeAssistant, setup_bermuda_entry
-):
+async def test_null_z_repair_skips_while_anchor_restore_is_partial(hass: HomeAssistant, setup_bermuda_entry):
     """Mid-restore partial geometry must not classify healthy samples as corrupted."""
     coordinator = setup_bermuda_entry.runtime_data.coordinator
     scanner = _add_scanner(coordinator, "aa:bb:cc:dd:34:01", "Restore Proxy", 8.0, 2.0, None)
@@ -556,3 +528,44 @@ async def test_null_z_repair_skips_while_anchor_restore_is_partial(
     repaired = coordinator.calibration.transition_samples()[0]
     assert repaired["anchors"]["aa:bb:cc:dd:34:01"]["anchor_position"]["z_m"] == 1.0
     assert repaired["anchor_layout_hash"] == coordinator.calibration.current_anchor_layout_hash
+
+
+async def test_layout_survives_temporarily_offline_scanner(hass: HomeAssistant, setup_bermuda_entry):
+    """A scanner outage must not shift the layout hash or orphan its calibration samples.
+
+    Regression: one proxy failing to register at boot (e.g. a Shelly BLE init
+    hiccup) used to remove it from the layout geometry, changing the layout hash
+    and demoting every sample that referenced it — no_trained_rooms for whole
+    floors until the proxy returned.
+    """
+    coordinator = setup_bermuda_entry.runtime_data.coordinator
+
+    sc_a = _add_scanner(coordinator, "aa:bb:cc:dd:30:01", "Proxy A", 1.0, 2.0, 1.0)
+    sc_b = _add_scanner(coordinator, "aa:bb:cc:dd:30:02", "Proxy B", 8.0, 2.0, 2.5)
+    await coordinator.scanner_anchor_store.async_save_scanner(sc_a)
+    await coordinator.scanner_anchor_store.async_save_scanner(sc_b)
+    coordinator.calibration.refresh_layout_identity()
+    hash_all_online = coordinator.calibration.current_anchor_layout_hash
+
+    await coordinator.calibration_store.async_replace_samples(
+        [
+            _sample(
+                "s_references_b",
+                {
+                    sc_a.address: _anchor("Proxy A", 1.0, 2.0, 1.0),
+                    sc_b.address: _anchor("Proxy B", 8.0, 2.0, 2.5),
+                },
+                layout_hash=hash_all_online,
+            )
+        ]
+    )
+
+    # Proxy B's backend fails to register after a restart: it vanishes from the
+    # live scanner list, but its anchor record remains configured in the store.
+    coordinator._scanner_list.discard(sc_b.address)
+    del coordinator.devices[sc_b.address]
+    coordinator.calibration.refresh_layout_identity()
+
+    assert coordinator.calibration.current_anchor_layout_hash == hash_all_online
+    stored_sample = coordinator.calibration.samples()[0]
+    assert coordinator.calibration.runtime_layout_hash_for_sample(stored_sample) == hash_all_online
