@@ -272,6 +272,7 @@ def test_future_stamp_clamped_and_recorded(bermuda_advert, mock_advertisement_da
 
 def test_backward_stamps_rebase_after_streak(bermuda_advert, mock_advertisement_data, mock_scanner_device):
     """Consistent backwards stamps adopt the new clock base instead of dropping forever."""
+    mock_advertisement_data.rssi = -71  # changed RSSI so the fixture-to-baseline jump is accepted
     mock_scanner_device.async_as_scanner_get_stamp.return_value = 1000.0
     bermuda_advert.update_advertisement(mock_advertisement_data, mock_scanner_device)
     assert bermuda_advert.stamp == 1000.0
@@ -302,6 +303,7 @@ def test_backward_stamps_rebase_after_streak(bermuda_advert, mock_advertisement_
 
 def test_isolated_backward_stamp_still_dropped(bermuda_advert, mock_advertisement_data, mock_scanner_device):
     """A single out-of-order packet is still rejected; rebase needs a consistent streak."""
+    mock_advertisement_data.rssi = -71  # changed RSSI so the fixture-to-baseline jump is accepted
     mock_scanner_device.async_as_scanner_get_stamp.return_value = 1000.0
     bermuda_advert.update_advertisement(mock_advertisement_data, mock_scanner_device)
 
@@ -370,3 +372,65 @@ def test_accepted_adverts_update_scanner_acceptance_stamp(bermuda_advert, mock_a
     bermuda_advert.update_advertisement(mock_advertisement_data, mock_scanner_device)
     accepted_at = mock_scanner_device.scanner_last_accepted_advert_at
     assert accepted_at == pytest.approx(monotonic_time_coarse(), abs=2.0)
+
+
+def test_replayed_cache_advert_is_quarantined(bermuda_advert, mock_advertisement_data, mock_scanner_device):
+    """A lone packet reappearing after long silence with identical RSSI is not trusted."""
+    mock_advertisement_data.rssi = -71  # changed RSSI so the fixture-to-baseline jump is accepted
+    mock_scanner_device.async_as_scanner_get_stamp.return_value = 1000.0
+    bermuda_advert.update_advertisement(mock_advertisement_data, mock_scanner_device)
+    assert bermuda_advert.stamp == 1000.0
+
+    # ~18 minutes of silence, then the same cached frame reappears (unchanged RSSI).
+    mock_scanner_device.async_as_scanner_get_stamp.return_value = 2083.0
+    bermuda_advert.update_advertisement(mock_advertisement_data, mock_scanner_device)
+    assert bermuda_advert.stamp == 1000.0
+    assert mock_scanner_device.record_advert_replay_suspect.called
+
+    # The next replay cycle is quarantined again - it never self-confirms.
+    mock_scanner_device.async_as_scanner_get_stamp.return_value = 3166.0
+    bermuda_advert.update_advertisement(mock_advertisement_data, mock_scanner_device)
+    assert bermuda_advert.stamp == 1000.0
+    assert mock_scanner_device.record_advert_replay_suspect.call_count == 2
+
+
+def test_real_comeback_confirmed_by_second_packet(bermuda_advert, mock_advertisement_data, mock_scanner_device):
+    """A second packet arriving shortly after a quarantined one confirms a genuine return."""
+    mock_advertisement_data.rssi = -71  # changed RSSI so the fixture-to-baseline jump is accepted
+    mock_scanner_device.async_as_scanner_get_stamp.return_value = 1000.0
+    bermuda_advert.update_advertisement(mock_advertisement_data, mock_scanner_device)
+
+    # First comeback packet after long silence: quarantined even though genuine.
+    mock_scanner_device.async_as_scanner_get_stamp.return_value = 2083.0
+    bermuda_advert.update_advertisement(mock_advertisement_data, mock_scanner_device)
+    assert bermuda_advert.stamp == 1000.0
+
+    # A real device keeps advertising: the next packet confirms within seconds.
+    mock_scanner_device.async_as_scanner_get_stamp.return_value = 2085.0
+    bermuda_advert.update_advertisement(mock_advertisement_data, mock_scanner_device)
+    assert bermuda_advert.stamp == 2085.0
+
+
+def test_comeback_with_changed_rssi_accepted_immediately(bermuda_advert, mock_advertisement_data, mock_scanner_device):
+    """A comeback packet with a different RSSI is not replay-like and passes at once."""
+    mock_advertisement_data.rssi = -71  # changed RSSI so the fixture-to-baseline jump is accepted
+    mock_scanner_device.async_as_scanner_get_stamp.return_value = 1000.0
+    bermuda_advert.update_advertisement(mock_advertisement_data, mock_scanner_device)
+
+    mock_advertisement_data.rssi = -75  # replays carry the identical cached frame
+    mock_scanner_device.async_as_scanner_get_stamp.return_value = 2083.0
+    bermuda_advert.update_advertisement(mock_advertisement_data, mock_scanner_device)
+    assert bermuda_advert.stamp == 2083.0
+    assert not mock_scanner_device.record_advert_replay_suspect.called
+
+
+def test_short_gap_with_identical_rssi_not_quarantined(bermuda_advert, mock_advertisement_data, mock_scanner_device):
+    """Ordinary packet loss well under the replay gap threshold flows through untouched."""
+    mock_advertisement_data.rssi = -71  # changed RSSI so the fixture-to-baseline jump is accepted
+    mock_scanner_device.async_as_scanner_get_stamp.return_value = 1000.0
+    bermuda_advert.update_advertisement(mock_advertisement_data, mock_scanner_device)
+
+    mock_scanner_device.async_as_scanner_get_stamp.return_value = 1060.0
+    bermuda_advert.update_advertisement(mock_advertisement_data, mock_scanner_device)
+    assert bermuda_advert.stamp == 1060.0
+    assert not mock_scanner_device.record_advert_replay_suspect.called

@@ -79,6 +79,9 @@ class BermudaDevice(dict):
     """
 
     _TIMESTAMP_SYNC_WINDOW_S: Final = 300.0
+    # Window for counting distinct devices resurrected by one scanner; multiple
+    # within this span indicates a cache-replaying proxy rather than real comebacks.
+    _REPLAY_BURST_WINDOW_S: Final = 10.0
     _TIMESTAMP_SYNC_RECOVERY_S: Final = 900.0
     # A scanner only counts as actively broken/unstable while its most recent
     # timestamp problem is younger than this. Older events decay to "drifting"
@@ -250,6 +253,9 @@ class BermudaDevice(dict):
         self.scanner_future_stamp_clamp_last_s: float | None = None
         self.scanner_future_stamp_clamp_last_at: float | None = None
         self.scanner_future_stamp_clamp_recent_s: deque[tuple[float, float]] = deque(maxlen=256)
+        self.scanner_replay_suspect_count: int = 0
+        self.scanner_replay_suspect_last_at: float | None = None
+        self.scanner_replay_suspect_recent: deque[tuple[float, str]] = deque(maxlen=64)
         self.scanner_last_accepted_advert_at: float | None = None
         self.adverts: dict[
             tuple[str, str], BermudaAdvert
@@ -737,6 +743,34 @@ class BermudaDevice(dict):
         self.scanner_future_stamp_clamp_last_at = nowstamp
         self.scanner_future_stamp_clamp_recent_s.append((nowstamp, delta_s))
         self._prune_timestamp_sync_events(nowstamp)
+
+    def record_advert_replay_suspect(self, device_address: str) -> None:
+        """
+        Record a quarantined advert that looked like a replayed cache entry.
+
+        Several distinct long-silent devices "reappearing" from one scanner
+        within seconds is the signature of a proxy replaying its advertisement
+        cache rather than devices actually returning, so warn with the scanner
+        named - that is the cue to restart the proxy.
+        """
+        nowstamp = monotonic_time_coarse()
+        self.scanner_replay_suspect_count += 1
+        self.scanner_replay_suspect_last_at = nowstamp
+        self.scanner_replay_suspect_recent.append((nowstamp, device_address))
+        cutoff = nowstamp - self._REPLAY_BURST_WINDOW_S
+        while self.scanner_replay_suspect_recent and self.scanner_replay_suspect_recent[0][0] < cutoff:
+            self.scanner_replay_suspect_recent.popleft()
+        burst_devices = {address for _, address in self.scanner_replay_suspect_recent}
+        if len(burst_devices) >= 2:
+            _LOGGER_SPAM_LESS.warning(
+                f"replay_burst_{self.address}",
+                "Scanner %s re-reported %d long-silent devices with unchanged RSSI within %ds - "
+                "it appears to be replaying its advertisement cache instead of scanning. "
+                "Restarting the proxy usually clears this.",
+                self.name,
+                len(burst_devices),
+                int(self._REPLAY_BURST_WINDOW_S),
+            )
 
     def _timestamp_sync_last_problem_at(self) -> float | None:
         """Return the stamp of the most recent timestamp problem of any kind."""

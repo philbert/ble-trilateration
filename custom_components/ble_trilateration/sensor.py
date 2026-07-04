@@ -1296,6 +1296,7 @@ class BermudaSensorScannerTimestampSync(BermudaSensor):
             "recent_rebases": diagnostics["recent_stamp_rebases"],
             "recent_future_clamps": diagnostics["recent_future_stamp_clamps"],
             "recent_max_backward_s": diagnostics["recent_max_backward_s"],
+            "replay_suspects_total": getattr(self._device, "scanner_replay_suspect_count", 0),
         }
 
 

@@ -58,6 +58,13 @@ STAMP_REBASE_STREAK: Final = 3
 # Synthetic freshness age applied to readings that arrive without a trustworthy
 # stamp (stamp-less USB adaptors, or remote scanners in stamp fallback).
 STAMPLESS_AGE_S: Final = 3.0
+# A single packet reappearing after this much silence with an identical RSSI
+# matches a proxy replaying its advertisement cache (observed with Shelly
+# proxies re-emitting departed devices every ~18 minutes), not a device
+# returning to range. Quarantine it until a second packet arrives within the
+# confirm window: replays never produce one, real comebacks do within seconds.
+REPLAY_SUSPECT_GAP_S: Final = 120.0
+REPLAY_CONFIRM_WINDOW_S: Final = 20.0
 
 
 class BermudaAdvert(dict):
@@ -100,6 +107,7 @@ class BermudaAdvert(dict):
         self.new_stamp: float | None = None  # Set when a new advert is loaded from update
         self.backward_drop_streak: int = 0  # Consecutive backwards-stamp drops; triggers a clock rebase
         self.stamp_is_synthetic: bool = False  # self.stamp came from the stampless fallback, not the scanner
+        self._replay_pending_stamp: float | None = None  # Quarantined comeback packet awaiting confirmation
         self.rssi: float | None = None
         self.rssi_filtered: float | None = None
         self.rssi_dispersion: float = 0.0
@@ -214,6 +222,22 @@ class BermudaAdvert(dict):
                 return
             else:
                 self.backward_drop_streak = 0
+            if (
+                not rebased
+                and self.stamp > 0
+                and self.rssi is not None
+                and advertisementdata.rssi == self.rssi
+                and (new_stamp - self.stamp) > REPLAY_SUSPECT_GAP_S
+            ):
+                # Suspected cache replay: quarantine this packet and require a
+                # second, strictly later packet before trusting the comeback.
+                pending = self._replay_pending_stamp
+                if pending is None or not 0.0 < (new_stamp - pending) <= REPLAY_CONFIRM_WINDOW_S:
+                    self._replay_pending_stamp = new_stamp
+                    scanner.record_advert_replay_suspect(self.device_address)
+                    self.stale_update_count += 1
+                    return
+            self._replay_pending_stamp = None
             self.stamp_is_synthetic = False
 
         elif self.rssi != advertisementdata.rssi:

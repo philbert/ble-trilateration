@@ -65,12 +65,9 @@ from .const import (
     _LOGGER_SPAM_LESS,
     _LOGGER_TARGET_SPAM_LESS,
     ADDR_TYPE_PRIVATE_BLE_DEVICE,
-    AREA_HOLD_INTERVAL_MULTIPLIER,
-    AREA_HOLD_MAX,
     BDADDR_TYPE_NOT_MAC48,
     BDADDR_TYPE_RANDOM_RESOLVABLE,
     CALIBRATION_LAYOUT_REPAIR_GRACE_SECONDS,
-    CONF_AREA_HOLD_TIMEOUT,
     CONF_DEVICES,
     CONF_DEVTRACK_TIMEOUT,
     CONF_MAX_VELOCITY,
@@ -78,7 +75,6 @@ from .const import (
     CONF_TRILAT_CROSS_FLOOR_PENALTY_DB,
     CONF_TRILAT_REACHABILITY_GATE,
     CONF_UPDATE_INTERVAL,
-    DEFAULT_AREA_HOLD_TIMEOUT,
     DEFAULT_DEVTRACK_TIMEOUT,
     DEFAULT_MAX_VELOCITY,
     DEFAULT_SAMPLE_RADIUS_M,
@@ -317,7 +313,6 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         # TODO: This is only here because we haven't set up migration of config
         # entries yet, so some users might not have this defined after an update.
         self.options[CONF_DEVTRACK_TIMEOUT] = DEFAULT_DEVTRACK_TIMEOUT
-        self.options[CONF_AREA_HOLD_TIMEOUT] = DEFAULT_AREA_HOLD_TIMEOUT
         self.options[CONF_MAX_VELOCITY] = DEFAULT_MAX_VELOCITY
         self.options[CONF_SMOOTHING_SAMPLES] = DEFAULT_SMOOTHING_SAMPLES
         self.options[CONF_UPDATE_INTERVAL] = DEFAULT_UPDATE_INTERVAL
@@ -332,7 +327,6 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 if key in (
                     CONF_DEVICES,
                     CONF_DEVTRACK_TIMEOUT,
-                    CONF_AREA_HOLD_TIMEOUT,
                     CONF_MAX_VELOCITY,
                     CONF_SMOOTHING_SAMPLES,
                     CONF_TRILAT_CROSS_FLOOR_PENALTY_DB,
@@ -1855,32 +1849,6 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             state.room_challenger_id = None
             state.room_challenger_since = 0.0
             state.room_challenger_evidence = 0.0
-            # Hold the last room briefly instead of flapping to Unknown the moment
-            # inputs go stale or a solve fails: advert gaps slightly beyond
-            # DISTANCE_TIMEOUT are routine for slow or lossy beacons.
-            if (
-                stable_area_id is not None
-                and device.last_seen > 0
-                and (nowstamp - device.last_seen) <= self._area_stale_hold_window_s(device)
-            ):
-                device.diag_area_switch = "Hybrid room classification: trilat_unavailable stale_hold"
-                device.apply_position_classification(
-                    stable_area_id,
-                    floor_id=device.trilat_floor_id,
-                    floor_name=device.trilat_floor_name,
-                )
-                self._log_room_decision_event(
-                    device,
-                    state,
-                    event="stale_hold",
-                    stable_area_id=stable_area_id,
-                    challenger_area_id=None,
-                    candidate_area_id=None,
-                    resolved_area_id=stable_area_id,
-                    hold_reason="stale_hold",
-                )
-                _log_target_room_diag(stable_area_id=stable_area_id, candidate_area_id=None)
-                return
             device.diag_area_switch = "Hybrid room classification: trilat_unavailable"
             device.apply_position_classification(
                 None,
@@ -3763,15 +3731,6 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         if device.area_id is not None and not device.area_is_unknown:
             return device.area_id
         return device.area_last_seen_id
-
-    def _area_stale_hold_window_s(self, device: BermudaDevice) -> float:
-        """Seconds since last advert to keep the last room, scaled for slow advertisers."""
-        options = getattr(self, "options", None) or {}
-        hold_s = float(options.get(CONF_AREA_HOLD_TIMEOUT, DEFAULT_AREA_HOLD_TIMEOUT))
-        estimate = getattr(device, "broadcast_interval_estimate_s", None)
-        if estimate:
-            hold_s = max(hold_s, min(AREA_HOLD_INTERVAL_MULTIPLIER * float(estimate), AREA_HOLD_MAX))
-        return hold_s
 
     def _refresh_transition_sample_diagnostics(self, device: BermudaDevice, layout_hash: str) -> None:
         """Attach transition-sample proximity diagnostics to the current floor state."""
