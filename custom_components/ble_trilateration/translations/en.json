@@ -303,6 +303,10 @@
       "title": "Trilateration is enabled but no anchors are configured",
       "description": "BLE Trilateration requires at least three scanner anchors with `Trilat Anchor Enabled` turned on and valid `Anchor X/Y` coordinates on the same floor. Configure anchors on your scanner entities. Current scanners without usable anchor configuration:\n\n{scannerlist}"
     },
+    "scanner_replaying_adverts": {
+      "title": "A Bluetooth proxy appears to be replaying stale advertisements",
+      "description": "The following proxies re-reported several long-silent devices with unchanged signal strength within seconds, which indicates their scanner is stuck replaying its advertisement cache instead of scanning. BLE Trilateration quarantines these replays so they do not affect room tracking, but live coverage from the affected proxy is unreliable until it is fixed. Restarting the proxy usually clears the fault. This issue clears automatically once no replays have been seen for an hour.\n\n{scannerlist}"
+    },
     "calibration_layout_mismatch": {
       "title": "Some calibration samples don't match the current anchor layout",
       "description": "BLE Trilateration found {sample_count} stale calibration sample(s) out of {total_sample_count} saved total. {current_layout_count} sample(s) already match the current anchor geometry.\n\nAnchor differences detected:\n{changed_anchor_lines}\n\nIf you physically moved anchors, keep the stale samples as historical and record new ones. If you only corrected anchor coordinates, you can update the stored sample geometry to match the current anchors.",

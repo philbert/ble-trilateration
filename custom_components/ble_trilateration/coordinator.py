@@ -8,7 +8,7 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Final, cast
 
 import aiofiles
 import voluptuous as vol
@@ -96,6 +96,7 @@ from .const import (
     PRUNE_TIME_REDACTIONS,
     PRUNE_TIME_UNKNOWN_IRK,
     REPAIR_CALIBRATION_LAYOUT_MISMATCH,
+    REPAIR_SCANNER_REPLAYING_ADVERTS,
     REPAIR_SCANNER_WITHOUT_AREA,
     REPAIR_TRILAT_WITHOUT_ANCHORS,
     SAVEOUT_COOLDOWN,
@@ -251,6 +252,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         self._scanners_without_areas: list[str] | None = None  # Tracks any proxies that don't have an area assigned.
         self._trilat_decision_state: dict[str, BermudaDataUpdateCoordinator.TrilatDecisionState] = {}
         self._trilat_scanners_without_anchors: list[str] | None = None
+        self._replaying_scanner_names: list[str] | None = None
         self._calibration_layout_mismatch_signature: str | None = None
         # Treat the entire initial setup window as startup grace so mismatch repairs
         # do not flash before anchor restoration and platform restore-state complete.
@@ -1243,6 +1245,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             self._refresh_areas_from_trilat()
             self.calibration.capture_update()
             self._warn_offline_configured_anchors()
+            self._async_manage_repair_scanner_replaying()
 
             # We might need to freshen deliberately on first start if no new scanners
             # were discovered in the first scan update. This is likely if nothing has changed
@@ -3758,6 +3761,41 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             self._resolve_floor_name(str(floor_id)) for floor_id in transition_diag.get("transition_best_floor_ids", [])
         ]
         device.trilat_floor_diagnostics.update(transition_diag)
+
+    # Keep the replaying-scanner repair issue open while bursts recur within this
+    # window; the observed Shelly fault replays every ~18 minutes, so an hour of
+    # silence means the proxy has genuinely recovered (or was restarted).
+    _REPLAY_REPAIR_ACTIVE_WINDOW_S: Final = 3600.0
+
+    def _async_manage_repair_scanner_replaying(self) -> None:
+        """Raise/clear a repair issue for proxies that appear to replay cached adverts."""
+        nowstamp = monotonic_time_coarse()
+        flagged: list[str] = []
+        for address in self.scanner_list:
+            scanner = self.devices.get(address)
+            if scanner is None:
+                continue
+            burst_at = getattr(scanner, "scanner_replay_burst_last_at", None)
+            if burst_at is not None and (nowstamp - burst_at) <= self._REPLAY_REPAIR_ACTIVE_WINDOW_S:
+                flagged.append(scanner.name)
+        flagged.sort()
+        if flagged == self._replaying_scanner_names:
+            return
+        self._replaying_scanner_names = flagged
+        if flagged:
+            ir.async_create_issue(
+                self.hass,
+                DOMAIN,
+                REPAIR_SCANNER_REPLAYING_ADVERTS,
+                translation_key=REPAIR_SCANNER_REPLAYING_ADVERTS,
+                translation_placeholders={
+                    "scannerlist": "".join(f"- {name}\n" for name in flagged),
+                },
+                severity=ir.IssueSeverity.WARNING,
+                is_fixable=False,
+            )
+        else:
+            ir.async_delete_issue(self.hass, DOMAIN, REPAIR_SCANNER_REPLAYING_ADVERTS)
 
     def _async_manage_repair_trilat_without_anchors(self, scannerlist: list[str]):
         """Raise/clear repair when trilat is enabled but no anchors are configured."""
