@@ -256,7 +256,6 @@ class BermudaDevice(dict):
         self.scanner_replay_suspect_count: int = 0
         self.scanner_replay_suspect_last_at: float | None = None
         self.scanner_replay_suspect_recent: deque[tuple[float, str]] = deque(maxlen=64)
-        self.scanner_replay_burst_last_at: float | None = None
         self.scanner_last_accepted_advert_at: float | None = None
         self.adverts: dict[
             tuple[str, str], BermudaAdvert
@@ -763,7 +762,6 @@ class BermudaDevice(dict):
             self.scanner_replay_suspect_recent.popleft()
         burst_devices = {address for _, address in self.scanner_replay_suspect_recent}
         if len(burst_devices) >= 2:
-            self.scanner_replay_burst_last_at = nowstamp
             _LOGGER_SPAM_LESS.warning(
                 f"replay_burst_{self.address}",
                 "Scanner %s re-reported %d long-silent devices with unchanged RSSI within %ds - "

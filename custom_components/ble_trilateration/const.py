@@ -33,7 +33,6 @@ ICON_DEFAULT_FLOOR: Final = "mdi:selection-marker"  # "mdi:floor-plan"
 REPAIR_SCANNER_WITHOUT_AREA = "scanner_without_area"
 REPAIR_TRILAT_WITHOUT_ANCHORS = "trilat_without_anchors"
 REPAIR_CALIBRATION_LAYOUT_MISMATCH = "calibration_layout_mismatch"
-REPAIR_SCANNER_REPLAYING_ADVERTS = "scanner_replaying_adverts"
 
 # Device classes
 BINARY_SENSOR_DEVICE_CLASS = "connectivity"
