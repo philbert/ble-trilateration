@@ -5,11 +5,12 @@ from __future__ import annotations
 import time
 from datetime import datetime
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from custom_components.ble_trilateration.const import (
+    BDADDR_TYPE_RANDOM_STATIC,
     CONF_MAX_VELOCITY,
     DISTANCE_TIMEOUT,
 )
@@ -281,6 +282,31 @@ def test_refresh_trilateration_logs_stale_input_wave():
     assert "dev-stale-a" in args[5]
     assert "ha_scanners=1" in args[6]
     assert "backend=_DummyHaScanner" in args[6]
+
+
+def test_prune_devices_releases_pending_replay_candidates():
+    """Pruning an advert owner must first clear its scanner registrations."""
+    coordinator = object.__new__(BermudaDataUpdateCoordinator)
+    doomed = MagicMock()
+    doomed.name = "old-device"
+    doomed.last_seen = 0.0
+    doomed.create_sensor = False
+    doomed.is_scanner = False
+    doomed.address_type = BDADDR_TYPE_RANDOM_STATIC
+    coordinator.devices = {"old-device": doomed}
+    coordinator.metadevices = {}
+    coordinator._scanner_list = set()
+    coordinator._trilat_decision_state = {}
+    coordinator.stamp_last_prune = 0.0
+    coordinator.stamp_redactions_expiry = None
+    coordinator.redactions = {}
+    coordinator.irk_manager = MagicMock()
+
+    with patch("custom_components.ble_trilateration.coordinator.monotonic_time_coarse", return_value=100000.0):
+        coordinator.prune_devices(force_pruning=True)
+
+    doomed.discard_pending_replay_candidates.assert_called_once_with()
+    assert "old-device" not in coordinator.devices
 
 
 def _make_scanner(coordinator, address, floor_id, x_m, y_m, z_m=None):
@@ -2854,3 +2880,16 @@ def test_anchor_repair_reports_incomplete_scanner_after_minimum_is_met():
     coordinator._evaluate_trilat_anchor_repair()
 
     assert captured == [["partial [partial] (missing Anchor Z, floor assignment)"]]
+
+
+def test_anchor_repair_reports_new_unconfigured_scanner_after_minimum_is_met():
+    """A newly discovered scanner remains a user-actionable configuration task."""
+    coordinator = _make_coordinator()
+    for scanner in _right_triangle_anchors(coordinator, "complete", "f1"):
+        scanner.anchor_z_m = 1.0
+    _make_scanner(coordinator, "new-proxy", None, None, None)
+
+    captured = _capture_anchor_repair(coordinator)
+    coordinator._evaluate_trilat_anchor_repair()
+
+    assert captured == [["new-proxy [new-proxy] (missing Anchor X, Anchor Y, Anchor Z, floor assignment)"]]

@@ -5,6 +5,7 @@ Tests for BermudaDevice class in bermuda_device.py.
 import pytest
 from unittest.mock import MagicMock, patch
 from homeassistant.components.bluetooth import BaseHaScanner, BaseHaRemoteScanner
+from custom_components.ble_trilateration.bermuda_advert import BermudaAdvert, ReplayDecision
 from custom_components.ble_trilateration.bermuda_device import BermudaDevice
 from custom_components.ble_trilateration.const import ICON_DEFAULT_AREA, ICON_DEFAULT_FLOOR
 
@@ -128,21 +129,45 @@ def test_timestamp_sync_recovered_returns_to_synchronized_after_cooldown(bermuda
 
 
 def test_replay_candidates_reject_only_a_mature_multi_device_burst(bermuda_scanner):
-    """Every member must remain unconfirmed for a full window before rejection."""
+    """Two unconfirmed fringe candidates are deliberately rejected and counted."""
     bermuda_scanner.register_advert_replay_candidate("device-a", 100.0)
     bermuda_scanner.register_advert_replay_candidate("device-b", 108.0)
 
-    assert bermuda_scanner.resolve_advert_replay_candidate("device-a", 100.0, 128.0, 20.0) == "pending"
-    assert bermuda_scanner.resolve_advert_replay_candidate("device-a", 100.0, 129.0, 20.0) == "reject"
-    assert bermuda_scanner.resolve_advert_replay_candidate("device-b", 108.0, 129.0, 20.0) == "reject"
+    assert bermuda_scanner.resolve_advert_replay_candidate("device-a", 100.0, 128.0, 20.0) is ReplayDecision.PENDING
+    assert bermuda_scanner.resolve_advert_replay_candidate("device-a", 100.0, 129.0, 20.0) is ReplayDecision.REJECT
+    bermuda_scanner.record_advert_replay_suspect("device-a")
+    assert bermuda_scanner.resolve_advert_replay_candidate("device-b", 108.0, 129.0, 20.0) is ReplayDecision.REJECT
+    with patch("custom_components.ble_trilateration.bermuda_device._LOGGER_SPAM_LESS.debug") as log_debug:
+        bermuda_scanner.record_advert_replay_suspect("device-b")
+
+    assert bermuda_scanner.scanner_replay_suspect_count == 2
+    assert {address for _, address in bermuda_scanner.scanner_replay_suspect_recent} == {
+        "device-a",
+        "device-b",
+    }
+    log_debug.assert_called_once()
 
 
 def test_replay_candidate_accepts_an_isolated_one_off(bermuda_scanner):
     """A lone unconfirmed packet is ambiguous and must not be discarded."""
     bermuda_scanner.register_advert_replay_candidate("device-a", 100.0)
 
-    assert bermuda_scanner.resolve_advert_replay_candidate("device-a", 100.0, 120.0, 20.0) == "pending"
-    assert bermuda_scanner.resolve_advert_replay_candidate("device-a", 100.0, 121.0, 20.0) == "accept"
+    assert bermuda_scanner.resolve_advert_replay_candidate("device-a", 100.0, 120.0, 20.0) is ReplayDecision.PENDING
+    assert bermuda_scanner.resolve_advert_replay_candidate("device-a", 100.0, 121.0, 20.0) is ReplayDecision.ACCEPT
+
+
+def test_replay_candidate_registry_mismatch_self_heals_and_accepts(bermuda_scanner):
+    """Diagnostic state loss must not make the coordinator update fail."""
+    bermuda_scanner._scanner_replay_candidates["device-a"] = 99.0  # noqa: SLF001
+    bermuda_scanner._scanner_replay_rejected["device-a"] = 98.0  # noqa: SLF001
+
+    with patch("custom_components.ble_trilateration.bermuda_device._LOGGER_SPAM_LESS.error") as log_error:
+        decision = bermuda_scanner.resolve_advert_replay_candidate("device-a", 100.0, 121.0, 20.0)
+
+    assert decision is ReplayDecision.ACCEPT
+    assert "device-a" not in bermuda_scanner._scanner_replay_candidates  # noqa: SLF001
+    assert "device-a" not in bermuda_scanner._scanner_replay_rejected  # noqa: SLF001
+    log_error.assert_called_once()
 
 
 def test_confirmed_replay_candidate_leaves_no_burst_evidence(bermuda_scanner):
@@ -152,6 +177,16 @@ def test_confirmed_replay_candidate_leaves_no_burst_evidence(bermuda_scanner):
 
     assert bermuda_scanner._scanner_replay_candidates == {}  # noqa: SLF001
     assert bermuda_scanner._scanner_replay_rejected == {}  # noqa: SLF001
+
+
+def test_discard_pending_replay_candidates_clears_owned_adverts(bermuda_device):
+    """Pruning a device must release its scanner-wide candidate registrations."""
+    advert = MagicMock(spec=BermudaAdvert)
+    bermuda_device.adverts[(bermuda_device.address, "scanner-a")] = advert
+
+    bermuda_device.discard_pending_replay_candidates()
+
+    advert.discard_pending_replay_candidate.assert_called_once_with()
 
 
 def test_async_as_scanner_get_stamp(bermuda_scanner, mock_scanner, mock_remote_scanner):

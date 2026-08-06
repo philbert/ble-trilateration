@@ -16,12 +16,14 @@ from __future__ import annotations
 
 import statistics
 from dataclasses import dataclass
+from enum import Enum
 from typing import TYPE_CHECKING, Final
 
 from bluetooth_data_tools import monotonic_time_coarse
 
 from .const import (
     _LOGGER,
+    _LOGGER_SPAM_LESS,
     _LOGGER_TARGET,
     _LOGGER_TARGET_SPAM_LESS,
     CONF_MAX_VELOCITY,
@@ -32,8 +34,6 @@ from .const import (
     HIST_KEEP_COUNT,
     debug_device_match,
 )
-
-# from .const import _LOGGER_SPAM_LESS
 from .util import clean_charbuf
 
 if TYPE_CHECKING:
@@ -69,6 +69,14 @@ REPLAY_SUSPECT_GAP_S: Final = 120.0
 REPLAY_CONFIRM_WINDOW_S: Final = 20.0
 
 
+class ReplayDecision(Enum):
+    """Scanner-wide classification of a held replay-shaped advertisement."""
+
+    PENDING = "pending"
+    ACCEPT = "accept"
+    REJECT = "reject"
+
+
 @dataclass(frozen=True)
 class _AdvertisementSnapshot:
     """Immutable-enough copy of the advertisement fields Bermuda consumes."""
@@ -78,7 +86,7 @@ class _AdvertisementSnapshot:
     local_name: str | None
     manufacturer_data: dict[int, bytes]
     service_data: dict[str, bytes]
-    service_uuids: list[str]
+    service_uuids: tuple[str, ...]
 
     @classmethod
     def from_advertisement(cls, advertisementdata: AdvertisementData) -> _AdvertisementSnapshot:
@@ -89,7 +97,7 @@ class _AdvertisementSnapshot:
             local_name=advertisementdata.local_name,
             manufacturer_data=dict(advertisementdata.manufacturer_data),
             service_data=dict(advertisementdata.service_data),
-            service_uuids=list(advertisementdata.service_uuids),
+            service_uuids=tuple(sorted(set(advertisementdata.service_uuids))),
         )
 
 
@@ -143,6 +151,7 @@ class BermudaAdvert(dict):
         self.backward_drop_streak: int = 0  # Consecutive backwards-stamp drops; triggers a clock rebase
         self.stamp_is_synthetic: bool = False  # self.stamp came from the stampless fallback, not the scanner
         self._replay_pending: _ReplayPending | None = None
+        self._last_accepted_advertisement: _AdvertisementSnapshot | None = None
         self.rssi: float | None = None
         self.rssi_filtered: float | None = None
         self.rssi_dispersion: float = 0.0
@@ -361,6 +370,11 @@ class BermudaAdvert(dict):
             self.stamp = new_stamp or 0
             self.hist_stamp.insert(0, self.stamp)
             self.scanner_device.scanner_last_accepted_advert_at = nowstamp
+            if self.stamp > self._device.last_seen:
+                # A held candidate can be accepted from calculate_data(), after
+                # process_advertisement() has returned. Advance the parent with
+                # the packet's original stamp, never with decision time.
+                self._device.last_seen = self.stamp
 
         # if self.tx_power is not None and scandata.advertisement.tx_power != self.tx_power:
         #     # Not really an erorr, we just don't account for this happening -
@@ -420,6 +434,11 @@ class BermudaAdvert(dict):
 
         # Finally, save the new advert timestamp.
         self.new_stamp = new_stamp
+        self._last_accepted_advertisement = (
+            advertisementdata
+            if isinstance(advertisementdata, _AdvertisementSnapshot)
+            else _AdvertisementSnapshot.from_advertisement(advertisementdata)
+        )
 
     def _advertisement_matches_last_accepted(self, advertisementdata: AdvertisementData) -> bool:
         """
@@ -429,17 +448,7 @@ class BermudaAdvert(dict):
         so this is deliberately not treated as proof. Changed live data, TX power,
         name, or service UUIDs can still rule a replay out immediately.
         """
-        if self.manufacturer_data and self.manufacturer_data[0] != advertisementdata.manufacturer_data:
-            return False
-        if self.service_data and self.service_data[0] != advertisementdata.service_data:
-            return False
-        if set(self.service_uuids) != set(advertisementdata.service_uuids):
-            return False
-        if self.tx_power != advertisementdata.tx_power:
-            return False
-        previous_local_name = self.local_name[0][1] if self.local_name else None
-        current_local_name = advertisementdata.local_name.encode() if advertisementdata.local_name is not None else None
-        return previous_local_name == current_local_name
+        return self._last_accepted_advertisement == _AdvertisementSnapshot.from_advertisement(advertisementdata)
 
     def _queue_replay_pending(
         self,
@@ -464,6 +473,10 @@ class BermudaAdvert(dict):
         self.scanner_device.clear_advert_replay_candidate(self.device_address, pending.queued_at)
         self._replay_pending = None
 
+    def discard_pending_replay_candidate(self) -> None:
+        """Release scanner-wide state before the owning advert is discarded."""
+        self._clear_replay_pending()
+
     def _resolve_replay_pending(self, nowstamp: float) -> None:
         """Accept an isolated candidate or reject a proven scanner-wide burst."""
         pending = self._replay_pending
@@ -475,15 +488,25 @@ class BermudaAdvert(dict):
             nowstamp,
             REPLAY_CONFIRM_WINDOW_S,
         )
-        if decision == "pending":
+        if decision is ReplayDecision.PENDING:
             return
         self._replay_pending = None
-        if decision == "reject":
+        if decision is ReplayDecision.REJECT:
             self.scanner_device.record_advert_replay_suspect(self.device_address)
             return
-        if decision != "accept":
-            msg = f"Unexpected replay-candidate decision: {decision!r}"
-            raise RuntimeError(msg)
+        if decision is not ReplayDecision.ACCEPT:
+            # This detector is deliberately biased toward retaining live data.
+            # A broken internal contract must not make every coordinator entity
+            # unavailable, so clean up and accept the held packet.
+            self.scanner_device.clear_advert_replay_candidate(self.device_address, pending.queued_at)
+            _LOGGER_SPAM_LESS.error(
+                f"unexpected_replay_decision_{self.scanner_address}",
+                "Scanner %s returned an unexpected replay-candidate decision %r; "
+                "accepting the held advertisement for %s.",
+                self.scanner_device.name,
+                decision,
+                self.device_address,
+            )
         self._accept_advertisement(
             pending.advertisement,
             pending.stamp,

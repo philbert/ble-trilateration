@@ -31,7 +31,7 @@ from homeassistant.helpers import area_registry as ar
 from homeassistant.helpers import floor_registry as fr
 from homeassistant.util import slugify
 
-from .bermuda_advert import BermudaAdvert
+from .bermuda_advert import BermudaAdvert, ReplayDecision
 from .const import (
     _LOGGER,
     _LOGGER_SPAM_LESS,
@@ -751,6 +751,12 @@ class BermudaDevice(dict):
         self._scanner_replay_rejected.pop(device_address, None)
         self._scanner_replay_candidates[device_address] = queued_at
 
+    def discard_pending_replay_candidates(self) -> None:
+        """Release scanner registrations owned by this device's adverts."""
+        for advert in self.adverts.values():
+            if isinstance(advert, BermudaAdvert):
+                advert.discard_pending_replay_candidate()
+
     def clear_advert_replay_candidate(self, device_address: str, queued_at: float) -> None:
         """Clear a candidate when a strictly later advert confirms it is live."""
         if self._scanner_replay_candidates.get(device_address) == queued_at:
@@ -764,7 +770,7 @@ class BermudaDevice(dict):
         queued_at: float,
         nowstamp: float,
         confirm_window_s: float,
-    ) -> str:
+    ) -> ReplayDecision:
         """
         Classify a mature candidate as isolated (accept) or a burst (reject).
 
@@ -774,12 +780,19 @@ class BermudaDevice(dict):
         """
         if self._scanner_replay_rejected.get(device_address) == queued_at:
             self._scanner_replay_rejected.pop(device_address)
-            return "reject"
+            return ReplayDecision.REJECT
 
         registered_at = self._scanner_replay_candidates.get(device_address)
         if registered_at != queued_at:
-            msg = f"Replay candidate registry mismatch for {device_address}"
-            raise RuntimeError(msg)
+            self._scanner_replay_candidates.pop(device_address, None)
+            self._scanner_replay_rejected.pop(device_address, None)
+            _LOGGER_SPAM_LESS.error(
+                f"replay_candidate_registry_mismatch_{self.address}",
+                "Scanner %s lost replay-candidate state for %s; accepting the held advertisement.",
+                self.name,
+                device_address,
+            )
+            return ReplayDecision.ACCEPT
 
         cluster = {
             address: candidate_at
@@ -787,26 +800,27 @@ class BermudaDevice(dict):
             if abs(candidate_at - queued_at) <= self._REPLAY_BURST_WINDOW_S
         }
         if nowstamp - max(cluster.values()) <= confirm_window_s:
-            return "pending"
+            return ReplayDecision.PENDING
 
         if len(cluster) == 1:
             self._scanner_replay_candidates.pop(device_address)
-            return "accept"
+            return ReplayDecision.ACCEPT
 
         for address, candidate_at in cluster.items():
             self._scanner_replay_candidates.pop(address)
             self._scanner_replay_rejected[address] = candidate_at
         self._scanner_replay_rejected.pop(device_address)
-        return "reject"
+        return ReplayDecision.REJECT
 
     def record_advert_replay_suspect(self, device_address: str) -> None:
         """
         Record one member of a scanner-wide unconfirmed comeback burst.
 
         Confirmed comebacks and isolated one-off packets are accepted instead.
-        Even a multi-device burst remains circumstantial, so this stays a
-        debug-level diagnostic. Running counts remain available on the scanner's
-        diagnostic sensor for investigating a suspect proxy.
+        Two genuine fringe devices can still form an unconfirmed cluster; that
+        deliberate liveness-versus-stale-data trade-off is why this remains a
+        debug-level diagnostic rather than a warning or Repairs issue. Running
+        counts remain available on the scanner's diagnostic sensor.
         """
         nowstamp = monotonic_time_coarse()
         self.scanner_replay_suspect_count += 1
@@ -1269,19 +1283,14 @@ class BermudaDevice(dict):
         if advert_tuple in self.adverts:
             # Device already exists, update it
             self.adverts[advert_tuple].update_advertisement(advertisementdata, scanner_device)
-            device_advert = self.adverts[advert_tuple]
         else:
             # Create it
-            device_advert = self.adverts[advert_tuple] = BermudaAdvert(
+            self.adverts[advert_tuple] = BermudaAdvert(
                 self,
                 advertisementdata,
                 self.options,
                 scanner_device,
             )
-
-        # Let's see if we should update our last_seen based on this...
-        if device_advert.stamp is not None and self.last_seen < device_advert.stamp:
-            self.last_seen = device_advert.stamp
 
     def process_manufacturer_data(self, advert: BermudaAdvert):
         """Parse manufacturer data for maker name and iBeacon etc."""

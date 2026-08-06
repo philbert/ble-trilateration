@@ -4,7 +4,7 @@ Tests for BermudaAdvert class in bermuda_advert.py.
 
 import pytest
 from unittest.mock import MagicMock, patch
-from custom_components.ble_trilateration.bermuda_advert import BermudaAdvert
+from custom_components.ble_trilateration.bermuda_advert import BermudaAdvert, ReplayDecision
 from custom_components.ble_trilateration.bermuda_device import BermudaDevice
 from custom_components.ble_trilateration.const import (
     CONF_MAX_VELOCITY,
@@ -33,6 +33,7 @@ def mock_parent_device(mock_coordinator):
     device.name_devreg = None
     device.name_bt_serviceinfo = None
     device.get_mobility_type.return_value = "moving"
+    device.last_seen = 0.0
     device._coordinator = mock_coordinator
     return device
 
@@ -49,7 +50,7 @@ def mock_scanner_device():
     scanner.last_seen = 0.0
     scanner.stamps = {"AA:BB:CC:DD:EE:FF": 123.45}
     scanner.async_as_scanner_get_stamp.return_value = 123.45
-    scanner.resolve_advert_replay_candidate.return_value = "pending"
+    scanner.resolve_advert_replay_candidate.return_value = ReplayDecision.PENDING
     return scanner
 
 
@@ -376,7 +377,7 @@ def test_accepted_adverts_update_scanner_acceptance_stamp(bermuda_advert, mock_a
 
 
 def test_isolated_replay_shaped_comeback_is_accepted_after_window(
-    bermuda_advert, mock_advertisement_data, mock_scanner_device
+    bermuda_advert, mock_advertisement_data, mock_parent_device, mock_scanner_device
 ):
     """An isolated one-off comeback is delayed, not discarded as a replay."""
     mock_advertisement_data.rssi = -71  # changed RSSI so the fixture-to-baseline jump is accepted
@@ -394,9 +395,10 @@ def test_isolated_replay_shaped_comeback_is_accepted_after_window(
 
     # Once scanner-wide classification says it remained isolated, accept the
     # saved packet rather than losing a legitimate slow/one-off advertisement.
-    mock_scanner_device.resolve_advert_replay_candidate.return_value = "accept"
+    mock_scanner_device.resolve_advert_replay_candidate.return_value = ReplayDecision.ACCEPT
     bermuda_advert.calculate_data()
     assert bermuda_advert.stamp == 2083.0
+    assert mock_parent_device.last_seen == 2083.0
     assert not mock_scanner_device.record_advert_replay_suspect.called
 
 
@@ -409,7 +411,7 @@ def test_unconfirmed_replay_burst_member_is_quarantined(bermuda_advert, mock_adv
 
     mock_scanner_device.async_as_scanner_get_stamp.return_value = 2083.0
     bermuda_advert.update_advertisement(mock_advertisement_data, mock_scanner_device)
-    mock_scanner_device.resolve_advert_replay_candidate.return_value = "reject"
+    mock_scanner_device.resolve_advert_replay_candidate.return_value = ReplayDecision.REJECT
     bermuda_advert.calculate_data()
 
     assert bermuda_advert.stamp == 1000.0
@@ -451,6 +453,30 @@ def test_comeback_with_changed_payload_accepted_immediately(
     bermuda_advert.update_advertisement(mock_advertisement_data, mock_scanner_device)
     assert bermuda_advert.stamp == 2083.0
     assert not mock_scanner_device.record_advert_replay_suspect.called
+
+
+def test_replay_comparison_uses_last_snapshot_not_uuid_history(
+    bermuda_advert, mock_advertisement_data, mock_scanner_device
+):
+    """Alternating frame UUID history must not prevent exact snapshot matching."""
+    first_uuid = mock_advertisement_data.service_uuids[0]
+    second_uuid = "0000dcba-0000-1000-8000-00805f9b34fb"
+    mock_advertisement_data.rssi = -71
+    mock_scanner_device.async_as_scanner_get_stamp.return_value = 1000.0
+    bermuda_advert.update_advertisement(mock_advertisement_data, mock_scanner_device)
+
+    mock_advertisement_data.service_uuids = [second_uuid]
+    mock_scanner_device.async_as_scanner_get_stamp.return_value = 1001.0
+    bermuda_advert.update_advertisement(mock_advertisement_data, mock_scanner_device)
+    assert set(bermuda_advert.service_uuids) == {first_uuid, second_uuid}
+
+    # The current snapshot still matches even though the public UUID history
+    # contains both alternating frame types.
+    mock_scanner_device.async_as_scanner_get_stamp.return_value = 2083.0
+    bermuda_advert.update_advertisement(mock_advertisement_data, mock_scanner_device)
+
+    assert bermuda_advert.stamp == 1001.0
+    mock_scanner_device.register_advert_replay_candidate.assert_called_once()
 
 
 def test_comeback_with_changed_rssi_accepted_immediately(bermuda_advert, mock_advertisement_data, mock_scanner_device):

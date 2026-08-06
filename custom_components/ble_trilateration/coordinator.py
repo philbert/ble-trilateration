@@ -1465,6 +1465,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         # Prune the source devices
         for device_address in prune_list:
             _LOGGER.debug("Acting on prune list for %s", device_address)
+            self.devices[device_address].discard_pending_replay_candidates()
             del self.devices[device_address]
             self._trilat_decision_state.pop(device_address, None)
 
@@ -3749,10 +3750,11 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
 
         Runtime solving uses anchors globally, including softly weighted anchors
         from other floors, so the minimum is three fully configured anchors in
-        total rather than three on one floor. Calibration also snapshots every
-        scanner and requires complete X/Y/Z geometry, making any partially
-        configured scanner an actionable configuration problem even when the
-        runtime already has three other usable anchors.
+        total rather than three on one floor. Every discovered scanner is an
+        anchor and requires complete X/Y/Z geometry plus a floor assignment. A
+        missing Z also downgrades the runtime solve to 2D, while calibration
+        refuses incomplete geometry, so every omission is user-actionable even
+        when three other anchors are already configured.
         """
         scanners = sorted(self._scanners, key=lambda scanner: (scanner.name, scanner.address))
         if not scanners:

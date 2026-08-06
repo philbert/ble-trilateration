@@ -301,7 +301,7 @@
     },
     "trilat_without_anchors": {
       "title": "Scanner anchor configuration is incomplete",
-      "description": "BLE Trilateration needs at least three fully configured scanner anchors in total. Each scanner used for calibration must have `Anchor X`, `Anchor Y`, and `Anchor Z` coordinates set, and its device must belong to an area assigned to a floor. Complete the following configuration:\n\n{scannerlist}"
+      "description": "BLE Trilateration needs at least three fully configured scanner anchors in total. Every discovered Bluetooth scanner must have `Anchor X`, `Anchor Y`, and `Anchor Z` coordinates set, and its device must belong to an area assigned to a floor. Missing coordinates prevent complete 3D tracking and calibration. Complete the following configuration:\n\n{scannerlist}"
     },
     "calibration_layout_mismatch": {
       "title": "Some calibration samples don't match the current anchor layout",
