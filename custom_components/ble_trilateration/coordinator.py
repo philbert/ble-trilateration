@@ -4343,7 +4343,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
 
         floors = sorted({floor_id for floor_id, _rssi, _weight in evidence_inputs})
 
-        # Phase 3: Signal priority reorder — fingerprint (primary), RSSI (secondary).
+        # Phase 3: Signal priority reorder — fingerprint (primary), RSSI (secondary), Z hint (tertiary).
         # RSSI floor evidence (secondary signal), weighted by scanner timestamp health.
         rssi_floor_evidence: dict[str, float] = {}
         for candidate_floor_id in floors:
@@ -4358,22 +4358,37 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         # Fingerprint floor scores (primary signal)
         fingerprint_has_floor_signal = fingerprint_result.reason in {"ok", "room_ambiguity"}
 
-        # Do not feed device.trilat_z_m back into floor inference. The 3D solve is
-        # constrained by the selected floor's phone-height prior, so that value is
-        # not independent evidence and would create a self-reinforcing floor latch.
-        # A geometry-derived floor signal can only return once an unconstrained or
-        # per-candidate solve makes its provenance independent of the incumbent.
-        #
-        # Normalise the independent signals to [0,1] fractions before blending.
-        # Fall back to pure RSSI when fingerprint evidence is absent.
+        # Z-derived floor hint (tertiary) — uses phone-height band per floor when trilat_z_m is solved
+        z_floor_scores: dict[str, float] = {}
+        if device.trilat_z_m is not None:
+            for fid in floors:
+                fz_m = self.get_floor_z_m(fid)
+                if fz_m is not None:
+                    phone_z = fz_m + self._PHONE_HEIGHT_Z_CENTER_M
+                    z_diff = device.trilat_z_m - phone_z
+                    z_floor_scores[fid] = math.exp(-0.5 * (z_diff / self._PHONE_HEIGHT_Z_SIGMA_M) ** 2)
+
+        # Combine signals: normalise each to [0,1] fraction, then weight-blend.
+        # Falls back to pure RSSI when fingerprint and Z evidence are absent.
         total_rssi = sum(rssi_floor_evidence.values()) or 1e-9
         rssi_norm = {fid: v / total_rssi for fid, v in rssi_floor_evidence.items()}
         _fp_norm: dict[str, float] = {}
+        _z_norm: dict[str, float] = {}
         if fingerprint_has_floor_signal and fingerprint_result.floor_scores:
             total_fp = sum(fingerprint_result.floor_scores.values()) or 1e-9
             _fp_norm = {fid: fingerprint_result.floor_scores.get(fid, 0.0) / total_fp for fid in floors}
-        if _fp_norm:
+        if z_floor_scores:
+            total_z = sum(z_floor_scores.values()) or 1e-9
+            _z_norm = {fid: z_floor_scores.get(fid, 0.0) / total_z for fid in floors}
+        if _fp_norm and _z_norm:
+            floor_evidence: dict[str, float] = {
+                fid: _fp_norm.get(fid, 0.0) * 0.55 + rssi_norm.get(fid, 0.0) * 0.30 + _z_norm.get(fid, 0.0) * 0.15
+                for fid in floors
+            }
+        elif _fp_norm:
             floor_evidence = {fid: _fp_norm.get(fid, 0.0) * 0.65 + rssi_norm.get(fid, 0.0) * 0.35 for fid in floors}
+        elif _z_norm:
+            floor_evidence = {fid: rssi_norm.get(fid, 0.0) * 0.70 + _z_norm.get(fid, 0.0) * 0.30 for fid in floors}
         else:
             floor_evidence = rssi_floor_evidence
 
@@ -4637,6 +4652,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         )
         # Augment diagnostics with Phase 3 signal breakdown and gate result.
         device.trilat_floor_diagnostics["rssi_floor_evidence"] = rssi_floor_evidence
+        device.trilat_floor_diagnostics["z_floor_scores"] = z_floor_scores
         device.trilat_floor_diagnostics["fingerprint_has_floor_signal"] = fingerprint_has_floor_signal
         if _gate_result_pre is not None:
             device.trilat_floor_diagnostics["reachability_gate_allowed"] = _gate_result_pre.allowed
