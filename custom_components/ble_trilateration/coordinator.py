@@ -56,7 +56,7 @@ from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.util.dt import get_age, now
 
-from .arbiter import ARBITER_VERSION, EvidenceArbiter
+from .arbiter import ARBITER_VERSION, EvidenceArbiter, FusedDecision
 from .bermuda_device import BermudaDevice
 from .bermuda_irk import BermudaIrkManager
 from .calibration import BermudaCalibrationManager
@@ -177,6 +177,34 @@ class _SuppressTimingLogger:
 # so we're just disabling it for the whole file.
 # https://github.com/astral-sh/ruff/issues/4244
 # ruff: noqa: PLR1730
+
+
+@dataclass(frozen=True)
+class ArbiterEvidence:
+    """Reliability-weighted floor evidence plus the reasoning behind it."""
+
+    decision: FusedDecision
+    results: list[EvidenceResult]
+    geometry_diagnostics: dict[str, Any]
+    committed_state: CommittedFloorState
+
+    def as_diagnostics(self, *, legacy_floor_evidence: dict[str, float], live_floor_id: str | None) -> dict[str, Any]:
+        """Return the live decision alongside the legacy blend it replaced."""
+        legacy_best = max(legacy_floor_evidence.items(), key=lambda row: row[1])[0] if legacy_floor_evidence else None
+        return {
+            "mode": "live",
+            "decision": self.decision.as_diagnostics(),
+            "sources": {result.source.value: result.as_diagnostics() for result in self.results},
+            "geometry_floor_neutral": self.geometry_diagnostics,
+            "committed_state": self.committed_state.as_diagnostics(),
+            "legacy_blend_shadow": {
+                "mode": "diagnostic_only",
+                "floor_evidence": {key: round(value, 6) for key, value in legacy_floor_evidence.items()},
+                "best_floor_id": legacy_best,
+                "agrees_with_live": legacy_best == live_floor_id,
+                "includes_prior_constrained_z": True,
+            },
+        }
 
 
 class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
@@ -2662,6 +2690,11 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         last_floor_change_at: float = 0.0
         last_floor_change_from_id: str | None = None
         last_anchor_floor_roles: dict[str, str] = field(default_factory=dict)
+        # Un-penalised anchors from the previous cycle. Floor evidence is built
+        # before this cycle's anchors exist, and geometry evidence must not be
+        # derived from anchors that were already weighted by the floor it is
+        # being asked about - so it uses the last cycle's neutral set instead.
+        last_base_floor_anchors: list[tuple[str | None, AnchorMeasurement]] = field(default_factory=list)
         last_anchor_ids: tuple[str, ...] = ()
         last_anchor_ranges: dict[str, float] = field(default_factory=dict)
         last_anchor_z: dict[str, float | None] = field(default_factory=dict)
@@ -2942,11 +2975,12 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         above, so this is where a device on that floor can physically be. The
         topmost floor gets a nominal storey height since nothing bounds it.
         """
+        all_configs = getattr(getattr(self, "_floor_config_store", None), "all_configs", None) or {}
         levels = sorted(
             (
                 (floor_id, float(cfg.floor_z_m))
-                for floor_id, cfg in self._floor_config_store.all_configs.items()
-                if cfg.floor_z_m is not None
+                for floor_id, cfg in all_configs.items()
+                if getattr(cfg, "floor_z_m", None) is not None
             ),
             key=lambda row: row[1],
         )
@@ -2956,7 +2990,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             bands[floor_id] = (floor_z, upper)
         return bands
 
-    def _build_arbiter_shadow(
+    def _build_arbiter_evidence(
         self,
         *,
         device: BermudaDevice,
@@ -2964,17 +2998,25 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         rssi_floor_evidence: dict[str, float],
         fingerprint_floor_scores: dict[str, float],
         fingerprint_overlap: dict[str, float] | None,
-        selected_floor_id: str | None,
         nowstamp: float,
-    ) -> dict[str, Any]:
+    ) -> ArbiterEvidence | None:
         """
-        Run the reliability-weighted arbiter alongside the live decision.
+        Build reliability-weighted floor evidence from all available sources.
 
-        Diagnostic only: nothing here feeds the live floor, the solve, or any
-        published entity. It exists so the new architecture can be compared
-        against the current one on the same observations before it is trusted
-        with anything.
+        This drives the live floor decision. It produces candidate scores only -
+        the margin, dwell, and reachability gating that decide whether to act on
+        those scores are unchanged and still own that judgement.
+
+        Geometry is included whenever it can see height. When the vertical
+        profile is flat it reports zero reliability and contributes nothing,
+        which on coarse ranges is most of the time; that abstention is visible
+        in the diagnostics rather than hidden behind a weak vote.
         """
+        arbiter = getattr(self, "_evidence_arbiter", None)
+        if arbiter is None or not rssi_floor_evidence:
+            # No RSSI evidence means nothing to weigh; a coordinator without the
+            # arbiter wired falls back to the legacy blend rather than failing.
+            return None
         results: list[EvidenceResult] = []
 
         # --- RSSI: candidate scores straight from the live evidence -----------
@@ -3084,14 +3126,14 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         else:
             results.append(EvidenceResult.unavailable(EvidenceSource.GEOMETRY, "insufficient_anchors"))
 
-        decision = self._evidence_arbiter.fuse(results)
+        decision = arbiter.fuse(results)
 
-        # --- Committed state, shadowed per device ----------------------------
+        # --- Committed state: conditioning only, never published --------------
         shadow_states = self._shadow_committed_states
-        state = shadow_states.setdefault(device.address, CommittedFloorState())
-        committed_before = state.floor_id
+        committed = shadow_states.setdefault(device.address, CommittedFloorState())
+        committed_before = committed.floor_id
         self._committed_floor_policy.update(
-            state,
+            committed,
             candidate_floor_id=decision.choice,
             confidence=decision.confidence,
             nowstamp=nowstamp,
@@ -3108,8 +3150,8 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             fused_confidence=decision.confidence,
             published_choice=decision.choice,
             committed_before=committed_before,
-            committed_after=state.floor_id,
-            overrides=self._evidence_arbiter.overrides.as_diagnostics(),
+            committed_after=committed.floor_id,
+            overrides=arbiter.overrides.as_diagnostics(),
             algorithm_versions={
                 "evidence_contract": EVIDENCE_CONTRACT_VERSION,
                 "arbiter": ARBITER_VERSION,
@@ -3118,33 +3160,12 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         )
         self._decision_frames.record(frame)
 
-        agrees = decision.choice == selected_floor_id
-        if not agrees and decision.choice is not None:
-            # Only disagreements are logged, so the log stays readable while
-            # still capturing every case worth comparing against the live path.
-            _LOGGER_SPAM_LESS.warning(
-                f"arbiter_shadow_disagrees:{device.address}",
-                "Arbiter shadow (diagnostic only): device=%s live=%s shadow=%s conf=%.2f disagreement=%.2f "
-                "weights=%s committed=%s z=%s",
-                device.name,
-                selected_floor_id,
-                decision.choice,
-                decision.confidence,
-                decision.disagreement,
-                {key: round(value, 2) for key, value in decision.effective_weights.items()},
-                state.floor_id,
-                geometry_diag.get("z_observability", {}).get("reason", "n/a"),
-            )
-
-        return {
-            "mode": "diagnostic_only",
-            "agrees_with_live": agrees,
-            "live_floor_id": selected_floor_id,
-            "decision": decision.as_diagnostics(),
-            "sources": {result.source.value: result.as_diagnostics() for result in results},
-            "geometry_floor_neutral": geometry_diag,
-            "committed_state": state.as_diagnostics(),
-        }
+        return ArbiterEvidence(
+            decision=decision,
+            results=results,
+            geometry_diagnostics=geometry_diag,
+            committed_state=committed,
+        )
 
     def _build_candidate_floor_shadow(
         self,
@@ -4963,6 +4984,27 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             no_z_blend_weights = {"rssi": 1.0}
             no_z_floor_evidence = dict(rssi_norm)
 
+        # The legacy blend above is now the shadow. Its z term is derived from a
+        # solve that was itself conditioned on the selected floor, so it confirms
+        # whatever floor is already held; the arbiter replaces it with
+        # reliability-weighted evidence that carries no such feedback path.
+        # Everything downstream - margin, dwell, reachability gate, confidence
+        # decay - is untouched and simply receives honest input.
+        legacy_floor_evidence = dict(floor_evidence)
+        arbiter_live = self._build_arbiter_evidence(
+            device=device,
+            base_floor_anchors=state.last_base_floor_anchors or [],
+            rssi_floor_evidence=rssi_floor_evidence,
+            fingerprint_floor_scores=dict(fingerprint_result.floor_scores or {}),
+            fingerprint_overlap=getattr(device, "room_fingerprint_overlap", None),
+            nowstamp=nowstamp,
+        )
+        if arbiter_live is not None and arbiter_live.decision.choice is not None:
+            floor_evidence = dict(arbiter_live.decision.scores)
+            floor_evidence_source = "arbiter"
+        else:
+            floor_evidence_source = "legacy_blend"
+
         ranked_floors = sorted(floor_evidence.items(), key=lambda row: row[1], reverse=True)
         best_floor_id, best_floor_score = ranked_floors[0]
         second_floor_score = ranked_floors[1][1] if len(ranked_floors) > 1 else 0.0
@@ -5378,6 +5420,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         anchor_z_bounds = (
             (min(same_floor_known_anchor_z), max(same_floor_known_anchor_z)) if same_floor_known_anchor_z else None
         )
+        state.last_base_floor_anchors = list(base_floor_anchors)
         candidate_shadow_trigger: list[str] = []
         if floor_ambiguous_persisted:
             candidate_shadow_trigger.append("persistent_ambiguity")
@@ -5393,16 +5436,12 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 required_margin=policy.floor_switch_margin,
                 trigger=candidate_shadow_trigger,
             )
-        if getattr(self, "_evidence_arbiter", None) is not None:
-            device.trilat_floor_diagnostics["arbiter_shadow"] = self._build_arbiter_shadow(
-                device=device,
-                base_floor_anchors=base_floor_anchors,
-                rssi_floor_evidence=rssi_floor_evidence,
-                fingerprint_floor_scores=dict(fingerprint_result.floor_scores or {}),
-                fingerprint_overlap=getattr(device, "room_fingerprint_overlap", None),
-                selected_floor_id=selected_floor_id,
-                nowstamp=nowstamp,
+        if arbiter_live is not None:
+            device.trilat_floor_diagnostics["arbiter"] = arbiter_live.as_diagnostics(
+                legacy_floor_evidence=legacy_floor_evidence,
+                live_floor_id=selected_floor_id,
             )
+        device.trilat_floor_diagnostics["floor_evidence_source"] = floor_evidence_source
 
         if anchor_count < self._TRILAT_MIN_ANCHORS:
             fallback_xy = state.last_solution_xy

@@ -195,7 +195,7 @@ def _make_coordinator():
     coordinator.trilat_reachability_gate_enabled = lambda: False  # Phase 3: gate off in unit tests
     coordinator._transition_zone_store = SimpleNamespace(zones=[])
     coordinator.room_classifier = None
-    coordinator._floor_config_store = SimpleNamespace(get=lambda _fid: None)
+    coordinator._floor_config_store = SimpleNamespace(get=lambda _fid: None, all_configs={})
     coordinator._trilat_bootstrap_store = SimpleNamespace(
         get=lambda _addr: None,
         schedule_save=lambda *_args, **_kwargs: None,
@@ -3138,13 +3138,13 @@ def _bin_like_anchors():
     ]
 
 
-def test_arbiter_shadow_follows_rssi_when_geometry_cannot_see_height():
+def test_arbiter_follows_rssi_when_geometry_cannot_see_height():
     """The bins' real situation: RSSI is informative, geometry is not."""
     coordinator = _arbiter_shadow_coordinator()
     device = _DummyDevice("dev-bin")
     device.name = "Brown bin"
 
-    shadow = coordinator._build_arbiter_shadow(
+    evidence = coordinator._build_arbiter_evidence(
         device=device,
         base_floor_anchors=_bin_like_anchors(),
         rssi_floor_evidence={"street_level": 27.98, "ground_floor": 14.81},
@@ -3154,29 +3154,50 @@ def test_arbiter_shadow_follows_rssi_when_geometry_cannot_see_height():
             "live_trained_fraction": 0.44,
             "trained_match_fraction": 0.8,
         },
-        selected_floor_id="ground_floor",
         nowstamp=100.0,
     )
 
-    assert shadow["mode"] == "diagnostic_only"
-    assert shadow["decision"]["choice"] == "street_level"
-    assert shadow["agrees_with_live"] is False
+    assert evidence is not None
+    assert evidence.decision.choice == "street_level"
     # Coarse ranges cannot resolve a 1.3 m floor gap, so geometry must abstain.
-    assert shadow["sources"]["geometry"]["reliability"] == 0.0
+    geometry = next(r for r in evidence.results if r.source.value == "geometry")
+    assert geometry.reliability == 0.0
 
 
-def test_arbiter_shadow_records_a_replayable_decision_frame():
-    """Every shadow decision must be reconstructible from the diagnostics dump."""
+def test_arbiter_diagnostics_carry_the_legacy_blend_as_shadow():
+    """Flipping the roles must keep the old blend visible for comparison."""
+    coordinator = _arbiter_shadow_coordinator()
+    device = _DummyDevice("dev-compare")
+
+    evidence = coordinator._build_arbiter_evidence(
+        device=device,
+        base_floor_anchors=_bin_like_anchors(),
+        rssi_floor_evidence={"street_level": 27.98, "ground_floor": 14.81},
+        fingerprint_floor_scores={},
+        fingerprint_overlap=None,
+        nowstamp=100.0,
+    )
+    dumped = evidence.as_diagnostics(
+        legacy_floor_evidence={"ground_floor": 0.62, "street_level": 0.38},
+        live_floor_id="street_level",
+    )
+
+    assert dumped["mode"] == "live"
+    assert dumped["legacy_blend_shadow"]["best_floor_id"] == "ground_floor"
+    assert dumped["legacy_blend_shadow"]["agrees_with_live"] is False
+
+
+def test_arbiter_records_a_replayable_decision_frame():
+    """Every decision must be reconstructible from the diagnostics dump."""
     coordinator = _arbiter_shadow_coordinator()
     device = _DummyDevice("dev-frame")
 
-    coordinator._build_arbiter_shadow(
+    coordinator._build_arbiter_evidence(
         device=device,
         base_floor_anchors=_bin_like_anchors(),
         rssi_floor_evidence={"street_level": 20.0, "ground_floor": 10.0},
         fingerprint_floor_scores={},
         fingerprint_overlap=None,
-        selected_floor_id="street_level",
         nowstamp=100.0,
     )
 
@@ -3188,32 +3209,41 @@ def test_arbiter_shadow_records_a_replayable_decision_frame():
     assert frame.algorithm_versions["arbiter"] >= 1
 
 
-def test_arbiter_shadow_does_not_commit_on_a_single_cycle():
-    """A shadow guess is published immediately but must earn the commitment."""
+def test_committed_floor_is_not_acquired_on_a_single_cycle():
+    """The published guess is immediate; the conditioning state must be earned."""
     coordinator = _arbiter_shadow_coordinator()
     device = _DummyDevice("dev-commit")
+    kwargs = {
+        "device": device,
+        "base_floor_anchors": _bin_like_anchors(),
+        "rssi_floor_evidence": {"street_level": 40.0, "ground_floor": 5.0},
+        "fingerprint_floor_scores": {},
+        "fingerprint_overlap": None,
+    }
 
-    first = coordinator._build_arbiter_shadow(
-        device=device,
-        base_floor_anchors=_bin_like_anchors(),
-        rssi_floor_evidence={"street_level": 40.0, "ground_floor": 5.0},
-        fingerprint_floor_scores={},
-        fingerprint_overlap=None,
-        selected_floor_id="ground_floor",
-        nowstamp=0.0,
-    )
-    assert first["committed_state"]["committed_floor_id"] is None
+    first = coordinator._build_arbiter_evidence(nowstamp=0.0, **kwargs)
+    assert first.decision.choice == "street_level"
+    assert first.committed_state.floor_id is None
 
-    later = coordinator._build_arbiter_shadow(
-        device=device,
-        base_floor_anchors=_bin_like_anchors(),
-        rssi_floor_evidence={"street_level": 40.0, "ground_floor": 5.0},
-        fingerprint_floor_scores={},
-        fingerprint_overlap=None,
-        selected_floor_id="ground_floor",
-        nowstamp=60.0,
+    later = coordinator._build_arbiter_evidence(nowstamp=60.0, **kwargs)
+    assert later.committed_state.floor_id == "street_level"
+
+
+def test_arbiter_is_skipped_without_rssi_evidence():
+    """With nothing to weigh, the legacy blend still decides rather than failing."""
+    coordinator = _arbiter_shadow_coordinator()
+
+    assert (
+        coordinator._build_arbiter_evidence(
+            device=_DummyDevice("dev-empty"),
+            base_floor_anchors=[],
+            rssi_floor_evidence={},
+            fingerprint_floor_scores={},
+            fingerprint_overlap=None,
+            nowstamp=0.0,
+        )
+        is None
     )
-    assert later["committed_state"]["committed_floor_id"] == "street_level"
 
 
 def test_floor_height_bands_span_each_storey():
