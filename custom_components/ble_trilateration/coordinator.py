@@ -6,7 +6,7 @@ import logging
 import math
 import re
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any, cast
 
@@ -114,11 +114,13 @@ from .transition_zone_store import BermudaTransitionZoneStore
 from .trilat_bootstrap_store import BermudaTrilatBootstrapStore, TrilatBootstrapRecord
 from .trilateration import (
     AnchorMeasurement,
+    RangeLikelihoodMetrics,
     SolvePrior2D,
     SolvePrior3D,
     SolveQualityMetrics,
     anchor_centroid,
     anchor_centroid_3d,
+    range_likelihood_metrics,
     solve_2d_soft_l1,
     solve_3d_soft_l1,
     solve_quality_metrics_2d,
@@ -2782,6 +2784,273 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             return solve_quality_metrics_3d(x_m, y_m, z_m, anchors)
         return solve_quality_metrics_2d(x_m, y_m, anchors)
 
+    def _shadow_floor_evidence_summary(
+        self,
+        *,
+        floor_evidence: dict[str, float],
+        selected_floor_id: str | None,
+        required_margin: float,
+    ) -> dict[str, object]:
+        """Summarize counterfactual floor evidence without touching decision state."""
+        if not floor_evidence:
+            return {
+                "floor_evidence": {},
+                "best_floor_id": None,
+                "best_floor_name": None,
+                "current_floor_score": None,
+                "switch_margin": None,
+                "required_margin": required_margin,
+                "would_form_challenger": False,
+            }
+
+        ranked = sorted(floor_evidence.items(), key=lambda row: row[1], reverse=True)
+        best_floor_id, best_floor_score = ranked[0]
+        second_floor_score = ranked[1][1] if len(ranked) > 1 else 0.0
+        total_floor_score = sum(floor_evidence.values())
+        current_floor_score = floor_evidence.get(selected_floor_id, 0.0) if selected_floor_id is not None else None
+        switch_margin = None
+        if current_floor_score is not None:
+            switch_margin = (
+                0.0
+                if best_floor_id == selected_floor_id
+                else (best_floor_score - current_floor_score) / max(best_floor_score, 1e-9)
+            )
+        ambiguity_ratio = (
+            (best_floor_score - second_floor_score) / total_floor_score if total_floor_score > 0.0 else None
+        )
+        would_form_challenger = bool(
+            selected_floor_id is not None
+            and best_floor_id != selected_floor_id
+            and switch_margin is not None
+            and switch_margin >= required_margin
+        )
+        return {
+            "floor_evidence": dict(floor_evidence),
+            "floor_evidence_names": {floor_id: self._resolve_floor_name(floor_id) for floor_id in floor_evidence},
+            "best_floor_id": best_floor_id,
+            "best_floor_name": self._resolve_floor_name(best_floor_id),
+            "best_floor_score": best_floor_score,
+            "second_floor_score": second_floor_score,
+            "total_floor_score": total_floor_score,
+            "current_floor_id": selected_floor_id,
+            "current_floor_name": self._resolve_floor_name(selected_floor_id),
+            "current_floor_score": current_floor_score,
+            "ambiguity_ratio": ambiguity_ratio,
+            "switch_margin": switch_margin,
+            "required_margin": required_margin,
+            "would_form_challenger": would_form_challenger,
+        }
+
+    @staticmethod
+    def _relative_floor_likelihoods(cost_by_floor: dict[str, float]) -> dict[str, float]:
+        """Normalize candidate negative log likelihoods with a stable softmax."""
+        if not cost_by_floor:
+            return {}
+        minimum_cost = min(cost_by_floor.values())
+        unnormalized = {
+            floor_id: math.exp(max(-700.0, minimum_cost - cost)) for floor_id, cost in cost_by_floor.items()
+        }
+        total = sum(unnormalized.values())
+        return {floor_id: value / total for floor_id, value in unnormalized.items()}
+
+    def _build_candidate_floor_shadow(
+        self,
+        *,
+        floors: list[str],
+        base_floor_anchors: list[tuple[str | None, AnchorMeasurement]],
+        fingerprint_norm: dict[str, float],
+        rssi_norm: dict[str, float],
+        selected_floor_id: str | None,
+        required_margin: float,
+        trigger: list[str],
+    ) -> dict[str, object]:
+        """Run independent candidate-floor solves for diagnostics only."""
+        evaluations: dict[str, dict[str, object]] = {}
+        gaussian_cost_by_floor: dict[str, float] = {}
+        soft_l1_cost_by_floor: dict[str, float] = {}
+        anchor_count = len(base_floor_anchors)
+        can_solve_3d = anchor_count >= self._TRILAT_MIN_ANCHORS_3D and all(
+            anchor.z_m is not None for _floor_id, anchor in base_floor_anchors
+        )
+        solver_dimension = "3d" if can_solve_3d else "2d"
+
+        for candidate_floor_id in floors:
+            candidate_anchors = [
+                replace(
+                    anchor,
+                    sigma_m=(
+                        anchor.sigma_m
+                        if anchor_floor_id == candidate_floor_id
+                        else anchor.sigma_m * self._TRILAT_DIAGNOSTIC_OTHER_FLOOR_SIGMA_MULTIPLIER
+                    ),
+                )
+                for anchor_floor_id, anchor in base_floor_anchors
+            ]
+            same_floor_anchor_count = sum(
+                anchor_floor_id == candidate_floor_id for anchor_floor_id, _anchor in base_floor_anchors
+            )
+            evaluation: dict[str, object] = {
+                "floor_name": self._resolve_floor_name(candidate_floor_id),
+                "status": "pending",
+                "solver_dimension": solver_dimension,
+                "anchor_count": anchor_count,
+                "same_floor_anchor_count": same_floor_anchor_count,
+                "other_floor_anchor_count": anchor_count - same_floor_anchor_count,
+                "mean_effective_sigma_m": (
+                    sum(anchor.sigma_m for anchor in candidate_anchors) / anchor_count if anchor_count else None
+                ),
+                "phone_height_prior_z_m": None,
+                "phone_height_prior_sigma_m": None,
+            }
+            evaluations[candidate_floor_id] = evaluation
+
+            if anchor_count < self._TRILAT_MIN_ANCHORS:
+                evaluation["status"] = "insufficient_anchors"
+                continue
+
+            phone_z_m: float | None = None
+            if solver_dimension == "3d":
+                floor_z_m = self.get_floor_z_m(candidate_floor_id)
+                if floor_z_m is None:
+                    evaluation["status"] = "missing_floor_z"
+                    continue
+                phone_z_m = floor_z_m + self._PHONE_HEIGHT_Z_CENTER_M
+                phone_prior = SolvePrior3D(
+                    x_m=0.0,
+                    y_m=0.0,
+                    z_m=phone_z_m,
+                    sigma_x_m=1e6,
+                    sigma_y_m=1e6,
+                    sigma_z_m=self._PHONE_HEIGHT_Z_SIGMA_M,
+                )
+                centroid_x, centroid_y, _centroid_z = anchor_centroid_3d(candidate_anchors)
+                solve_result = solve_3d_soft_l1(
+                    candidate_anchors,
+                    initial_guess=(centroid_x, centroid_y, phone_z_m),
+                    prior=phone_prior,
+                )
+                evaluation["phone_height_prior_z_m"] = phone_z_m
+                evaluation["phone_height_prior_sigma_m"] = self._PHONE_HEIGHT_Z_SIGMA_M
+            else:
+                solve_result = solve_2d_soft_l1(
+                    candidate_anchors,
+                    initial_guess=anchor_centroid(candidate_anchors),
+                )
+
+            evaluation["solver_reason"] = solve_result.reason
+            evaluation["iterations"] = solve_result.iterations
+            if not solve_result.ok or solve_result.x_m is None or solve_result.y_m is None:
+                evaluation["status"] = f"solve_failed:{solve_result.reason}"
+                continue
+            if solver_dimension == "3d" and solve_result.z_m is None:
+                evaluation["status"] = "solve_failed:missing_z"
+                continue
+
+            quality = self._compute_trilat_quality_metrics(
+                candidate_anchors,
+                solver_dimension=solver_dimension,
+                x_m=solve_result.x_m,
+                y_m=solve_result.y_m,
+                z_m=solve_result.z_m,
+            )
+            likelihood: RangeLikelihoodMetrics = range_likelihood_metrics(
+                solve_result.x_m,
+                solve_result.y_m,
+                candidate_anchors,
+                z_m=solve_result.z_m if solver_dimension == "3d" else None,
+            )
+            prior_gaussian_nll = 0.0
+            prior_soft_l1_nll = 0.0
+            if phone_z_m is not None and solve_result.z_m is not None:
+                prior_sigma_m = self._PHONE_HEIGHT_Z_SIGMA_M
+                normalized_prior_residual = (solve_result.z_m - phone_z_m) / prior_sigma_m
+                prior_gaussian_nll = (
+                    0.5 * math.log(2.0 * math.pi) + math.log(prior_sigma_m) + (0.5 * normalized_prior_residual**2)
+                )
+                prior_soft_l1_nll = math.log(prior_sigma_m) + math.sqrt(1.0 + normalized_prior_residual**2) - 1.0
+            total_gaussian_nll = likelihood.gaussian_nll + prior_gaussian_nll
+            total_soft_l1_nll = likelihood.soft_l1_nll + prior_soft_l1_nll
+            scored_observation_count = anchor_count + (1 if phone_z_m is not None else 0)
+            evaluation.update(
+                {
+                    "status": "ok",
+                    "x_m": solve_result.x_m,
+                    "y_m": solve_result.y_m,
+                    "z_m": solve_result.z_m,
+                    "residual_rms_m": solve_result.residual_rms_m,
+                    "geometry_quality_01": quality.geometry_quality_01,
+                    "residual_consistency_01": quality.residual_consistency_01,
+                    "gdop": quality.gdop,
+                    "condition_number": quality.condition_number,
+                    "normalized_residual_rms": quality.normalized_residual_rms,
+                    "range_gaussian_nll": likelihood.gaussian_nll,
+                    "range_soft_l1_nll": likelihood.soft_l1_nll,
+                    "phone_prior_gaussian_nll": prior_gaussian_nll,
+                    "phone_prior_soft_l1_nll": prior_soft_l1_nll,
+                    "sigma_aware_gaussian_nll": total_gaussian_nll,
+                    "sigma_aware_soft_l1_nll": total_soft_l1_nll,
+                    "sigma_aware_soft_l1_nll_per_observation": total_soft_l1_nll / scored_observation_count,
+                }
+            )
+            if math.isfinite(total_soft_l1_nll):
+                soft_l1_cost_by_floor[candidate_floor_id] = total_soft_l1_nll
+            else:
+                evaluation["status"] = "non_finite_likelihood"
+            if math.isfinite(total_gaussian_nll):
+                gaussian_cost_by_floor[candidate_floor_id] = total_gaussian_nll
+
+        geometry_floor_scores = self._relative_floor_likelihoods(soft_l1_cost_by_floor)
+        gaussian_floor_scores = self._relative_floor_likelihoods(gaussian_cost_by_floor)
+        all_candidates_solved = len(geometry_floor_scores) == len(floors)
+        geometry_best_floor_id = (
+            max(geometry_floor_scores.items(), key=lambda row: row[1])[0] if geometry_floor_scores else None
+        )
+        gaussian_best_floor_id = (
+            max(gaussian_floor_scores.items(), key=lambda row: row[1])[0] if gaussian_floor_scores else None
+        )
+        result: dict[str, object] = {
+            "mode": "diagnostic_only",
+            "trigger": trigger,
+            "uses_incumbent_continuity_prior": False,
+            "other_floor_sigma_multiplier": self._TRILAT_DIAGNOSTIC_OTHER_FLOOR_SIGMA_MULTIPLIER,
+            "likelihood_model": "soft_l1_normalized_residual_plus_log_sigma",
+            "evaluations": evaluations,
+            "all_candidates_solved": all_candidates_solved,
+            "geometry_score_source": "sigma_aware_soft_l1_nll",
+            "geometry_floor_scores": geometry_floor_scores,
+            "geometry_best_floor_id": geometry_best_floor_id,
+            "geometry_best_floor_name": self._resolve_floor_name(geometry_best_floor_id),
+            "gaussian_floor_scores": gaussian_floor_scores,
+            "gaussian_best_floor_id": gaussian_best_floor_id,
+            "gaussian_best_floor_name": self._resolve_floor_name(gaussian_best_floor_id),
+        }
+
+        if all_candidates_solved:
+            if fingerprint_norm:
+                hypothetical_blend_weights = {"fingerprint": 0.55, "rssi": 0.30, "geometry": 0.15}
+                hypothetical_floor_evidence = {
+                    floor_id: (
+                        fingerprint_norm.get(floor_id, 0.0) * 0.55
+                        + rssi_norm.get(floor_id, 0.0) * 0.30
+                        + geometry_floor_scores.get(floor_id, 0.0) * 0.15
+                    )
+                    for floor_id in floors
+                }
+            else:
+                hypothetical_blend_weights = {"rssi": 0.70, "geometry": 0.30}
+                hypothetical_floor_evidence = {
+                    floor_id: (rssi_norm.get(floor_id, 0.0) * 0.70 + geometry_floor_scores.get(floor_id, 0.0) * 0.30)
+                    for floor_id in floors
+                }
+            result["hypothetical_blend_weights"] = hypothetical_blend_weights
+            result["hypothetical"] = self._shadow_floor_evidence_summary(
+                floor_evidence=hypothetical_floor_evidence,
+                selected_floor_id=selected_floor_id,
+                required_margin=required_margin,
+            )
+
+        return result
+
     def _set_trilat_confidence(self, device: BermudaDevice, score: float) -> None:
         """Store trilateration confidence on the device."""
         clamped = round(max(0.0, min(10.0, score)), 1)
@@ -4392,6 +4661,15 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         else:
             floor_evidence = rssi_floor_evidence
 
+        if _fp_norm:
+            no_z_blend_weights = {"fingerprint": 0.65, "rssi": 0.35}
+            no_z_floor_evidence = {
+                fid: _fp_norm.get(fid, 0.0) * 0.65 + rssi_norm.get(fid, 0.0) * 0.35 for fid in floors
+            }
+        else:
+            no_z_blend_weights = {"rssi": 1.0}
+            no_z_floor_evidence = dict(rssi_norm)
+
         ranked_floors = sorted(floor_evidence.items(), key=lambda row: row[1], reverse=True)
         best_floor_id, best_floor_score = ranked_floors[0]
         second_floor_score = ranked_floors[1][1] if len(ranked_floors) > 1 else 0.0
@@ -4650,16 +4928,6 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             bootstrap_hold_active=bootstrap_hold_active,
             bootstrap_hold_remaining_s=bootstrap_hold_remaining_s,
         )
-        # Augment diagnostics with Phase 3 signal breakdown and gate result.
-        device.trilat_floor_diagnostics["rssi_floor_evidence"] = rssi_floor_evidence
-        device.trilat_floor_diagnostics["z_floor_scores"] = z_floor_scores
-        device.trilat_floor_diagnostics["fingerprint_has_floor_signal"] = fingerprint_has_floor_signal
-        if _gate_result_pre is not None:
-            device.trilat_floor_diagnostics["reachability_gate_allowed"] = _gate_result_pre.allowed
-            device.trilat_floor_diagnostics["reachability_gate_reason"] = _gate_result_pre.reason
-            device.trilat_floor_diagnostics["reachability_gate_budget_m"] = _gate_result_pre.motion_budget_m
-            device.trilat_floor_diagnostics["reachability_gate_nearest_m"] = _gate_result_pre.nearest_zone_distance_m
-
         if prev_floor_id is not None and selected_floor_id != prev_floor_id:
             state.last_floor_change_at = nowstamp
             state.last_floor_change_from_id = prev_floor_id
@@ -4695,6 +4963,26 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 transition_recent_name=state.recent_transition_name,
                 transition_recent_floor_ids=state.recent_transition_floor_ids,
             )
+
+        # These diagnostics are applied after the optional floor-switch rewrite so
+        # the shadow data survives _apply_floor_diagnostics rebuilding the mapping.
+        device.trilat_floor_diagnostics["rssi_floor_evidence"] = rssi_floor_evidence
+        device.trilat_floor_diagnostics["z_floor_scores"] = z_floor_scores
+        device.trilat_floor_diagnostics["fingerprint_has_floor_signal"] = fingerprint_has_floor_signal
+        no_z_shadow = self._shadow_floor_evidence_summary(
+            floor_evidence=no_z_floor_evidence,
+            selected_floor_id=selected_floor_id,
+            required_margin=policy.floor_switch_margin,
+        )
+        no_z_shadow["mode"] = "diagnostic_only"
+        no_z_shadow["blend_weights"] = no_z_blend_weights
+        no_z_shadow["removes_prior_constrained_z"] = True
+        device.trilat_floor_diagnostics["no_z_floor_shadow"] = no_z_shadow
+        if _gate_result_pre is not None:
+            device.trilat_floor_diagnostics["reachability_gate_allowed"] = _gate_result_pre.allowed
+            device.trilat_floor_diagnostics["reachability_gate_reason"] = _gate_result_pre.reason
+            device.trilat_floor_diagnostics["reachability_gate_budget_m"] = _gate_result_pre.motion_budget_m
+            device.trilat_floor_diagnostics["reachability_gate_nearest_m"] = _gate_result_pre.nearest_zone_distance_m
 
         if _debug_this_device:
             evidence_str = (
@@ -4739,6 +5027,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             )
 
         anchors: list[AnchorMeasurement] = []
+        base_floor_anchors: list[tuple[str | None, AnchorMeasurement]] = []
         confidence_anchor_sigmas_m: list[float] = []
         same_floor_known_anchor_z: list[float] = []
         current_anchor_floor_roles: dict[str, str] = {}
@@ -4755,9 +5044,12 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
 
             if advert.rssi_distance_raw is None:
                 continue
-            effective_sigma_m = _anchor_effective_sigma_m(advert, other_floor=other_floor)
-            if effective_sigma_m is None:
+            base_sigma_m = _anchor_effective_sigma_m(advert)
+            if base_sigma_m is None:
                 continue
+            effective_sigma_m = (
+                base_sigma_m * self._TRILAT_DIAGNOSTIC_OTHER_FLOOR_SIGMA_MULTIPLIER if other_floor else base_sigma_m
+            )
 
             current_role = "other_floor" if other_floor else "same_floor"
 
@@ -4772,15 +5064,16 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 confidence_anchor_sigmas_m.append(effective_sigma_m)
                 if anchor_z_m is not None:
                     same_floor_known_anchor_z.append(float(anchor_z_m))
-            anchor_measurement = AnchorMeasurement(
+            base_anchor_measurement = AnchorMeasurement(
                 scanner_address=scanner.address,
                 x_m=float(anchor_x),
                 y_m=float(anchor_y),
                 range_m=float(advert.trilat_range_ewma_m),
                 z_m=anchor_z_m,
-                sigma_m=effective_sigma_m,
+                sigma_m=base_sigma_m,
             )
-            anchors.append(anchor_measurement)
+            base_floor_anchors.append((scanner.floor_id, base_anchor_measurement))
+            anchors.append(replace(base_anchor_measurement, sigma_m=effective_sigma_m))
             if other_floor:
                 included_other_floor_anchor_count += 1
 
@@ -4792,6 +5085,21 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         anchor_z_bounds = (
             (min(same_floor_known_anchor_z), max(same_floor_known_anchor_z)) if same_floor_known_anchor_z else None
         )
+        candidate_shadow_trigger: list[str] = []
+        if floor_ambiguous_persisted:
+            candidate_shadow_trigger.append("persistent_ambiguity")
+        if _debug_this_device:
+            candidate_shadow_trigger.append("debug_device")
+        if candidate_shadow_trigger:
+            device.trilat_floor_diagnostics["candidate_floor_shadow"] = self._build_candidate_floor_shadow(
+                floors=floors,
+                base_floor_anchors=base_floor_anchors,
+                fingerprint_norm=_fp_norm,
+                rssi_norm=rssi_norm,
+                selected_floor_id=selected_floor_id,
+                required_margin=policy.floor_switch_margin,
+                trigger=candidate_shadow_trigger,
+            )
         if anchor_count < self._TRILAT_MIN_ANCHORS:
             fallback_xy = state.last_solution_xy
             fallback_z = state.last_solution_z

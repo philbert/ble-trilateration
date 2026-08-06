@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import time
 from datetime import datetime
 from types import SimpleNamespace
@@ -458,6 +459,122 @@ def test_floor_evidence_cross_floor_penalty_selects_correct_floor():
     assert device.trilat_status == "ok"
 
 
+def test_no_z_shadow_exposes_sub_margin_street_challenge_without_changing_floor():
+    """The no-Z counterfactual should explain a latent challenge without affecting live state."""
+    coordinator = _make_coordinator()
+    coordinator.get_floor_z_m = {"f1": 2.7, "f2": 1.4}.get
+    coordinator.room_classifier = SimpleNamespace(
+        fingerprint_global=lambda **_kwargs: GlobalFingerprintResult(
+            area_id=None,
+            floor_id="f2",
+            reason="room_ambiguity",
+            floor_confidence=0.505,
+            room_confidence=0.15,
+            best_score=0.505,
+            second_score=0.495,
+            floor_scores={"f1": 0.495, "f2": 0.505},
+        )
+    )
+    device = _DummyDevice("dev-no-z-shadow", mobility_type="stationary")
+    sc_f1 = _make_scanner(coordinator, "no-z-f1", "f1", 0.0, 0.0)
+    sc_f2 = _make_scanner(coordinator, "no-z-f2", "f2", 6.0, 0.0)
+    state = coordinator._get_trilat_decision_state(device)
+    state.floor_id = "f1"
+    state.floor_ambiguous_since = 70.0
+    device.trilat_z_m = 3.3
+
+    with patch("custom_components.ble_trilateration.coordinator.monotonic_time_coarse", return_value=100.0):
+        device.adverts = {
+            (device.address, sc_f1.address): _make_advert(sc_f1, 100.0, -70.0, 5.0),
+            (device.address, sc_f2.address): _make_advert(sc_f2, 100.0, -65.0, 5.0),
+        }
+        coordinator._refresh_trilateration_for_device(device)
+
+    shadow = device.trilat_floor_diagnostics["no_z_floor_shadow"]
+    assert device.trilat_floor_diagnostics["best_floor_id"] == "f1"
+    assert state.floor_id == "f1"
+    assert state.floor_challenger_id is None
+    assert shadow["best_floor_id"] == "f2"
+    assert shadow["switch_margin"] < shadow["required_margin"] == 0.22
+    assert shadow["would_form_challenger"] is False
+    assert shadow["blend_weights"] == {"fingerprint": 0.65, "rssi": 0.35}
+    candidate_shadow = device.trilat_floor_diagnostics["candidate_floor_shadow"]
+    assert candidate_shadow["trigger"] == ["persistent_ambiguity"]
+    assert candidate_shadow["all_candidates_solved"] is False
+    assert {evaluation["status"] for evaluation in candidate_shadow["evaluations"].values()} == {"insufficient_anchors"}
+
+
+def test_candidate_floor_shadow_is_diagnostic_only_and_uses_independent_priors():
+    """Candidate solves must not mutate the incumbent floor or reuse its continuity prior."""
+    coordinator = _make_coordinator()
+    coordinator.get_floor_z_m = {"f1": 2.7, "f2": 1.4}.get
+    coordinator.room_classifier = SimpleNamespace(
+        fingerprint_global=lambda **_kwargs: GlobalFingerprintResult(
+            area_id=None,
+            floor_id="f1",
+            reason="room_ambiguity",
+            floor_confidence=0.51,
+            room_confidence=0.15,
+            best_score=0.51,
+            second_score=0.49,
+            floor_scores={"f1": 0.51, "f2": 0.49},
+        )
+    )
+    device = _DummyDevice("Phil's iPhone")
+    state = coordinator._get_trilat_decision_state(device)
+    state.floor_id = "f1"
+    device.trilat_z_m = 3.3
+
+    target = (2.0, 2.0, 2.0)
+    scanner_specs = [
+        ("shadow-f1-a", "f1", 0.0, 0.0, 2.7),
+        ("shadow-f1-b", "f1", 4.0, 0.0, 2.7),
+        ("shadow-f1-c", "f1", 0.0, 4.0, 3.9),
+        ("shadow-f1-d", "f1", 4.0, 4.0, 3.9),
+        ("shadow-f2-a", "f2", 0.0, 0.0, 1.4),
+        ("shadow-f2-b", "f2", 4.0, 0.0, 1.4),
+        ("shadow-f2-c", "f2", 0.0, 4.0, 2.6),
+        ("shadow-f2-d", "f2", 4.0, 4.0, 2.6),
+    ]
+    scanners = [
+        _make_scanner(coordinator, address, floor_id, x_m, y_m, z_m)
+        for address, floor_id, x_m, y_m, z_m in scanner_specs
+    ]
+
+    with (
+        patch("custom_components.ble_trilateration.coordinator.debug_device_match", return_value=True),
+        patch("custom_components.ble_trilateration.coordinator.monotonic_time_coarse", return_value=100.0),
+    ):
+        device.adverts = {
+            (device.address, scanner.address): _make_advert(
+                scanner,
+                100.0,
+                -70.0,
+                math.dist(target, (scanner.anchor_x_m, scanner.anchor_y_m, scanner.anchor_z_m)),
+            )
+            for scanner in scanners
+        }
+        coordinator._refresh_trilateration_for_device(device)
+
+    shadow = device.trilat_floor_diagnostics["candidate_floor_shadow"]
+    evaluations = shadow["evaluations"]
+    assert shadow["mode"] == "diagnostic_only"
+    assert shadow["trigger"] == ["debug_device"]
+    assert shadow["uses_incumbent_continuity_prior"] is False
+    assert shadow["all_candidates_solved"] is True
+    assert evaluations["f1"]["phone_height_prior_z_m"] == pytest.approx(3.3)
+    assert evaluations["f2"]["phone_height_prior_z_m"] == pytest.approx(2.0)
+    assert evaluations["f1"]["same_floor_anchor_count"] == 4
+    assert evaluations["f2"]["same_floor_anchor_count"] == 4
+    assert sum(shadow["geometry_floor_scores"].values()) == pytest.approx(1.0)
+    assert shadow["geometry_best_floor_id"] == "f2"
+    assert shadow["hypothetical_blend_weights"] == {"fingerprint": 0.55, "rssi": 0.3, "geometry": 0.15}
+    assert state.floor_id == "f1"
+    assert state.floor_challenger_id is None
+    assert device.trilat_floor_diagnostics["selected_floor_id"] == "f1"
+    assert device.trilat_floor_diagnostics["best_floor_id"] == "f1"
+
+
 def test_floor_diagnostics_capture_evidence_and_cross_floor_candidates():
     """Diagnostics should expose floor evidence and valid cross-floor anchors."""
     coordinator = _make_coordinator()
@@ -482,6 +599,7 @@ def test_floor_diagnostics_capture_evidence_and_cross_floor_candidates():
     assert device.trilat_floor_diagnostics["best_floor_id"] == "f1"
     assert device.trilat_floor_evidence["f1"] > device.trilat_floor_evidence["f2"]
     assert device.trilat_cross_floor_anchor_count == 1
+    assert "candidate_floor_shadow" not in device.trilat_floor_diagnostics
     status_entry = device.trilat_anchor_statuses["fd-d"]
     assert status_entry["status"] == "valid_other_floor"
     assert status_entry["affects_position"] is True

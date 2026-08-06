@@ -7,6 +7,9 @@ from dataclasses import dataclass
 
 import numpy as np
 
+_ERR_RANGE_LIKELIHOOD_NO_ANCHORS = "range likelihood requires at least one anchor"
+_ERR_RANGE_LIKELIHOOD_MISSING_Z = "3D range likelihood requires anchor Z coordinates"
+
 
 @dataclass(frozen=True)
 class AnchorMeasurement:
@@ -66,6 +69,14 @@ class SolveQualityMetrics:
     normalized_residual_rms: float | None
 
 
+@dataclass(frozen=True)
+class RangeLikelihoodMetrics:
+    """Sigma-aware costs for comparing candidate range models."""
+
+    gaussian_nll: float
+    soft_l1_nll: float
+
+
 def anchor_centroid(anchors: list[AnchorMeasurement]) -> tuple[float, float]:
     """Return the unweighted centroid of anchor coordinates."""
     if not anchors:
@@ -122,6 +133,46 @@ def residual_rms_m_3d(x_m: float, y_m: float, z_m: float, anchors: list[AnchorMe
         residual = dist - anchor.range_m
         err_sq_sum += residual * residual
     return math.sqrt(err_sq_sum / len(anchors))
+
+
+def range_likelihood_metrics(
+    x_m: float,
+    y_m: float,
+    anchors: list[AnchorMeasurement],
+    *,
+    z_m: float | None = None,
+) -> RangeLikelihoodMetrics:
+    """
+    Return sigma-aware range costs at a candidate position.
+
+    The Gaussian cost is a conventional negative log likelihood. The soft-L1
+    cost uses ``sqrt(1 + u²) - 1`` for normalized residual ``u`` and includes
+    ``log(sigma)`` so a candidate cannot improve merely by inflating every
+    uncertainty. Its distribution-normalization constant is omitted because
+    candidate floors always compare the same observations.
+    """
+    if not anchors:
+        raise ValueError(_ERR_RANGE_LIKELIHOOD_NO_ANCHORS)
+
+    gaussian_nll = 0.0
+    soft_l1_nll = 0.0
+    gaussian_constant = 0.5 * math.log(2.0 * math.pi)
+    for anchor in anchors:
+        if z_m is None:
+            distance = math.hypot(x_m - anchor.x_m, y_m - anchor.y_m)
+        else:
+            if anchor.z_m is None:
+                raise ValueError(_ERR_RANGE_LIKELIHOOD_MISSING_Z)
+            distance = math.dist((x_m, y_m, z_m), (anchor.x_m, anchor.y_m, anchor.z_m))
+        sigma_m = max(anchor.sigma_m, 1e-3)
+        normalized_residual = (distance - anchor.range_m) / sigma_m
+        gaussian_nll += gaussian_constant + math.log(sigma_m) + (0.5 * normalized_residual**2)
+        soft_l1_nll += math.log(sigma_m) + math.sqrt(1.0 + normalized_residual**2) - 1.0
+
+    return RangeLikelihoodMetrics(
+        gaussian_nll=gaussian_nll,
+        soft_l1_nll=soft_l1_nll,
+    )
 
 
 def solve_quality_metrics_2d(x_m: float, y_m: float, anchors: list[AnchorMeasurement]) -> SolveQualityMetrics:

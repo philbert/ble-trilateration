@@ -4,12 +4,16 @@ from __future__ import annotations
 
 import math
 
+import pytest
+
 from custom_components.ble_trilateration.trilateration import (
     AnchorMeasurement,
+    RangeLikelihoodMetrics,
     SolvePrior2D,
     SolvePrior3D,
     anchor_centroid,
     anchor_centroid_3d,
+    range_likelihood_metrics,
     residual_rms_m,
     residual_rms_m_3d,
     solve_quality_metrics_2d,
@@ -124,6 +128,43 @@ def test_residual_rms_m_3d():
     ]
     rms = residual_rms_m_3d(1.0, 1.0, 1.0, anchors)
     assert rms < 1e-3
+
+
+def test_range_likelihood_metrics_penalize_unneeded_sigma_inflation():
+    """A broader uncertainty model should not win when both models fit exactly."""
+    precise = [
+        AnchorMeasurement("a", 0.0, 0.0, 5.0, sigma_m=1.0),
+        AnchorMeasurement("b", 6.0, 0.0, 5.0, sigma_m=1.0),
+        AnchorMeasurement("c", 0.0, 8.0, 5.0, sigma_m=1.0),
+    ]
+    inflated = [
+        AnchorMeasurement(anchor.scanner_address, anchor.x_m, anchor.y_m, anchor.range_m, sigma_m=4.0)
+        for anchor in precise
+    ]
+
+    precise_metrics = range_likelihood_metrics(3.0, 4.0, precise)
+    inflated_metrics = range_likelihood_metrics(3.0, 4.0, inflated)
+
+    assert isinstance(precise_metrics, RangeLikelihoodMetrics)
+    assert precise_metrics.gaussian_nll < inflated_metrics.gaussian_nll
+    assert precise_metrics.soft_l1_nll < inflated_metrics.soft_l1_nll
+
+
+def test_range_likelihood_metrics_support_3d_geometry():
+    """The likelihood diagnostic should use anchor Z when a 3D point is supplied."""
+    target = (1.0, 1.0, 1.0)
+    anchors = [
+        AnchorMeasurement("a", 0.0, 0.0, math.sqrt(3.0), 0.0, sigma_m=1.0),
+        AnchorMeasurement("b", 2.0, 0.0, math.sqrt(3.0), 0.0, sigma_m=1.0),
+        AnchorMeasurement("c", 0.0, 2.0, math.sqrt(3.0), 0.0, sigma_m=1.0),
+        AnchorMeasurement("d", 0.0, 0.0, math.sqrt(3.0), 2.0, sigma_m=1.0),
+    ]
+
+    metrics = range_likelihood_metrics(*target[:2], anchors, z_m=target[2])
+
+    expected_gaussian_nll = len(anchors) * 0.5 * math.log(2.0 * math.pi)
+    assert metrics.gaussian_nll == pytest.approx(expected_gaussian_nll)
+    assert metrics.soft_l1_nll == pytest.approx(0.0)
 
 
 def test_solve_quality_metrics_reward_well_spread_geometry():
