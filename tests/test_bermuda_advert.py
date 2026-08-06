@@ -382,15 +382,23 @@ def test_replayed_cache_advert_is_quarantined(bermuda_advert, mock_advertisement
     assert bermuda_advert.stamp == 1000.0
 
     # ~18 minutes of silence, then the same cached frame reappears (unchanged RSSI).
+    # Quarantined, but not yet blamed on the scanner - a genuine comeback looks
+    # exactly like this until the confirm window passes without a follow-up.
     mock_scanner_device.async_as_scanner_get_stamp.return_value = 2083.0
     bermuda_advert.update_advertisement(mock_advertisement_data, mock_scanner_device)
     assert bermuda_advert.stamp == 1000.0
-    assert mock_scanner_device.record_advert_replay_suspect.called
+    assert not mock_scanner_device.record_advert_replay_suspect.called
 
-    # The next replay cycle is quarantined again - it never self-confirms.
+    # The next replay cycle arrives well outside the confirm window, proving the
+    # previous one was never confirmed: now it counts against the scanner.
     mock_scanner_device.async_as_scanner_get_stamp.return_value = 3166.0
     bermuda_advert.update_advertisement(mock_advertisement_data, mock_scanner_device)
     assert bermuda_advert.stamp == 1000.0
+    assert mock_scanner_device.record_advert_replay_suspect.call_count == 1
+
+    # ...and so on, one report per proven-unconfirmed replay.
+    mock_scanner_device.async_as_scanner_get_stamp.return_value = 4249.0
+    bermuda_advert.update_advertisement(mock_advertisement_data, mock_scanner_device)
     assert mock_scanner_device.record_advert_replay_suspect.call_count == 2
 
 
@@ -409,6 +417,24 @@ def test_real_comeback_confirmed_by_second_packet(bermuda_advert, mock_advertise
     mock_scanner_device.async_as_scanner_get_stamp.return_value = 2085.0
     bermuda_advert.update_advertisement(mock_advertisement_data, mock_scanner_device)
     assert bermuda_advert.stamp == 2085.0
+    # The proxy is never accused for a comeback that confirmed itself.
+    assert not mock_scanner_device.record_advert_replay_suspect.called
+
+
+def test_comeback_with_changed_payload_accepted_immediately(
+    bermuda_advert, mock_advertisement_data, mock_scanner_device
+):
+    """Identical RSSI but a changed payload rules out a replayed cache frame."""
+    mock_advertisement_data.rssi = -71  # changed RSSI so the fixture-to-baseline jump is accepted
+    mock_scanner_device.async_as_scanner_get_stamp.return_value = 1000.0
+    bermuda_advert.update_advertisement(mock_advertisement_data, mock_scanner_device)
+
+    # Same RSSI after long silence, but the device's payload has moved on.
+    mock_advertisement_data.manufacturer_data = {76: b"\x02\x16"}
+    mock_scanner_device.async_as_scanner_get_stamp.return_value = 2083.0
+    bermuda_advert.update_advertisement(mock_advertisement_data, mock_scanner_device)
+    assert bermuda_advert.stamp == 2083.0
+    assert not mock_scanner_device.record_advert_replay_suspect.called
 
 
 def test_comeback_with_changed_rssi_accepted_immediately(bermuda_advert, mock_advertisement_data, mock_scanner_device):

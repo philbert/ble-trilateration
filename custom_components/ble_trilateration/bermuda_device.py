@@ -746,12 +746,16 @@ class BermudaDevice(dict):
 
     def record_advert_replay_suspect(self, device_address: str) -> None:
         """
-        Record a quarantined advert that looked like a replayed cache entry.
+        Record a quarantined advert that was never confirmed by a follow-up packet.
 
-        Several distinct long-silent devices "reappearing" from one scanner
-        within seconds is the signature of a proxy replaying its advertisement
-        cache rather than devices actually returning, so warn with the scanner
-        named - that is the cue to restart the proxy.
+        Only unconfirmed quarantines reach here: a device that genuinely returned
+        to range keeps advertising, so its next packet lands inside the confirm
+        window and it is never reported. Several distinct devices replaying from
+        one scanner within seconds is the signature of a proxy re-emitting its
+        advertisement cache, but the evidence is still circumstantial (a device
+        that shows up for exactly one packet and leaves again looks identical),
+        so this stays a debug-level diagnostic. The running counts are exposed on
+        the scanner's diagnostic sensor for anyone chasing a suspect proxy.
         """
         nowstamp = monotonic_time_coarse()
         self.scanner_replay_suspect_count += 1
@@ -762,11 +766,11 @@ class BermudaDevice(dict):
             self.scanner_replay_suspect_recent.popleft()
         burst_devices = {address for _, address in self.scanner_replay_suspect_recent}
         if len(burst_devices) >= 2:
-            _LOGGER_SPAM_LESS.warning(
+            _LOGGER_SPAM_LESS.debug(
                 f"replay_burst_{self.address}",
-                "Scanner %s re-reported %d long-silent devices with unchanged RSSI within %ds - "
-                "it appears to be replaying its advertisement cache instead of scanning. "
-                "Restarting the proxy usually clears this.",
+                "Scanner %s re-reported %d long-silent devices with unchanged RSSI and payload within %ds, "
+                "with no follow-up packet to confirm any of them. That is consistent with the proxy "
+                "replaying its advertisement cache instead of scanning; the adverts were quarantined.",
                 self.name,
                 len(burst_devices),
                 int(self._REPLAY_BURST_WINDOW_S),

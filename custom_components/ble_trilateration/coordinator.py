@@ -8,7 +8,7 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Final, cast
 
 import aiofiles
 import voluptuous as vol
@@ -506,26 +506,10 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         self.calibration.rebuild_trilat_position_model(self.ranging_model)
         await self.room_classifier.async_rebuild()
         self._async_manage_repair_calibration_layout_mismatch()
-        # Delegate to _refresh_trilateration for the trilat-without-anchors check
-        # so the scanner list is formatted consistently ("Name [addr]" strings).
-        # Passing raw scanner_list addresses here would produce a format mismatch
-        # against the string list stored by _refresh_trilateration.
-        configured_anchor_scanners: list[str] = [
-            scanner.address
-            for scanner in self._scanners
-            if (
-                self.get_scanner_anchor_x(scanner.address) is not None
-                and self.get_scanner_anchor_y(scanner.address) is not None
-                and scanner.floor_id is not None
-            )
-        ]
-        if not configured_anchor_scanners:
-            scannerlist = [
-                f"{scanner.name} [{scanner.address}]" for scanner in sorted(self._scanners, key=lambda s: s.name)
-            ]
-            self._async_manage_repair_trilat_without_anchors(scannerlist)
-        else:
-            self._async_manage_repair_trilat_without_anchors([])
+        # Shared with _refresh_trilateration so the scanner list is formatted
+        # consistently ("Name [addr]" strings) - passing raw scanner_list
+        # addresses here would produce a format mismatch against the stored list.
+        self._evaluate_trilat_anchor_repair()
 
     def _cancel_calibration_layout_mismatch_grace(self) -> None:
         """Cancel any pending delayed repair re-check."""
@@ -3759,8 +3743,44 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         ]
         device.trilat_floor_diagnostics.update(transition_diag)
 
+    # A position solve needs three anchors sharing a floor. Fewer than that is a
+    # configuration gap the user has to close, not a transient runtime state.
+    _TRILAT_MIN_ANCHORS_PER_FLOOR: Final = 3
+
+    def _evaluate_trilat_anchor_repair(self) -> None:
+        """
+        Raise/clear the anchors repair based on the currently configured anchors.
+
+        Trilateration stays unsolvable until some floor carries three scanners
+        with both coordinates and a floor assignment, so the repair tracks that
+        threshold rather than merely "no anchors at all" - a half-configured
+        layout is just as stuck, and silently so.
+        """
+        anchors_by_floor: dict[str, int] = {}
+        unconfigured: list[str] = []
+        for scanner in sorted(self._scanners, key=lambda s: s.name):
+            if (
+                self.get_scanner_anchor_x(scanner.address) is not None
+                and self.get_scanner_anchor_y(scanner.address) is not None
+                and scanner.floor_id is not None
+            ):
+                anchors_by_floor[scanner.floor_id] = anchors_by_floor.get(scanner.floor_id, 0) + 1
+            else:
+                unconfigured.append(f"{scanner.name} [{scanner.address}]")
+
+        if anchors_by_floor and max(anchors_by_floor.values()) >= self._TRILAT_MIN_ANCHORS_PER_FLOOR:
+            self._async_manage_repair_trilat_without_anchors([])
+            return
+        if not unconfigured:
+            # Every scanner is configured, there just aren't enough of them on one
+            # floor - list them all so the count is visible against the requirement.
+            unconfigured = [
+                f"{scanner.name} [{scanner.address}]" for scanner in sorted(self._scanners, key=lambda s: s.name)
+            ]
+        self._async_manage_repair_trilat_without_anchors(unconfigured)
+
     def _async_manage_repair_trilat_without_anchors(self, scannerlist: list[str]):
-        """Raise/clear repair when trilat is enabled but no anchors are configured."""
+        """Raise/clear the repair for a layout that cannot support a trilateration solve."""
         if self._trilat_scanners_without_anchors != scannerlist:
             self._trilat_scanners_without_anchors = scannerlist
             if self._trilat_scanners_without_anchors and len(self._trilat_scanners_without_anchors) != 0:
@@ -3782,22 +3802,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         """Refresh trilateration diagnostics for all tracked devices."""
         self._calibration_layout_mismatch_last_context = "refresh_trilateration"
         self._async_manage_repair_calibration_layout_mismatch()
-        configured_anchor_scanners: list[str] = []
-        for scanner in self._scanners:
-            if (
-                self.get_scanner_anchor_x(scanner.address) is not None
-                and self.get_scanner_anchor_y(scanner.address) is not None
-                and scanner.floor_id is not None
-            ):
-                configured_anchor_scanners.append(scanner.address)
-
-        if len(configured_anchor_scanners) == 0:
-            scannerlist = [
-                f"{scanner.name} [{scanner.address}]" for scanner in sorted(self._scanners, key=lambda s: s.name)
-            ]
-            self._async_manage_repair_trilat_without_anchors(scannerlist)
-        else:
-            self._async_manage_repair_trilat_without_anchors([])
+        self._evaluate_trilat_anchor_repair()
 
         tracked_devices = []
         for device in self.devices.values():

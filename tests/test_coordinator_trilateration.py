@@ -2781,3 +2781,49 @@ def test_out_of_hull_solve_is_clamped_to_floor_envelope():
     assert device.trilat_x_m is not None
     assert -2.0 <= device.trilat_x_m <= 8.0
     assert -2.0 <= device.trilat_y_m <= 10.0
+
+
+def _capture_anchor_repair(coordinator):
+    """Record the scanner list handed to the anchors repair."""
+    captured: list[list[str]] = []
+    coordinator._async_manage_repair_trilat_without_anchors = captured.append
+    return captured
+
+
+def test_anchor_repair_clears_with_three_anchors_on_one_floor():
+    """Three usable anchors sharing a floor is the minimum solvable layout."""
+    coordinator = _make_coordinator()
+    _right_triangle_anchors(coordinator, "repair-ok", "f1")
+
+    captured = _capture_anchor_repair(coordinator)
+    coordinator._evaluate_trilat_anchor_repair()
+
+    assert captured == [[]]
+
+
+def test_anchor_repair_raised_when_a_floor_is_short_of_anchors():
+    """Two anchors on a floor can never solve, so the repair must still be raised."""
+    coordinator = _make_coordinator()
+    _make_scanner(coordinator, "half-a", "f1", 0.0, 0.0)
+    _make_scanner(coordinator, "half-b", "f1", 6.0, 0.0)
+    _make_scanner(coordinator, "half-c", "f1", None, None)
+
+    captured = _capture_anchor_repair(coordinator)
+    coordinator._evaluate_trilat_anchor_repair()
+
+    # Only the scanner that is actually missing coordinates gets named.
+    assert captured == [["half-c [half-c]"]]
+
+
+def test_anchor_repair_ignores_anchors_split_across_floors():
+    """Anchors spread one-per-floor never reach three on any single floor."""
+    coordinator = _make_coordinator()
+    _make_scanner(coordinator, "split-a", "f1", 0.0, 0.0)
+    _make_scanner(coordinator, "split-b", "f2", 6.0, 0.0)
+    _make_scanner(coordinator, "split-c", "f3", 0.0, 8.0)
+
+    captured = _capture_anchor_repair(coordinator)
+    coordinator._evaluate_trilat_anchor_repair()
+
+    # Every scanner is configured, so all of them are listed against the requirement.
+    assert captured == [["split-a [split-a]", "split-b [split-b]", "split-c [split-c]"]]

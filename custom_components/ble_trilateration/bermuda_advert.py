@@ -59,10 +59,14 @@ STAMP_REBASE_STREAK: Final = 3
 # stamp (stamp-less USB adaptors, or remote scanners in stamp fallback).
 STAMPLESS_AGE_S: Final = 3.0
 # A single packet reappearing after this much silence with an identical RSSI
-# matches a proxy replaying its advertisement cache (observed with Shelly
-# proxies re-emitting departed devices every ~18 minutes), not a device
-# returning to range. Quarantine it until a second packet arrives within the
-# confirm window: replays never produce one, real comebacks do within seconds.
+# *and* an identical payload matches a proxy replaying its advertisement cache
+# (observed with Shelly proxies re-emitting departed devices every ~18 minutes),
+# but it also matches a stationary device that simply drifted out of range and
+# came back - RSSI is a 1dBm-quantised integer, so repeating the previous value
+# is a routine coincidence. Quarantine the packet either way, then let the
+# confirm window decide: replays never produce a follow-up packet, real
+# comebacks do within seconds. Only an *unconfirmed* quarantine is evidence
+# against the proxy.
 REPLAY_SUSPECT_GAP_S: Final = 120.0
 REPLAY_CONFIRM_WINDOW_S: Final = 20.0
 
@@ -227,14 +231,22 @@ class BermudaAdvert(dict):
                 and self.stamp > 0
                 and self.rssi is not None
                 and advertisementdata.rssi == self.rssi
+                and self._payload_matches_last_accepted(advertisementdata)
                 and (new_stamp - self.stamp) > REPLAY_SUSPECT_GAP_S
             ):
-                # Suspected cache replay: quarantine this packet and require a
-                # second, strictly later packet before trusting the comeback.
+                # Replay-shaped packet: quarantine it and require a second,
+                # strictly later packet before trusting the comeback.
                 pending = self._replay_pending_stamp
                 if pending is None or not 0.0 < (new_stamp - pending) <= REPLAY_CONFIRM_WINDOW_S:
+                    if pending is not None:
+                        # The previously quarantined packet was never followed up
+                        # within the confirm window, so that one really was a
+                        # replayed cache entry rather than a device returning to
+                        # range. Blame the scanner only now that the window has
+                        # been proven empty - reporting at quarantine time
+                        # accuses the proxy for every ordinary comeback.
+                        scanner.record_advert_replay_suspect(self.device_address)
                     self._replay_pending_stamp = new_stamp
-                    scanner.record_advert_replay_suspect(self.device_address)
                     self.stale_update_count += 1
                     return
             self._replay_pending_stamp = None
@@ -359,6 +371,21 @@ class BermudaAdvert(dict):
 
         # Finally, save the new advert timestamp.
         self.new_stamp = new_stamp
+
+    def _payload_matches_last_accepted(self, advertisementdata: AdvertisementData) -> bool:
+        """
+        Return True if this advert carries the same payload as the last accepted one.
+
+        A replayed cache entry is the previous frame verbatim, so its payload is
+        unchanged. Devices whose adverts carry live data (temperature, battery,
+        rotating counters) change theirs between comebacks, which rules a replay
+        out cheaply and spares them a needless quarantine. An empty history can't
+        discriminate, so it falls back to "matches" and lets the confirm window
+        do the work.
+        """
+        if self.manufacturer_data and self.manufacturer_data[0] != advertisementdata.manufacturer_data:
+            return False
+        return not (self.service_data and self.service_data[0] != advertisementdata.service_data)
 
     def _reset_timing_history(self) -> None:
         """
