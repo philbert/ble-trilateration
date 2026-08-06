@@ -2893,3 +2893,38 @@ def test_anchor_repair_reports_new_unconfigured_scanner_after_minimum_is_met():
     coordinator._evaluate_trilat_anchor_repair()
 
     assert captured == [["new-proxy [new-proxy] (missing Anchor X, Anchor Y, Anchor Z, floor assignment)"]]
+
+
+def test_anchor_repair_is_suppressed_during_startup_grace():
+    """A half-restored startup picture must not flash a repair card."""
+    coordinator = _make_coordinator()
+    _make_scanner(coordinator, "booting", None, None, None)
+    coordinator._calibration_layout_mismatch_grace_active = True
+    coordinator._calibration_layout_mismatch_grace_deadline = 130.0
+
+    captured = _capture_anchor_repair(coordinator)
+    with patch("custom_components.ble_trilateration.coordinator.monotonic_time_coarse", return_value=100.0):
+        coordinator._evaluate_trilat_anchor_repair()
+
+    # Cleared rather than skipped, so a card raised just before the grace was
+    # armed is withdrawn instead of lingering.
+    assert captured == [[]]
+
+
+def test_anchor_repair_raised_once_startup_grace_expires():
+    """The same incomplete layout is reported as soon as startup has settled."""
+    coordinator = _make_coordinator()
+    _make_scanner(coordinator, "booting", None, None, None)
+    coordinator._calibration_layout_mismatch_grace_active = True
+    coordinator._calibration_layout_mismatch_grace_deadline = 130.0
+
+    captured = _capture_anchor_repair(coordinator)
+    with patch("custom_components.ble_trilateration.coordinator.monotonic_time_coarse", return_value=131.0):
+        coordinator._evaluate_trilat_anchor_repair()
+
+    assert captured == [
+        [
+            "Only 0 fully configured anchors are available; at least 3 are required",
+            "booting [booting] (missing Anchor X, Anchor Y, Anchor Z, floor assignment)",
+        ]
+    ]

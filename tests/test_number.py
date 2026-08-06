@@ -220,6 +220,13 @@ async def test_anchor_geometry_changed_passes_human_readable_names_to_trilat_rep
     # No anchor coordinates set: this scanner has no anchors.
     await hass.async_block_till_done()
 
+    # Leave the startup grace window: the repair only reports once scanner
+    # registration and anchor restoration have settled, and this test is about
+    # the placeholder format it uses when it does report.
+    coordinator._cancel_calibration_layout_mismatch_grace()
+    coordinator._calibration_layout_mismatch_grace_active = False
+    coordinator._calibration_layout_mismatch_grace_deadline = None
+
     # Simulate what _refresh_trilateration produces using the shared evaluator.
     coordinator._evaluate_trilat_anchor_repair()
     recorded_list = coordinator._trilat_scanners_without_anchors[:]

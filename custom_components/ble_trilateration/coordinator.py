@@ -511,6 +511,22 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         # addresses here would produce a format mismatch against the stored list.
         self._evaluate_trilat_anchor_repair()
 
+    def _startup_grace_active(self) -> bool:
+        """
+        Return True while the initial setup window is still settling.
+
+        Scanners register progressively and their anchor coordinates restore
+        from storage asynchronously, so anything that judges configuration
+        completeness sees a half-built picture during startup. Repairs raised
+        from that picture flash a card on every restart and then withdraw it
+        seconds later. This shares the calibration-layout grace window, which
+        covers exactly the same settling period.
+        """
+        if not getattr(self, "_calibration_layout_mismatch_grace_active", False):
+            return False
+        deadline = getattr(self, "_calibration_layout_mismatch_grace_deadline", None)
+        return deadline is not None and monotonic_time_coarse() < deadline
+
     def _cancel_calibration_layout_mismatch_grace(self) -> None:
         """Cancel any pending delayed repair re-check."""
         if self._calibration_layout_mismatch_grace_unsub is not None:
@@ -546,6 +562,9 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             self._calibration_layout_mismatch_grace_deadline = None
             self._calibration_layout_mismatch_last_context = "startup_grace_expired"
             self._async_manage_repair_calibration_layout_mismatch()
+            # The anchor repair shares this window, so settle it in the same
+            # pass rather than waiting for the next coordinator cycle.
+            self._evaluate_trilat_anchor_repair()
 
         self._calibration_layout_mismatch_grace_unsub = async_call_later(
             self.hass,
@@ -3755,7 +3774,15 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         missing Z also downgrades the runtime solve to 2D, while calibration
         refuses incomplete geometry, so every omission is user-actionable even
         when three other anchors are already configured.
+
+        Held off during the startup grace window: scanners and their restored
+        coordinates arrive progressively, so evaluating early reports omissions
+        that resolve themselves seconds later.
         """
+        if self._startup_grace_active():
+            self._async_manage_repair_trilat_without_anchors([])
+            return
+
         scanners = sorted(self._scanners, key=lambda scanner: (scanner.name, scanner.address))
         if not scanners:
             self._async_manage_repair_trilat_without_anchors([])
