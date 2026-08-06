@@ -1944,6 +1944,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             f"fp_best={classification.fingerprint_best_area_id or 'none'} "
             f"fp_margin={classification.fingerprint_confidence:.2f} "
             f"fp_cov={classification.fingerprint_coverage:.2f} "
+            f"fp_overlap={self._room_fingerprint_overlap_summary(classification)} "
             f"fp_blend={classification.fingerprint_blend_weight:.2f} "
             f"samples={classification.sample_count} "
             f"fp_rooms={self._room_fingerprint_diag_summary(classification)} "
@@ -2314,6 +2315,26 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             for area_id, score, coverage, sample_count in rankings[:3]
         )
 
+    @staticmethod
+    def _room_fingerprint_overlap_summary(classification) -> str:
+        """
+        Return how much of the fingerprint comparison was actually comparable.
+
+        Reads matched/missing/untrained, then the share of the *trained* features
+        we could compare and the share of the *live* features that were trained.
+        The second number is the one that answers "are my new anchors invisible
+        to fingerprinting" - it falls as anchors are added and recovers on
+        retraining.
+        """
+        overlap = getattr(classification, "fingerprint_overlap", None)
+        if overlap is None:
+            return "none"
+        return (
+            f"{overlap.matched_features}m/{overlap.missing_trained_features}s/"
+            f"{overlap.untrained_live_features}u "
+            f"trained={overlap.trained_match_fraction:.2f} live={overlap.live_trained_fraction:.2f}"
+        )
+
     def _room_log_area_label(self, area_id: str | None) -> str:
         """Return a compact room label for room-decision logs."""
         if area_id is None:
@@ -2520,6 +2541,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
             device.room_fingerprint_margin = None
             device.room_fingerprint_coverage = None
             device.room_fingerprint_blend_weight = None
+            device.room_fingerprint_overlap = None
             device.room_sample_count = 0
             return
 
@@ -2538,6 +2560,19 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         device.room_fingerprint_margin = float(getattr(classification, "fingerprint_confidence", 0.0))
         device.room_fingerprint_coverage = float(getattr(classification, "fingerprint_coverage", 0.0))
         device.room_fingerprint_blend_weight = float(getattr(classification, "fingerprint_blend_weight", 0.0))
+        overlap = getattr(classification, "fingerprint_overlap", None)
+        device.room_fingerprint_overlap = (
+            {
+                "matched_features": overlap.matched_features,
+                "missing_trained_features": overlap.missing_trained_features,
+                "untrained_live_features": overlap.untrained_live_features,
+                "trained_match_fraction": overlap.trained_match_fraction,
+                "live_trained_fraction": overlap.live_trained_fraction,
+                "missing_mismatch_mean_sq": overlap.missing_mismatch_mean_sq,
+            }
+            if overlap is not None
+            else None
+        )
         device.room_sample_count = int(getattr(classification, "sample_count", 0) or 0)
 
     def _room_transition_strength(

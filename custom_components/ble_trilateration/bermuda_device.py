@@ -173,6 +173,10 @@ class BermudaDevice(dict):
         self.room_fingerprint_best_name: str | None = None
         self.room_fingerprint_margin: float | None = None
         self.room_fingerprint_coverage: float | None = None
+        # Feature-overlap breakdown behind the fingerprint score. Diagnostic only:
+        # it distinguishes "wrong room" from "this room is barely trained against
+        # the anchors we can currently hear".
+        self.room_fingerprint_overlap: dict[str, float] | None = None
         self.room_fingerprint_blend_weight: float | None = None
         self.room_sample_count: int = 0
         self.room_hold_reason: str | None = None

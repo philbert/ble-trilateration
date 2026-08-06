@@ -3046,3 +3046,44 @@ def test_anchor_repair_raised_once_startup_grace_expires():
             "booting [booting] (missing Anchor X, Anchor Y, Anchor Z, floor assignment)",
         ]
     ]
+
+
+def test_room_fingerprint_overlap_reaches_device_diagnostics():
+    """The overlap breakdown must be published, not just computed."""
+    from custom_components.ble_trilateration.room_classifier import FingerprintOverlap, RoomClassification
+
+    coordinator = _make_coordinator()
+    coordinator.resolve_area_name = lambda area_id: area_id
+    device = _DummyDevice("dev-overlap")
+    classification = RoomClassification(
+        area_id="garage_front",
+        reason="ok",
+        best_area_id="garage_front",
+        fingerprint_overlap=FingerprintOverlap(
+            matched_features=4,
+            missing_trained_features=2,
+            untrained_live_features=5,
+            trained_match_fraction=0.67,
+            live_trained_fraction=0.44,
+            missing_mismatch_mean_sq=1.5,
+        ),
+    )
+
+    coordinator._set_room_decision_diagnostics(
+        device,
+        coordinator._get_trilat_decision_state(device),
+        event="switch_applied",
+        candidate_area_id="garage_front",
+        hold_reason=None,
+        classification=classification,
+    )
+
+    assert device.room_fingerprint_overlap == {
+        "matched_features": 4,
+        "missing_trained_features": 2,
+        "untrained_live_features": 5,
+        "trained_match_fraction": 0.67,
+        "live_trained_fraction": 0.44,
+        "missing_mismatch_mean_sq": 1.5,
+    }
+    assert "trained=0.67 live=0.44" in coordinator._room_fingerprint_overlap_summary(classification)
