@@ -56,10 +56,12 @@ from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.util.dt import get_age, now
 
+from .arbiter import ARBITER_VERSION, EvidenceArbiter
 from .bermuda_device import BermudaDevice
 from .bermuda_irk import BermudaIrkManager
 from .calibration import BermudaCalibrationManager
 from .calibration_store import BermudaCalibrationStore
+from .committed_state import COMMITTED_STATE_VERSION, CommittedFloorPolicy, CommittedFloorState
 from .const import (
     _LOGGER,
     _LOGGER_SPAM_LESS,
@@ -104,10 +106,18 @@ from .const import (
     UPDATE_INTERVAL,
     debug_device_match,
 )
+from .decision_record import DecisionFrame, DecisionFrameRecorder
 from .device_offset_store import BermudaDeviceOffsetStore
+from .evidence import EVIDENCE_CONTRACT_VERSION, EvidenceResult, EvidenceSource
 from .floor_config_store import FloorConfigStore
+from .geometry_evidence import evaluate_floor_neutral_geometry
 from .ranging_model import BermudaRangingModel
 from .reachability_gate import ReachabilityDecision, ReachabilityGate
+from .reliability import (
+    fingerprint_information_quality,
+    geometry_information_quality,
+    rssi_information_quality,
+)
 from .room_classifier import BermudaRoomClassifier, GlobalFingerprintResult
 from .scanner_anchor_store import BermudaScannerAnchorStore
 from .transition_zone_store import BermudaTransitionZoneStore
@@ -269,6 +279,11 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         self._trilat_bootstrap_store = BermudaTrilatBootstrapStore(hass)
         self.device_offset_store = BermudaDeviceOffsetStore(hass)
         self._reachability_gate = ReachabilityGate()
+        # Shadow architecture: computed alongside the live decision, drives nothing.
+        self._evidence_arbiter = EvidenceArbiter()
+        self._committed_floor_policy = CommittedFloorPolicy()
+        self._shadow_committed_states: dict[str, CommittedFloorState] = {}
+        self._decision_frames = DecisionFrameRecorder()
         self.calibration = BermudaCalibrationManager(hass, self, self.calibration_store)
         self.ranging_model = BermudaRangingModel(self.calibration)
         self.room_classifier = BermudaRoomClassifier(self.calibration, self.ar)
@@ -714,6 +729,11 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         identity["feature_validity"] = self.calibration.feature_validity_summary(
             anchor_first_seen=self.anchor_first_seen_map(),
         )
+        identity["decision_frames"] = self._decision_frames.as_diagnostics()
+        identity["arbiter_preferences"] = {
+            source.value: self._evidence_arbiter.preference_for(source) for source in EvidenceSource
+        }
+        identity["arbiter_overrides"] = self._evidence_arbiter.overrides.as_diagnostics()
         return identity
 
     def anchor_first_seen_map(self) -> dict[str, str]:
@@ -2913,6 +2933,218 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         }
         total = sum(unnormalized.values())
         return {floor_id: value / total for floor_id, value in unnormalized.items()}
+
+    def _floor_height_bands(self) -> dict[str, tuple[float, float]]:
+        """
+        Return each floor's occupied vertical band, from its surface to the next.
+
+        A storey occupies the space between its own floor level and the one
+        above, so this is where a device on that floor can physically be. The
+        topmost floor gets a nominal storey height since nothing bounds it.
+        """
+        levels = sorted(
+            (
+                (floor_id, float(cfg.floor_z_m))
+                for floor_id, cfg in self._floor_config_store.all_configs.items()
+                if cfg.floor_z_m is not None
+            ),
+            key=lambda row: row[1],
+        )
+        bands: dict[str, tuple[float, float]] = {}
+        for index, (floor_id, floor_z) in enumerate(levels):
+            upper = levels[index + 1][1] if index + 1 < len(levels) else floor_z + 2.6
+            bands[floor_id] = (floor_z, upper)
+        return bands
+
+    def _build_arbiter_shadow(
+        self,
+        *,
+        device: BermudaDevice,
+        base_floor_anchors: list[tuple[str | None, AnchorMeasurement]],
+        rssi_floor_evidence: dict[str, float],
+        fingerprint_floor_scores: dict[str, float],
+        fingerprint_overlap: dict[str, float] | None,
+        selected_floor_id: str | None,
+        nowstamp: float,
+    ) -> dict[str, Any]:
+        """
+        Run the reliability-weighted arbiter alongside the live decision.
+
+        Diagnostic only: nothing here feeds the live floor, the solve, or any
+        published entity. It exists so the new architecture can be compared
+        against the current one on the same observations before it is trusted
+        with anything.
+        """
+        results: list[EvidenceResult] = []
+
+        # --- RSSI: candidate scores straight from the live evidence -----------
+        rssi_result = EvidenceResult(
+            source=EvidenceSource.RSSI,
+            candidate_scores=dict(rssi_floor_evidence),
+            reliability=0.0,
+        )
+        floors_with_anchors: dict[str, int] = {}
+        for anchor_floor_id, _anchor in base_floor_anchors:
+            if anchor_floor_id:
+                floors_with_anchors[anchor_floor_id] = floors_with_anchors.get(anchor_floor_id, 0) + 1
+        # Balance is 1.0 when anchors are spread evenly across the floors in
+        # contention, and falls toward 0 when one floor owns nearly all of them.
+        balance = (
+            (min(floors_with_anchors.values()) / max(floors_with_anchors.values()))
+            if len(floors_with_anchors) > 1
+            else 0.0
+        )
+        rssi_quality = rssi_information_quality(
+            margin=rssi_result.margin,
+            effective_anchor_count=len(base_floor_anchors),
+            floor_coverage_balance=balance,
+            timestamp_health=1.0,
+        )
+        results.append(
+            EvidenceResult(
+                source=EvidenceSource.RSSI,
+                candidate_scores=dict(rssi_floor_evidence),
+                reliability=rssi_quality.value,
+                reason=rssi_quality.reason,
+                reliability_inputs=rssi_quality.inputs,
+                quality_metrics=rssi_quality.detail,
+            )
+        )
+
+        # --- Fingerprint: scores plus how much of the live set is trained -----
+        overlap = fingerprint_overlap or {}
+        if fingerprint_floor_scores:
+            fp_quality = fingerprint_information_quality(
+                matched_features=int(overlap.get("matched_features", 0)),
+                live_trained_fraction=float(overlap.get("live_trained_fraction", 0.0)),
+                trained_match_fraction=float(overlap.get("trained_match_fraction", 0.0)),
+                match_separation=EvidenceResult(
+                    source=EvidenceSource.FINGERPRINT,
+                    candidate_scores=dict(fingerprint_floor_scores),
+                ).margin,
+            )
+            results.append(
+                EvidenceResult(
+                    source=EvidenceSource.FINGERPRINT,
+                    candidate_scores=dict(fingerprint_floor_scores),
+                    reliability=fp_quality.value,
+                    reason=fp_quality.reason,
+                    reliability_inputs=fp_quality.inputs,
+                    quality_metrics=fp_quality.detail,
+                )
+            )
+        else:
+            results.append(EvidenceResult.unavailable(EvidenceSource.FINGERPRINT, "no_floor_scores"))
+
+        # --- Geometry: floor-neutral, equal sigma, no vertical prior ----------
+        bands = self._floor_height_bands()
+        geometry_diag: dict[str, Any] = {}
+        if len(base_floor_anchors) >= self._TRILAT_MIN_ANCHORS and bands:
+            sigmas = sorted(anchor.sigma_m for _floor_id, anchor in base_floor_anchors)
+            common_sigma = sigmas[len(sigmas) // 2]
+            neutral_anchors = [
+                AnchorMeasurement(
+                    scanner_address=anchor.scanner_address,
+                    x_m=anchor.x_m,
+                    y_m=anchor.y_m,
+                    range_m=anchor.range_m,
+                    z_m=anchor.z_m,
+                    sigma_m=common_sigma,
+                )
+                for _floor_id, anchor in base_floor_anchors
+            ]
+            neutral = evaluate_floor_neutral_geometry(neutral_anchors, bands)
+            geometry_diag = neutral.as_diagnostics()
+            anchor_zs = [anchor.z_m for anchor in neutral_anchors if anchor.z_m is not None]
+            separations = sorted(bands.values())
+            floor_separation_m = (
+                min(high - low for low, high in separations if high > low) if len(separations) > 1 else 0.0
+            )
+            geo_quality = geometry_information_quality(
+                z_informative=neutral.z_observability.informative,
+                z_sigma_m=neutral.z_observability.sigma_z_m,
+                floor_separation_m=floor_separation_m,
+                anchor_height_diversity_m=(max(anchor_zs) - min(anchor_zs)) if len(anchor_zs) > 1 else 0.0,
+                candidate_margin=EvidenceResult(
+                    source=EvidenceSource.GEOMETRY,
+                    candidate_scores=dict(neutral.floor_scores),
+                ).margin,
+            )
+            results.append(
+                EvidenceResult(
+                    source=EvidenceSource.GEOMETRY,
+                    candidate_scores=dict(neutral.floor_scores),
+                    available=bool(neutral.floor_scores),
+                    reliability=geo_quality.value,
+                    reason=geo_quality.reason,
+                    reliability_inputs=geo_quality.inputs,
+                    quality_metrics=geo_quality.detail,
+                )
+            )
+        else:
+            results.append(EvidenceResult.unavailable(EvidenceSource.GEOMETRY, "insufficient_anchors"))
+
+        decision = self._evidence_arbiter.fuse(results)
+
+        # --- Committed state, shadowed per device ----------------------------
+        shadow_states = self._shadow_committed_states
+        state = shadow_states.setdefault(device.address, CommittedFloorState())
+        committed_before = state.floor_id
+        self._committed_floor_policy.update(
+            state,
+            candidate_floor_id=decision.choice,
+            confidence=decision.confidence,
+            nowstamp=nowstamp,
+        )
+
+        frame = DecisionFrame(
+            device_address=device.address,
+            recorded_at=now().isoformat(),
+            layout_epoch=str(self.calibration.current_anchor_layout_hash or "")[:12],
+            decision_kind="floor",
+            source_results={result.source.value: result.as_diagnostics() for result in results},
+            fused_scores=decision.scores,
+            fused_choice=decision.choice,
+            fused_confidence=decision.confidence,
+            published_choice=decision.choice,
+            committed_before=committed_before,
+            committed_after=state.floor_id,
+            overrides=self._evidence_arbiter.overrides.as_diagnostics(),
+            algorithm_versions={
+                "evidence_contract": EVIDENCE_CONTRACT_VERSION,
+                "arbiter": ARBITER_VERSION,
+                "committed_state": COMMITTED_STATE_VERSION,
+            },
+        )
+        self._decision_frames.record(frame)
+
+        agrees = decision.choice == selected_floor_id
+        if not agrees and decision.choice is not None:
+            # Only disagreements are logged, so the log stays readable while
+            # still capturing every case worth comparing against the live path.
+            _LOGGER_SPAM_LESS.warning(
+                f"arbiter_shadow_disagrees:{device.address}",
+                "Arbiter shadow (diagnostic only): device=%s live=%s shadow=%s conf=%.2f disagreement=%.2f "
+                "weights=%s committed=%s z=%s",
+                device.name,
+                selected_floor_id,
+                decision.choice,
+                decision.confidence,
+                decision.disagreement,
+                {key: round(value, 2) for key, value in decision.effective_weights.items()},
+                state.floor_id,
+                geometry_diag.get("z_observability", {}).get("reason", "n/a"),
+            )
+
+        return {
+            "mode": "diagnostic_only",
+            "agrees_with_live": agrees,
+            "live_floor_id": selected_floor_id,
+            "decision": decision.as_diagnostics(),
+            "sources": {result.source.value: result.as_diagnostics() for result in results},
+            "geometry_floor_neutral": geometry_diag,
+            "committed_state": state.as_diagnostics(),
+        }
 
     def _build_candidate_floor_shadow(
         self,
@@ -5161,6 +5393,17 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
                 required_margin=policy.floor_switch_margin,
                 trigger=candidate_shadow_trigger,
             )
+        if getattr(self, "_evidence_arbiter", None) is not None:
+            device.trilat_floor_diagnostics["arbiter_shadow"] = self._build_arbiter_shadow(
+                device=device,
+                base_floor_anchors=base_floor_anchors,
+                rssi_floor_evidence=rssi_floor_evidence,
+                fingerprint_floor_scores=dict(fingerprint_result.floor_scores or {}),
+                fingerprint_overlap=getattr(device, "room_fingerprint_overlap", None),
+                selected_floor_id=selected_floor_id,
+                nowstamp=nowstamp,
+            )
+
         if anchor_count < self._TRILAT_MIN_ANCHORS:
             fallback_xy = state.last_solution_xy
             fallback_z = state.last_solution_z

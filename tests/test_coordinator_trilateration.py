@@ -3087,3 +3087,138 @@ def test_room_fingerprint_overlap_reaches_device_diagnostics():
         "missing_mismatch_mean_sq": 1.5,
     }
     assert "trained=0.67 live=0.44" in coordinator._room_fingerprint_overlap_summary(classification)
+
+
+def _arbiter_shadow_coordinator():
+    """Coordinator with the shadow architecture wired, as the live one has it."""
+    from custom_components.ble_trilateration.arbiter import EvidenceArbiter
+    from custom_components.ble_trilateration.committed_state import CommittedFloorPolicy
+    from custom_components.ble_trilateration.decision_record import DecisionFrameRecorder
+
+    coordinator = _make_coordinator()
+    coordinator._evidence_arbiter = EvidenceArbiter()
+    coordinator._committed_floor_policy = CommittedFloorPolicy()
+    coordinator._shadow_committed_states = {}
+    coordinator._decision_frames = DecisionFrameRecorder()
+    coordinator._floor_config_store = SimpleNamespace(
+        get=lambda _fid: None,
+        all_configs={
+            "street_level": SimpleNamespace(floor_z_m=1.4),
+            "ground_floor": SimpleNamespace(floor_z_m=2.7),
+        },
+    )
+    return coordinator
+
+
+def _bin_like_anchors():
+    """Anchors resembling the garage bins: coarse ranges, mixed floors."""
+    from custom_components.ble_trilateration.trilateration import AnchorMeasurement
+
+    layout = [
+        ("street_level", -6.0, 8.0, 2.6, 4.0),
+        ("street_level", -1.2, 5.0, 1.0, 4.5),
+        ("street_level", 0.0, 9.0, 1.4, 3.0),
+        ("ground_floor", 7.8, 8.0, 3.9, 9.0),
+        ("ground_floor", 11.1, 5.7, 3.7, 12.0),
+        ("ground_floor", 10.8, 3.4, 3.0, 13.0),
+    ]
+    return [
+        (
+            floor_id,
+            AnchorMeasurement(
+                scanner_address=f"anchor-{index}",
+                x_m=x,
+                y_m=y,
+                range_m=rng,
+                z_m=z,
+                sigma_m=3.0,
+            ),
+        )
+        for index, (floor_id, x, y, z, rng) in enumerate(layout)
+    ]
+
+
+def test_arbiter_shadow_follows_rssi_when_geometry_cannot_see_height():
+    """The bins' real situation: RSSI is informative, geometry is not."""
+    coordinator = _arbiter_shadow_coordinator()
+    device = _DummyDevice("dev-bin")
+    device.name = "Brown bin"
+
+    shadow = coordinator._build_arbiter_shadow(
+        device=device,
+        base_floor_anchors=_bin_like_anchors(),
+        rssi_floor_evidence={"street_level": 27.98, "ground_floor": 14.81},
+        fingerprint_floor_scores={"street_level": 0.6433, "ground_floor": 0.6358},
+        fingerprint_overlap={
+            "matched_features": 4,
+            "live_trained_fraction": 0.44,
+            "trained_match_fraction": 0.8,
+        },
+        selected_floor_id="ground_floor",
+        nowstamp=100.0,
+    )
+
+    assert shadow["mode"] == "diagnostic_only"
+    assert shadow["decision"]["choice"] == "street_level"
+    assert shadow["agrees_with_live"] is False
+    # Coarse ranges cannot resolve a 1.3 m floor gap, so geometry must abstain.
+    assert shadow["sources"]["geometry"]["reliability"] == 0.0
+
+
+def test_arbiter_shadow_records_a_replayable_decision_frame():
+    """Every shadow decision must be reconstructible from the diagnostics dump."""
+    coordinator = _arbiter_shadow_coordinator()
+    device = _DummyDevice("dev-frame")
+
+    coordinator._build_arbiter_shadow(
+        device=device,
+        base_floor_anchors=_bin_like_anchors(),
+        rssi_floor_evidence={"street_level": 20.0, "ground_floor": 10.0},
+        fingerprint_floor_scores={},
+        fingerprint_overlap=None,
+        selected_floor_id="street_level",
+        nowstamp=100.0,
+    )
+
+    frame = coordinator._decision_frames.latest("dev-frame")
+    assert frame is not None
+    assert frame.decision_kind == "floor"
+    assert set(frame.source_results) == {"rssi", "fingerprint", "geometry"}
+    assert frame.source_results["fingerprint"]["available"] is False
+    assert frame.algorithm_versions["arbiter"] >= 1
+
+
+def test_arbiter_shadow_does_not_commit_on_a_single_cycle():
+    """A shadow guess is published immediately but must earn the commitment."""
+    coordinator = _arbiter_shadow_coordinator()
+    device = _DummyDevice("dev-commit")
+
+    first = coordinator._build_arbiter_shadow(
+        device=device,
+        base_floor_anchors=_bin_like_anchors(),
+        rssi_floor_evidence={"street_level": 40.0, "ground_floor": 5.0},
+        fingerprint_floor_scores={},
+        fingerprint_overlap=None,
+        selected_floor_id="ground_floor",
+        nowstamp=0.0,
+    )
+    assert first["committed_state"]["committed_floor_id"] is None
+
+    later = coordinator._build_arbiter_shadow(
+        device=device,
+        base_floor_anchors=_bin_like_anchors(),
+        rssi_floor_evidence={"street_level": 40.0, "ground_floor": 5.0},
+        fingerprint_floor_scores={},
+        fingerprint_overlap=None,
+        selected_floor_id="ground_floor",
+        nowstamp=60.0,
+    )
+    assert later["committed_state"]["committed_floor_id"] == "street_level"
+
+
+def test_floor_height_bands_span_each_storey():
+    """Bands run from a floor's surface to the next one up, so they do not overlap."""
+    bands = _arbiter_shadow_coordinator()._floor_height_bands()
+
+    assert bands["street_level"] == (1.4, 2.7)
+    assert bands["ground_floor"][0] == 2.7
