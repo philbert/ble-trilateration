@@ -368,7 +368,7 @@ async def test_missing_weak_scanner_does_not_overwhelm_strong_fingerprint_match(
 
     await classifier.async_rebuild()
 
-    room_scores, _, _ = classifier._fingerprint_room_scores(
+    room_scores, _, _, _ = classifier._fingerprint_room_scores(
         classifier._fingerprints["layout-a"],
         {"scanner_a": -50.0},
     )
@@ -400,7 +400,7 @@ async def test_fingerprint_coverage_requires_enough_overlap_to_score() -> None:
 
     await classifier.async_rebuild()
 
-    room_scores, _, coverage = classifier._fingerprint_room_scores(
+    room_scores, _, coverage, _ = classifier._fingerprint_room_scores(
         classifier._fingerprints["layout-a"],
         {"scanner_a": -50.0, "scanner_c": -60.0},
     )
@@ -470,6 +470,7 @@ async def test_low_coverage_keeps_classify_blend_weight_at_normal_level(monkeypa
             {"living_room": 0.90},
             {"living_room": 1},
             {"living_room": 0.25},
+            {},
         ),
     )
 
@@ -537,6 +538,7 @@ async def test_low_geometry_shifts_room_ranking_toward_fingerprint_evidence(monk
             {"living_room": 0.82, "bedroom": 0.60},
             {"living_room": 1, "bedroom": 1},
             {"living_room": 1.0, "bedroom": 1.0},
+            {},
         ),
     )
 
@@ -807,13 +809,11 @@ async def test_fingerprint_global_floor_confidence_is_based_on_best_room_per_flo
         live_rssi_by_scanner={"scanner_a": -53.0, "scanner_b": -79.0},
     )
 
-    room_scores, _, _ = classifier._fingerprint_room_scores(
+    room_scores, _, _, _ = classifier._fingerprint_room_scores(
         classifier._fingerprints["layout-a"],
         {"scanner_a": -53.0, "scanner_b": -79.0},
     )
-    naive_floor_confidence = (
-        room_scores["living_room"] + room_scores["bedroom"]
-    ) / (
+    naive_floor_confidence = (room_scores["living_room"] + room_scores["bedroom"]) / (
         room_scores["living_room"] + room_scores["bedroom"] + room_scores["office"]
     )
 
@@ -867,3 +867,118 @@ async def test_transition_strength_prefers_nearby_rooms() -> None:
 
     assert 0.0 <= near_strength <= 1.0
     assert near_strength > 0.8
+
+
+def _two_scanner_classifier() -> BermudaRoomClassifier:
+    """One trained room with two scanners, for monotonicity checks."""
+    return BermudaRoomClassifier(
+        _FakeCalibration(
+            [
+                {
+                    "anchor_layout_hash": "layout-a",
+                    "room_area_id": "living_room",
+                    "position": {"x_m": 0.0, "y_m": 0.0, "z_m": 0.0},
+                    "sample_radius_m": 1.0,
+                    "quality": {"status": "accepted"},
+                    "anchors": {
+                        "scanner_a": {
+                            "rssi_median": -50.0,
+                            "packet_count": 10,
+                            "rssi_mad": 1.0,
+                            "rssi_min": -52.0,
+                            "rssi_max": -48.0,
+                        },
+                        "scanner_b": {
+                            "rssi_median": -70.0,
+                            "packet_count": 10,
+                            "rssi_mad": 1.0,
+                            "rssi_min": -72.0,
+                            "rssi_max": -68.0,
+                        },
+                    },
+                }
+            ]
+        ),
+        _FakeAreaRegistry(),
+    )
+
+
+@pytest.mark.asyncio
+async def test_untrained_live_scanner_does_not_change_fingerprint_score() -> None:
+    """A newly installed, untrained anchor must not move an existing match score."""
+    classifier = _two_scanner_classifier()
+    await classifier.async_rebuild()
+    samples = classifier._fingerprints["layout-a"]
+
+    baseline, _, _, _ = classifier._fingerprint_room_scores(samples, {"scanner_a": -50.0, "scanner_b": -70.0})
+    with_new_anchor, _, _, overlap = classifier._fingerprint_room_scores(
+        samples,
+        {"scanner_a": -50.0, "scanner_b": -70.0, "scanner_new": -45.0},
+    )
+
+    assert with_new_anchor["living_room"] == pytest.approx(baseline["living_room"])
+    # It is still counted, just not scored - that is what reliability consumes.
+    assert overlap["living_room"].untrained_live_features == 1
+    assert overlap["living_room"].live_trained_fraction == pytest.approx(2 / 3)
+
+
+@pytest.mark.asyncio
+async def test_untrained_live_scanner_cannot_improve_a_poor_match() -> None:
+    """The old averaged penalty could raise a bad score; adding anchors must never do that."""
+    classifier = _two_scanner_classifier()
+    await classifier.async_rebuild()
+    samples = classifier._fingerprints["layout-a"]
+
+    # A deliberately poor match, so the running mean cost exceeds any fixed penalty.
+    poor_live = {"scanner_a": -85.0, "scanner_b": -40.0}
+    poor, _, _, _ = classifier._fingerprint_room_scores(samples, poor_live)
+    poor_plus_untrained, _, _, _ = classifier._fingerprint_room_scores(
+        samples,
+        {**poor_live, "scanner_new_1": -45.0, "scanner_new_2": -46.0},
+    )
+
+    assert poor_plus_untrained["living_room"] == pytest.approx(poor["living_room"])
+
+
+@pytest.mark.asyncio
+async def test_silent_trained_scanner_is_measured_not_scored() -> None:
+    """A trained anchor that has gone quiet is a reliability fact, not a score penalty.
+
+    Compares two rooms trained identically on scanner_a/scanner_b, one of which
+    also trained a third scanner that is now silent. The comparable evidence is
+    the same, so the score must be the same.
+    """
+    two = _two_scanner_classifier()
+    three = _two_scanner_classifier()
+    three._calibration._samples[0]["anchors"]["scanner_c"] = {
+        "rssi_median": -80.0,
+        "packet_count": 10,
+        "rssi_mad": 1.0,
+        "rssi_min": -82.0,
+        "rssi_max": -78.0,
+    }
+    await two.async_rebuild()
+    await three.async_rebuild()
+
+    live = {"scanner_a": -50.0, "scanner_b": -70.0}
+    without_silent, _, _, _ = two._fingerprint_room_scores(two._fingerprints["layout-a"], live)
+    with_silent, _, _, overlap = three._fingerprint_room_scores(three._fingerprints["layout-a"], live)
+
+    assert with_silent["living_room"] == pytest.approx(without_silent["living_room"])
+    assert overlap["living_room"].missing_trained_features == 1
+    assert overlap["living_room"].trained_match_fraction == pytest.approx(2 / 3)
+    assert overlap["living_room"].missing_mismatch_mean_sq > 0.0
+
+
+@pytest.mark.asyncio
+async def test_fingerprint_score_still_falls_as_matched_features_disagree() -> None:
+    """Removing the unmatched terms must not remove sensitivity to real mismatch."""
+    classifier = _two_scanner_classifier()
+    await classifier.async_rebuild()
+    samples = classifier._fingerprints["layout-a"]
+
+    exact, _, _, _ = classifier._fingerprint_room_scores(samples, {"scanner_a": -50.0, "scanner_b": -70.0})
+    drifted, _, _, _ = classifier._fingerprint_room_scores(samples, {"scanner_a": -58.0, "scanner_b": -70.0})
+    worse, _, _, _ = classifier._fingerprint_room_scores(samples, {"scanner_a": -70.0, "scanner_b": -70.0})
+
+    assert exact["living_room"] > drifted["living_room"] > worse["living_room"]

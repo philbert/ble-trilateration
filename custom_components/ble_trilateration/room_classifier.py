@@ -32,11 +32,43 @@ FINGERPRINT_SIGMA_DB = 7.0
 FINGERPRINT_SIGMA_DB_MIN = 4.0
 FINGERPRINT_SIGMA_DB_MAX = 12.0
 FINGERPRINT_MISSING_FEATURE_FLOOR_DB = 6.0
-FINGERPRINT_EXTRA_SCANNER_PENALTY_DB = 4.5
 FINGERPRINT_MIN_COMMON_SCANNERS = 2
 FINGERPRINT_PACKET_COUNT_REFERENCE = 3.0
 FINGERPRINT_RELIABILITY_FLOOR = 0.25
 TRANSITION_GAP_SIGMA_M = 1.5
+
+
+@dataclass(frozen=True)
+class FingerprintOverlap:
+    """
+    How much of the fingerprint comparison was actually comparable.
+
+    Kept separate from the match score so that "the trained subset agrees well"
+    and "the trained subset covers little of what we can hear" stay distinct
+    facts. The first belongs in the score; the second belongs in reliability.
+    """
+
+    matched_features: int = 0
+    missing_trained_features: int = 0
+    untrained_live_features: int = 0
+    trained_match_fraction: float = 0.0
+    live_trained_fraction: float = 0.0
+    missing_mismatch_mean_sq: float = 0.0
+
+    @classmethod
+    def mean(cls, entries: list[FingerprintOverlap]) -> FingerprintOverlap:
+        """Average overlap across the samples that were scored for one room."""
+        if not entries:
+            return cls()
+        count = float(len(entries))
+        return cls(
+            matched_features=round(sum(entry.matched_features for entry in entries) / count),
+            missing_trained_features=round(sum(entry.missing_trained_features for entry in entries) / count),
+            untrained_live_features=round(sum(entry.untrained_live_features for entry in entries) / count),
+            trained_match_fraction=sum(entry.trained_match_fraction for entry in entries) / count,
+            live_trained_fraction=sum(entry.live_trained_fraction for entry in entries) / count,
+            missing_mismatch_mean_sq=sum(entry.missing_mismatch_mean_sq for entry in entries) / count,
+        )
 
 
 @dataclass(frozen=True)
@@ -59,6 +91,10 @@ class RoomClassification:
     fingerprint_blend_weight: float = FINGERPRINT_WEIGHT_NORMAL
     fingerprint_rankings: tuple[tuple[str, float, float, int], ...] = ()
     sample_count: int = 0
+    # Feature overlap for the winning fingerprint room. Not consumed by scoring -
+    # it is the raw material for fingerprint reliability, and it is what tells a
+    # user whether a weak score means "wrong room" or "we barely trained here".
+    fingerprint_overlap: FingerprintOverlap = field(default_factory=FingerprintOverlap)
 
 
 @dataclass(frozen=True)
@@ -94,7 +130,7 @@ class _SampleFingerprint:
     area_id: str
     floor_id: str | None
     rssi_by_scanner: dict[str, float]
-    features_by_scanner: dict[str, "_FingerprintFeature"]
+    features_by_scanner: dict[str, _FingerprintFeature]
 
 
 @dataclass(frozen=True)
@@ -179,9 +215,7 @@ class BermudaRoomClassifier:
                 if rssi_median is None:
                     continue
                 scanner_key = (
-                    canonical_key(str(scanner_address))
-                    if callable(canonical_key)
-                    else str(scanner_address).lower()
+                    canonical_key(str(scanner_address)) if callable(canonical_key) else str(scanner_address).lower()
                 )
                 rssi_mad = max(float(anchor.get("rssi_mad") or 0.0), 0.0)
                 packet_count = max(int(anchor.get("packet_count") or 1), 1)
@@ -273,7 +307,8 @@ class BermudaRoomClassifier:
         layout_hash: str,
         floor_id: str | None,
     ) -> tuple[float, float, float, float] | None:
-        """Return (x_min, x_max, y_min, y_max) bounding box for a floor's calibration samples.
+        """
+        Return (x_min, x_max, y_min, y_max) bounding box for a floor's calibration samples.
 
         Each sample is expanded by its sigma (capture radius). Returns None if no samples
         are available for this floor and layout hash.
@@ -317,7 +352,7 @@ class BermudaRoomClassifier:
             z_m=z_m,
             solve_covariance_xy=solve_covariance_xy,
         )
-        fingerprint_scores, fingerprint_topk, fingerprint_coverage = self._fingerprint_room_scores(
+        fingerprint_scores, fingerprint_topk, fingerprint_coverage, fingerprint_overlap = self._fingerprint_room_scores(
             fingerprints,
             live_rssi_by_scanner or {},
         )
@@ -343,22 +378,24 @@ class BermudaRoomClassifier:
         room_blend_weights: dict[str, float] = {}
         if geometry_scores:
             room_scores = {
-                area_id: (room_blend_weights.setdefault(
-                    area_id,
-                    self._adaptive_fingerprint_weight(
-                        geometry_quality_01=geometry_quality_01,
-                        fingerprint_coverage=fingerprint_coverage.get(area_id, 0.0),
-                        fingerprint_confidence=fingerprint_confidence,
-                    ),
-                ) * fingerprint_scores.get(area_id, 0.0))
+                area_id: (
+                    room_blend_weights.setdefault(
+                        area_id,
+                        self._adaptive_fingerprint_weight(
+                            geometry_quality_01=geometry_quality_01,
+                            fingerprint_coverage=fingerprint_coverage.get(area_id, 0.0),
+                            fingerprint_confidence=fingerprint_confidence,
+                        ),
+                    )
+                    * fingerprint_scores.get(area_id, 0.0)
+                )
                 + ((1.0 - room_blend_weights[area_id]) * geometry_scores.get(area_id, 0.0))
                 if fingerprint_scores and live_rssi_by_scanner
                 else geometry_scores.get(area_id, 0.0)
                 for area_id in (set(geometry_scores) | set(fingerprint_scores))
             }
             topk_by_area = {
-                area_id: max(geometry_topk.get(area_id, 0), fingerprint_topk.get(area_id, 0))
-                for area_id in room_scores
+                area_id: max(geometry_topk.get(area_id, 0), fingerprint_topk.get(area_id, 0)) for area_id in room_scores
             }
         else:
             room_scores = fingerprint_scores
@@ -375,6 +412,7 @@ class BermudaRoomClassifier:
         fingerprint_score = fingerprint_scores.get(best_area_id, 0.0)
         sample_count = self.room_sample_count(layout_hash, floor_id, best_area_id)
         candidate_fingerprint_coverage = fingerprint_coverage.get(best_area_id, 0.0)
+        candidate_fingerprint_overlap = fingerprint_overlap.get(best_area_id, FingerprintOverlap())
         candidate_fingerprint_blend_weight = room_blend_weights.get(best_area_id, FINGERPRINT_WEIGHT_NORMAL)
 
         if best_score < ROOM_SCORE_MIN:
@@ -395,6 +433,7 @@ class BermudaRoomClassifier:
                 fingerprint_blend_weight=candidate_fingerprint_blend_weight,
                 fingerprint_rankings=fingerprint_rankings,
                 sample_count=sample_count,
+                fingerprint_overlap=candidate_fingerprint_overlap,
             )
         if len(ranked_rooms) > 1 and (best_score / max(second_score, 1e-9)) < ROOM_SCORE_RATIO_MIN:
             return RoomClassification(
@@ -414,6 +453,7 @@ class BermudaRoomClassifier:
                 fingerprint_blend_weight=candidate_fingerprint_blend_weight,
                 fingerprint_rankings=fingerprint_rankings,
                 sample_count=sample_count,
+                fingerprint_overlap=candidate_fingerprint_overlap,
             )
         return RoomClassification(
             area_id=best_area_id,
@@ -432,6 +472,7 @@ class BermudaRoomClassifier:
             fingerprint_blend_weight=candidate_fingerprint_blend_weight,
             fingerprint_rankings=fingerprint_rankings,
             sample_count=sample_count,
+            fingerprint_overlap=candidate_fingerprint_overlap,
         )
 
     def fingerprint_global(
@@ -445,9 +486,11 @@ class BermudaRoomClassifier:
         if not fingerprints:
             return GlobalFingerprintResult(area_id=None, floor_id=None, reason="no_trained_rooms")
 
-        fingerprint_scores, _fingerprint_topk, _fingerprint_coverage = self._fingerprint_room_scores(
-            fingerprints,
-            live_rssi_by_scanner or {},
+        fingerprint_scores, _fingerprint_topk, _fingerprint_coverage, _fingerprint_overlap = (
+            self._fingerprint_room_scores(
+                fingerprints,
+                live_rssi_by_scanner or {},
+            )
         )
         if not fingerprint_scores:
             return GlobalFingerprintResult(area_id=None, floor_id=None, reason="weak_room_evidence")
@@ -556,20 +599,39 @@ class BermudaRoomClassifier:
         self,
         samples: list[_SampleFingerprint],
         live_rssi_by_scanner: dict[str, float],
-    ) -> tuple[dict[str, float], dict[str, int], dict[str, float]]:
-        """Return per-room RSSI-space fingerprint scores."""
+    ) -> tuple[dict[str, float], dict[str, int], dict[str, float], dict[str, FingerprintOverlap]]:
+        """
+        Return per-room RSSI-space fingerprint scores plus feature-overlap metrics.
+
+        The score is a weighted mean over *matched* features only, so it answers
+        one question: how well does the trained subset we can actually compare
+        agree with what we are hearing now. Features that cannot be compared -
+        trained scanners that are currently silent, and live scanners that were
+        never trained - are counted in FingerprintOverlap instead of being folded
+        into the score.
+
+        Mixing them into the score made it non-monotonic: each unmatched feature
+        added a fixed cost to the numerator *and* 1 to the denominator of a mean,
+        so an unmatched feature whose fixed cost was below the running mean
+        *improved* the score. A layout that keeps gaining anchors would therefore
+        keep flattering its most poorly-matching samples. Whether unmatched
+        features should reduce confidence is a reliability question, answered
+        from their counts, not by corrupting the match score.
+        """
         if not live_rssi_by_scanner:
-            return {}, {}, {}
+            return {}, {}, {}, {}
 
         live = {str(scanner_address).lower(): float(rssi) for scanner_address, rssi in live_rssi_by_scanner.items()}
         room_scores: dict[str, list[float]] = defaultdict(list)
         total_samples_by_area: dict[str, int] = defaultdict(int)
         covered_samples_by_area: dict[str, int] = defaultdict(int)
+        overlap_accumulator: dict[str, list[FingerprintOverlap]] = defaultdict(list)
 
+        live_scanners = set(live)
         for sample in samples:
             total_samples_by_area[sample.area_id] += 1
             sample_scanners = set(sample.features_by_scanner)
-            common_scanners = sorted(sample_scanners & set(live))
+            common_scanners = sorted(sample_scanners & live_scanners)
             required_common = min(FINGERPRINT_MIN_COMMON_SCANNERS, len(live))
             if len(common_scanners) < required_common:
                 continue
@@ -585,24 +647,34 @@ class BermudaRoomClassifier:
                 total_weighted_sq += weight * ((delta / sigma_db) ** 2)
                 total_weight += weight
 
-            for scanner_address in sorted(sample_scanners - set(live)):
+            mean_sq = total_weighted_sq / max(total_weight, 1e-6)
+            sample_score = math.exp(-0.5 * mean_sq)
+            room_scores[sample.area_id].append(sample_score)
+
+            # Unmatched features are measured, not scored. The missing-feature
+            # magnitude keeps using the per-feature penalty so a trained anchor
+            # that has gone silent still registers as a bigger loss than one
+            # that was always noisy.
+            missing_scanners = sorted(sample_scanners - live_scanners)
+            missing_mismatch_sq = 0.0
+            missing_weight = 0.0
+            for scanner_address in missing_scanners:
                 feature = sample.features_by_scanner[scanner_address]
                 sigma_db = self._fingerprint_sigma_db(feature)
                 weight = self._fingerprint_reliability_weight(feature)
                 penalty_db = self._fingerprint_missing_penalty_db(feature)
-                total_weighted_sq += weight * ((penalty_db / sigma_db) ** 2)
-                total_weight += weight
-
-            extra_live_scanners = len(set(live) - sample_scanners)
-            if extra_live_scanners:
-                sample_sigma_db = self._fingerprint_sample_sigma_db(sample)
-                extra_penalty = (FINGERPRINT_EXTRA_SCANNER_PENALTY_DB / sample_sigma_db) ** 2
-                total_weighted_sq += extra_live_scanners * extra_penalty
-                total_weight += float(extra_live_scanners)
-
-            mean_sq = total_weighted_sq / max(total_weight, 1e-6)
-            sample_score = math.exp(-0.5 * mean_sq)
-            room_scores[sample.area_id].append(sample_score)
+                missing_mismatch_sq += weight * ((penalty_db / sigma_db) ** 2)
+                missing_weight += weight
+            overlap_accumulator[sample.area_id].append(
+                FingerprintOverlap(
+                    matched_features=len(common_scanners),
+                    missing_trained_features=len(missing_scanners),
+                    untrained_live_features=len(live_scanners - sample_scanners),
+                    trained_match_fraction=(len(common_scanners) / len(sample_scanners)) if sample_scanners else 0.0,
+                    live_trained_fraction=(len(common_scanners) / len(live_scanners)) if live_scanners else 0.0,
+                    missing_mismatch_mean_sq=(missing_mismatch_sq / missing_weight) if missing_weight > 0 else 0.0,
+                )
+            )
 
         scored_rooms: dict[str, float] = {}
         topk_by_area: dict[str, int] = {}
@@ -615,7 +687,10 @@ class BermudaRoomClassifier:
             top_scores = sorted(scores, reverse=True)[:FINGERPRINT_K_CAP]
             scored_rooms[area_id] = sum(top_scores) / len(top_scores)
             topk_by_area[area_id] = len(top_scores)
-        return scored_rooms, topk_by_area, coverage_by_area
+        overlap_by_area = {
+            area_id: FingerprintOverlap.mean(entries) for area_id, entries in overlap_accumulator.items() if entries
+        }
+        return scored_rooms, topk_by_area, coverage_by_area, overlap_by_area
 
     def _fingerprint_sigma_db(self, feature: _FingerprintFeature) -> float:
         """Return expected RSSI spread for one scanner feature."""
@@ -628,13 +703,6 @@ class BermudaRoomClassifier:
     def _fingerprint_missing_penalty_db(self, feature: _FingerprintFeature) -> float:
         """Return bounded penalty for a calibration-visible scanner missing from the live set."""
         return max(FINGERPRINT_MISSING_FEATURE_FLOOR_DB, feature.rssi_mad)
-
-    def _fingerprint_sample_sigma_db(self, sample: _SampleFingerprint) -> float:
-        """Return a representative sigma for unmatched live scanners against one sample."""
-        if not sample.features_by_scanner:
-            return FINGERPRINT_SIGMA_DB
-        sigmas = [self._fingerprint_sigma_db(feature) for feature in sample.features_by_scanner.values()]
-        return sum(sigmas) / len(sigmas)
 
     def _fingerprint_reliability_weight(self, feature: _FingerprintFeature) -> float:
         """Return scanner reliability weight from calibration stability and visibility."""
@@ -660,9 +728,8 @@ class BermudaRoomClassifier:
             elif geometry_quality >= FINGERPRINT_BLEND_GEOMETRY_HIGH:
                 base_weight = FINGERPRINT_WEIGHT_NORMAL
             else:
-                fraction = (
-                    (geometry_quality - FINGERPRINT_BLEND_GEOMETRY_LOW)
-                    / (FINGERPRINT_BLEND_GEOMETRY_HIGH - FINGERPRINT_BLEND_GEOMETRY_LOW)
+                fraction = (geometry_quality - FINGERPRINT_BLEND_GEOMETRY_LOW) / (
+                    FINGERPRINT_BLEND_GEOMETRY_HIGH - FINGERPRINT_BLEND_GEOMETRY_LOW
                 )
                 base_weight = FINGERPRINT_WEIGHT_HIGH + (
                     fraction * (FINGERPRINT_WEIGHT_NORMAL - FINGERPRINT_WEIGHT_HIGH)
