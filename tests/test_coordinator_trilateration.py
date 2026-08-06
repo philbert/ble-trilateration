@@ -15,7 +15,9 @@ from custom_components.ble_trilateration.const import (
     DISTANCE_TIMEOUT,
 )
 from custom_components.ble_trilateration.coordinator import BermudaDataUpdateCoordinator
+from custom_components.ble_trilateration.reachability_gate import ReachabilityGate
 from custom_components.ble_trilateration.room_classifier import GlobalFingerprintResult, RoomClassification
+from custom_components.ble_trilateration.transition_zone_store import TransitionZone, TransitionZoneCapture
 from custom_components.ble_trilateration.trilat_bootstrap_store import TrilatBootstrapRecord
 
 
@@ -456,6 +458,118 @@ def test_floor_evidence_cross_floor_penalty_selects_correct_floor():
     assert state.floor_id == "f1"
     # With valid triangle geometry the solver should succeed.
     assert device.trilat_status == "ok"
+
+
+def test_floor_inference_does_not_reuse_prior_constrained_z_as_evidence():
+    """A solved Z constrained by the incumbent floor must not vote for that floor."""
+    coordinator = _make_coordinator()
+    coordinator.get_floor_z_m = {"f1": 2.7, "f2": 1.4}.get
+    device = _DummyDevice("dev-circular-z", mobility_type="stationary")
+
+    sc_f1 = _make_scanner(coordinator, "circular-z-f1", "f1", 0.0, 0.0)
+    sc_f2 = _make_scanner(coordinator, "circular-z-f2", "f2", 6.0, 0.0)
+    state = coordinator._get_trilat_decision_state(device)
+    state.floor_id = "f1"
+    state.floor_confidence = 1.0
+    # This is exactly the incumbent floor's phone-height prior: 2.7 + 0.6.
+    device.trilat_z_m = 3.3
+
+    with patch("custom_components.ble_trilateration.coordinator.monotonic_time_coarse", return_value=100.0):
+        device.adverts = {
+            (device.address, sc_f1.address): _make_advert(sc_f1, 100.0, -70.0, 5.0),
+            (device.address, sc_f2.address): _make_advert(sc_f2, 100.0, -62.0, 5.0),
+        }
+        coordinator._refresh_trilateration_for_device(device)
+
+    assert (
+        device.trilat_floor_diagnostics["rssi_floor_evidence"]["f2"]
+        > device.trilat_floor_diagnostics["rssi_floor_evidence"]["f1"]
+    )
+    assert device.trilat_floor_diagnostics["best_floor_id"] == "f2"
+    assert state.floor_id == "f1"
+    assert state.floor_challenger_id == "f2"
+    assert state.floor_confidence == pytest.approx(0.92)
+
+
+def test_floor_inference_ignores_prior_constrained_z_when_fingerprints_are_available():
+    """Prior-derived Z must not dilute independent fingerprint and RSSI floor signals."""
+    coordinator = _make_coordinator()
+    coordinator.get_floor_z_m = {"f1": 2.7, "f2": 1.4}.get
+    coordinator.room_classifier = SimpleNamespace(
+        fingerprint_global=lambda **_kwargs: GlobalFingerprintResult(
+            area_id="garage_front",
+            floor_id="f2",
+            reason="ok",
+            floor_confidence=0.57,
+            room_confidence=0.57,
+            best_score=0.57,
+            second_score=0.43,
+            floor_scores={"f1": 0.43, "f2": 0.57},
+        )
+    )
+    device = _DummyDevice("dev-circular-z-fingerprint")
+
+    sc_f1 = _make_scanner(coordinator, "circular-z-fp-f1", "f1", 0.0, 0.0)
+    sc_f2 = _make_scanner(coordinator, "circular-z-fp-f2", "f2", 6.0, 0.0)
+    state = coordinator._get_trilat_decision_state(device)
+    state.floor_id = "f1"
+    state.floor_confidence = 1.0
+    device.trilat_z_m = 3.3
+
+    with patch("custom_components.ble_trilateration.coordinator.monotonic_time_coarse", return_value=100.0):
+        device.adverts = {
+            (device.address, sc_f1.address): _make_advert(sc_f1, 100.0, -70.0, 5.0),
+            (device.address, sc_f2.address): _make_advert(sc_f2, 100.0, -65.0, 5.0),
+        }
+        coordinator._refresh_trilateration_for_device(device)
+
+    assert device.trilat_floor_diagnostics["best_floor_id"] == "f2"
+    assert state.floor_challenger_id == "f2"
+    assert state.floor_confidence == pytest.approx(0.95)
+
+
+def test_independent_floor_challenge_still_respects_reachability_gate():
+    """Removing circular Z evidence must not bypass topology for a confident floor."""
+    coordinator = _make_coordinator()
+    coordinator.get_floor_z_m = {"f1": 2.7, "f2": 1.4}.get
+    coordinator.trilat_reachability_gate_enabled = lambda: True
+    coordinator._reachability_gate = ReachabilityGate()
+    coordinator._transition_zone_store = SimpleNamespace(
+        zones=[
+            TransitionZone(
+                zone_id="far-stairs",
+                name="Far stairs",
+                captures=[TransitionZoneCapture(x_m=20.0, y_m=0.0, z_m=3.3, sigma_m=0.5)],
+                floor_pairs=[("f1", "f2"), ("f2", "f1")],
+                anchor_layout_hash="layout-a",
+                created_at="2026-08-06T00:00:00+00:00",
+            )
+        ]
+    )
+    device = _DummyDevice("dev-circular-z-gated", mobility_type="stationary")
+
+    sc_f1 = _make_scanner(coordinator, "circular-z-gate-f1", "f1", 0.0, 0.0)
+    sc_f2 = _make_scanner(coordinator, "circular-z-gate-f2", "f2", 6.0, 0.0)
+    state = coordinator._get_trilat_decision_state(device)
+    state.floor_id = "f1"
+    state.floor_confidence = 1.0
+    state.last_good_position = (0.0, 0.0, 3.3)
+    state.last_good_position_at = 90.0
+    device.trilat_z_m = 3.3
+
+    with patch("custom_components.ble_trilateration.coordinator.monotonic_time_coarse", return_value=100.0):
+        device.adverts = {
+            (device.address, sc_f1.address): _make_advert(sc_f1, 100.0, -70.0, 5.0),
+            (device.address, sc_f2.address): _make_advert(sc_f2, 100.0, -62.0, 5.0),
+        }
+        coordinator._refresh_trilateration_for_device(device)
+
+    assert device.trilat_floor_diagnostics["best_floor_id"] == "f2"
+    assert device.trilat_floor_diagnostics["reachability_gate_allowed"] is False
+    assert device.trilat_floor_diagnostics["reachability_gate_reason"] == "blocked_budget"
+    assert state.floor_id == "f1"
+    assert state.floor_challenger_id is None
+    assert state.floor_confidence == pytest.approx(0.92)
 
 
 def test_floor_diagnostics_capture_evidence_and_cross_floor_candidates():
