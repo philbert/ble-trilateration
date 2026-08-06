@@ -49,6 +49,7 @@ def mock_scanner_device():
     scanner.last_seen = 0.0
     scanner.stamps = {"AA:BB:CC:DD:EE:FF": 123.45}
     scanner.async_as_scanner_get_stamp.return_value = 123.45
+    scanner.resolve_advert_replay_candidate.return_value = "pending"
     return scanner
 
 
@@ -374,32 +375,45 @@ def test_accepted_adverts_update_scanner_acceptance_stamp(bermuda_advert, mock_a
     assert accepted_at == pytest.approx(monotonic_time_coarse(), abs=2.0)
 
 
-def test_replayed_cache_advert_is_quarantined(bermuda_advert, mock_advertisement_data, mock_scanner_device):
-    """A lone packet reappearing after long silence with identical RSSI is not trusted."""
+def test_isolated_replay_shaped_comeback_is_accepted_after_window(
+    bermuda_advert, mock_advertisement_data, mock_scanner_device
+):
+    """An isolated one-off comeback is delayed, not discarded as a replay."""
     mock_advertisement_data.rssi = -71  # changed RSSI so the fixture-to-baseline jump is accepted
     mock_scanner_device.async_as_scanner_get_stamp.return_value = 1000.0
     bermuda_advert.update_advertisement(mock_advertisement_data, mock_scanner_device)
+    bermuda_advert.calculate_data()
     assert bermuda_advert.stamp == 1000.0
 
-    # ~18 minutes of silence, then the same cached frame reappears (unchanged RSSI).
-    # Quarantined, but not yet blamed on the scanner - a genuine comeback looks
-    # exactly like this until the confirm window passes without a follow-up.
+    # A replay-shaped packet is held while a follow-up or burst is still possible.
     mock_scanner_device.async_as_scanner_get_stamp.return_value = 2083.0
     bermuda_advert.update_advertisement(mock_advertisement_data, mock_scanner_device)
     assert bermuda_advert.stamp == 1000.0
     assert not mock_scanner_device.record_advert_replay_suspect.called
+    mock_scanner_device.register_advert_replay_candidate.assert_called_once()
 
-    # The next replay cycle arrives well outside the confirm window, proving the
-    # previous one was never confirmed: now it counts against the scanner.
-    mock_scanner_device.async_as_scanner_get_stamp.return_value = 3166.0
+    # Once scanner-wide classification says it remained isolated, accept the
+    # saved packet rather than losing a legitimate slow/one-off advertisement.
+    mock_scanner_device.resolve_advert_replay_candidate.return_value = "accept"
+    bermuda_advert.calculate_data()
+    assert bermuda_advert.stamp == 2083.0
+    assert not mock_scanner_device.record_advert_replay_suspect.called
+
+
+def test_unconfirmed_replay_burst_member_is_quarantined(bermuda_advert, mock_advertisement_data, mock_scanner_device):
+    """Only a candidate classified as part of a scanner-wide burst is dropped."""
+    mock_advertisement_data.rssi = -71
+    mock_scanner_device.async_as_scanner_get_stamp.return_value = 1000.0
     bermuda_advert.update_advertisement(mock_advertisement_data, mock_scanner_device)
+    bermuda_advert.calculate_data()
+
+    mock_scanner_device.async_as_scanner_get_stamp.return_value = 2083.0
+    bermuda_advert.update_advertisement(mock_advertisement_data, mock_scanner_device)
+    mock_scanner_device.resolve_advert_replay_candidate.return_value = "reject"
+    bermuda_advert.calculate_data()
+
     assert bermuda_advert.stamp == 1000.0
-    assert mock_scanner_device.record_advert_replay_suspect.call_count == 1
-
-    # ...and so on, one report per proven-unconfirmed replay.
-    mock_scanner_device.async_as_scanner_get_stamp.return_value = 4249.0
-    bermuda_advert.update_advertisement(mock_advertisement_data, mock_scanner_device)
-    assert mock_scanner_device.record_advert_replay_suspect.call_count == 2
+    mock_scanner_device.record_advert_replay_suspect.assert_called_once_with(bermuda_advert.device_address)
 
 
 def test_real_comeback_confirmed_by_second_packet(bermuda_advert, mock_advertisement_data, mock_scanner_device):
@@ -407,6 +421,7 @@ def test_real_comeback_confirmed_by_second_packet(bermuda_advert, mock_advertise
     mock_advertisement_data.rssi = -71  # changed RSSI so the fixture-to-baseline jump is accepted
     mock_scanner_device.async_as_scanner_get_stamp.return_value = 1000.0
     bermuda_advert.update_advertisement(mock_advertisement_data, mock_scanner_device)
+    bermuda_advert.calculate_data()
 
     # First comeback packet after long silence: quarantined even though genuine.
     mock_scanner_device.async_as_scanner_get_stamp.return_value = 2083.0
@@ -419,6 +434,7 @@ def test_real_comeback_confirmed_by_second_packet(bermuda_advert, mock_advertise
     assert bermuda_advert.stamp == 2085.0
     # The proxy is never accused for a comeback that confirmed itself.
     assert not mock_scanner_device.record_advert_replay_suspect.called
+    mock_scanner_device.clear_advert_replay_candidate.assert_called_once()
 
 
 def test_comeback_with_changed_payload_accepted_immediately(

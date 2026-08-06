@@ -8,7 +8,7 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import TYPE_CHECKING, Any, Final, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import aiofiles
 import voluptuous as vol
@@ -3743,41 +3743,47 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
         ]
         device.trilat_floor_diagnostics.update(transition_diag)
 
-    # A position solve needs three anchors sharing a floor. Fewer than that is a
-    # configuration gap the user has to close, not a transient runtime state.
-    _TRILAT_MIN_ANCHORS_PER_FLOOR: Final = 3
-
     def _evaluate_trilat_anchor_repair(self) -> None:
         """
-        Raise/clear the anchors repair based on the currently configured anchors.
+        Raise/clear the repair for incomplete scanner-anchor configuration.
 
-        Trilateration stays unsolvable until some floor carries three scanners
-        with both coordinates and a floor assignment, so the repair tracks that
-        threshold rather than merely "no anchors at all" - a half-configured
-        layout is just as stuck, and silently so.
+        Runtime solving uses anchors globally, including softly weighted anchors
+        from other floors, so the minimum is three fully configured anchors in
+        total rather than three on one floor. Calibration also snapshots every
+        scanner and requires complete X/Y/Z geometry, making any partially
+        configured scanner an actionable configuration problem even when the
+        runtime already has three other usable anchors.
         """
-        anchors_by_floor: dict[str, int] = {}
-        unconfigured: list[str] = []
-        for scanner in sorted(self._scanners, key=lambda s: s.name):
-            if (
-                self.get_scanner_anchor_x(scanner.address) is not None
-                and self.get_scanner_anchor_y(scanner.address) is not None
-                and scanner.floor_id is not None
-            ):
-                anchors_by_floor[scanner.floor_id] = anchors_by_floor.get(scanner.floor_id, 0) + 1
-            else:
-                unconfigured.append(f"{scanner.name} [{scanner.address}]")
-
-        if anchors_by_floor and max(anchors_by_floor.values()) >= self._TRILAT_MIN_ANCHORS_PER_FLOOR:
+        scanners = sorted(self._scanners, key=lambda scanner: (scanner.name, scanner.address))
+        if not scanners:
             self._async_manage_repair_trilat_without_anchors([])
             return
-        if not unconfigured:
-            # Every scanner is configured, there just aren't enough of them on one
-            # floor - list them all so the count is visible against the requirement.
-            unconfigured = [
-                f"{scanner.name} [{scanner.address}]" for scanner in sorted(self._scanners, key=lambda s: s.name)
+
+        fully_configured = 0
+        problems: list[str] = []
+        for scanner in scanners:
+            missing = [
+                label
+                for label, value in (
+                    ("Anchor X", self.get_scanner_anchor_x(scanner.address)),
+                    ("Anchor Y", self.get_scanner_anchor_y(scanner.address)),
+                    ("Anchor Z", self.get_scanner_anchor_z(scanner.address)),
+                    ("floor assignment", scanner.floor_id),
+                )
+                if value is None
             ]
-        self._async_manage_repair_trilat_without_anchors(unconfigured)
+            if missing:
+                problems.append(f"{scanner.name} [{scanner.address}] (missing {', '.join(missing)})")
+            else:
+                fully_configured += 1
+
+        if fully_configured < self._TRILAT_MIN_ANCHORS:
+            problems.insert(
+                0,
+                f"Only {fully_configured} fully configured anchors are available; "
+                f"at least {self._TRILAT_MIN_ANCHORS} are required",
+            )
+        self._async_manage_repair_trilat_without_anchors(problems)
 
     def _async_manage_repair_trilat_without_anchors(self, scannerlist: list[str]):
         """Raise/clear the repair for a layout that cannot support a trilateration solve."""

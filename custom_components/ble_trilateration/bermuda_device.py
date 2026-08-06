@@ -256,6 +256,8 @@ class BermudaDevice(dict):
         self.scanner_replay_suspect_count: int = 0
         self.scanner_replay_suspect_last_at: float | None = None
         self.scanner_replay_suspect_recent: deque[tuple[float, str]] = deque(maxlen=64)
+        self._scanner_replay_candidates: dict[str, float] = {}
+        self._scanner_replay_rejected: dict[str, float] = {}
         self.scanner_last_accepted_advert_at: float | None = None
         self.adverts: dict[
             tuple[str, str], BermudaAdvert
@@ -744,18 +746,67 @@ class BermudaDevice(dict):
         self.scanner_future_stamp_clamp_recent_s.append((nowstamp, delta_s))
         self._prune_timestamp_sync_events(nowstamp)
 
+    def register_advert_replay_candidate(self, device_address: str, queued_at: float) -> None:
+        """Register one replay-shaped comeback for scanner-wide classification."""
+        self._scanner_replay_rejected.pop(device_address, None)
+        self._scanner_replay_candidates[device_address] = queued_at
+
+    def clear_advert_replay_candidate(self, device_address: str, queued_at: float) -> None:
+        """Clear a candidate when a strictly later advert confirms it is live."""
+        if self._scanner_replay_candidates.get(device_address) == queued_at:
+            self._scanner_replay_candidates.pop(device_address)
+        if self._scanner_replay_rejected.get(device_address) == queued_at:
+            self._scanner_replay_rejected.pop(device_address)
+
+    def resolve_advert_replay_candidate(
+        self,
+        device_address: str,
+        queued_at: float,
+        nowstamp: float,
+        confirm_window_s: float,
+    ) -> str:
+        """
+        Classify a mature candidate as isolated (accept) or a burst (reject).
+
+        Every candidate in a burst gets its own full confirmation window. This
+        prevents iteration order from rejecting a later candidate before it had
+        the same opportunity to receive a follow-up packet.
+        """
+        if self._scanner_replay_rejected.get(device_address) == queued_at:
+            self._scanner_replay_rejected.pop(device_address)
+            return "reject"
+
+        registered_at = self._scanner_replay_candidates.get(device_address)
+        if registered_at != queued_at:
+            msg = f"Replay candidate registry mismatch for {device_address}"
+            raise RuntimeError(msg)
+
+        cluster = {
+            address: candidate_at
+            for address, candidate_at in self._scanner_replay_candidates.items()
+            if abs(candidate_at - queued_at) <= self._REPLAY_BURST_WINDOW_S
+        }
+        if nowstamp - max(cluster.values()) <= confirm_window_s:
+            return "pending"
+
+        if len(cluster) == 1:
+            self._scanner_replay_candidates.pop(device_address)
+            return "accept"
+
+        for address, candidate_at in cluster.items():
+            self._scanner_replay_candidates.pop(address)
+            self._scanner_replay_rejected[address] = candidate_at
+        self._scanner_replay_rejected.pop(device_address)
+        return "reject"
+
     def record_advert_replay_suspect(self, device_address: str) -> None:
         """
-        Record a quarantined advert that was never confirmed by a follow-up packet.
+        Record one member of a scanner-wide unconfirmed comeback burst.
 
-        Only unconfirmed quarantines reach here: a device that genuinely returned
-        to range keeps advertising, so its next packet lands inside the confirm
-        window and it is never reported. Several distinct devices replaying from
-        one scanner within seconds is the signature of a proxy re-emitting its
-        advertisement cache, but the evidence is still circumstantial (a device
-        that shows up for exactly one packet and leaves again looks identical),
-        so this stays a debug-level diagnostic. The running counts are exposed on
-        the scanner's diagnostic sensor for anyone chasing a suspect proxy.
+        Confirmed comebacks and isolated one-off packets are accepted instead.
+        Even a multi-device burst remains circumstantial, so this stays a
+        debug-level diagnostic. Running counts remain available on the scanner's
+        diagnostic sensor for investigating a suspect proxy.
         """
         nowstamp = monotonic_time_coarse()
         self.scanner_replay_suspect_count += 1
@@ -768,7 +819,7 @@ class BermudaDevice(dict):
         if len(burst_devices) >= 2:
             _LOGGER_SPAM_LESS.debug(
                 f"replay_burst_{self.address}",
-                "Scanner %s re-reported %d long-silent devices with unchanged RSSI and payload within %ds, "
+                "Scanner %s re-reported %d long-silent devices with unchanged advertisement snapshots within %ds, "
                 "with no follow-up packet to confirm any of them. That is consistent with the proxy "
                 "replaying its advertisement cache instead of scanning; the adverts were quarantined.",
                 self.name,

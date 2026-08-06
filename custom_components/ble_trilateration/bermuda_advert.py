@@ -58,17 +58,48 @@ STAMP_REBASE_STREAK: Final = 3
 # Synthetic freshness age applied to readings that arrive without a trustworthy
 # stamp (stamp-less USB adaptors, or remote scanners in stamp fallback).
 STAMPLESS_AGE_S: Final = 3.0
-# A single packet reappearing after this much silence with an identical RSSI
-# *and* an identical payload matches a proxy replaying its advertisement cache
-# (observed with Shelly proxies re-emitting departed devices every ~18 minutes),
-# but it also matches a stationary device that simply drifted out of range and
-# came back - RSSI is a 1dBm-quantised integer, so repeating the previous value
-# is a routine coincidence. Quarantine the packet either way, then let the
-# confirm window decide: replays never produce a follow-up packet, real
-# comebacks do within seconds. Only an *unconfirmed* quarantine is evidence
-# against the proxy.
+# A packet reappearing after this much silence with an unchanged RSSI and
+# advertisement snapshot is replay-shaped, but it is not proof of a replay.
+# Home Assistant exposes a scanner's merged latest snapshot rather than an
+# immutable raw frame, and a stationary device can genuinely return with the
+# same quantised RSSI. Hold the packet briefly, then accept it if it is followed
+# by another packet or remains an isolated candidate. Only a scanner-wide burst
+# of distinct candidates that all remain unconfirmed is quarantined.
 REPLAY_SUSPECT_GAP_S: Final = 120.0
 REPLAY_CONFIRM_WINDOW_S: Final = 20.0
+
+
+@dataclass(frozen=True)
+class _AdvertisementSnapshot:
+    """Immutable-enough copy of the advertisement fields Bermuda consumes."""
+
+    rssi: int
+    tx_power: int | None
+    local_name: str | None
+    manufacturer_data: dict[int, bytes]
+    service_data: dict[str, bytes]
+    service_uuids: list[str]
+
+    @classmethod
+    def from_advertisement(cls, advertisementdata: AdvertisementData) -> _AdvertisementSnapshot:
+        """Copy mutable payload containers before the scanner cache changes."""
+        return cls(
+            rssi=advertisementdata.rssi,
+            tx_power=advertisementdata.tx_power,
+            local_name=advertisementdata.local_name,
+            manufacturer_data=dict(advertisementdata.manufacturer_data),
+            service_data=dict(advertisementdata.service_data),
+            service_uuids=list(advertisementdata.service_uuids),
+        )
+
+
+@dataclass(frozen=True)
+class _ReplayPending:
+    """Replay-shaped comeback held while the scanner-wide burst resolves."""
+
+    stamp: float
+    queued_at: float
+    advertisement: _AdvertisementSnapshot
 
 
 class BermudaAdvert(dict):
@@ -111,7 +142,7 @@ class BermudaAdvert(dict):
         self.new_stamp: float | None = None  # Set when a new advert is loaded from update
         self.backward_drop_streak: int = 0  # Consecutive backwards-stamp drops; triggers a clock rebase
         self.stamp_is_synthetic: bool = False  # self.stamp came from the stampless fallback, not the scanner
-        self._replay_pending_stamp: float | None = None  # Quarantined comeback packet awaiting confirmation
+        self._replay_pending: _ReplayPending | None = None
         self.rssi: float | None = None
         self.rssi_filtered: float | None = None
         self.rssi_dispersion: float = 0.0
@@ -169,6 +200,7 @@ class BermudaAdvert(dict):
             _LOGGER.debug(
                 "Replacing stale scanner device %s with %s", self.scanner_device.__repr__(), scanner_device.__repr__()
             )
+            self._clear_replay_pending()
             self.apply_new_scanner(scanner_device)
 
         scanner = self.scanner_device
@@ -201,6 +233,23 @@ class BermudaAdvert(dict):
                     scanner.record_future_stamp_clamp(new_stamp - nowstamp)
                 new_stamp = nowstamp
 
+            # A pending comeback normally resolves from calculate_data() once its
+            # confirmation window elapses. Resolve it here too so direct/new input
+            # cannot overtake a mature candidate between coordinator phases.
+            self._resolve_replay_pending(nowstamp)
+            pending = self._replay_pending
+            confirmed_comeback = False
+            if pending is not None:
+                if new_stamp <= pending.stamp:
+                    # This is the same quarantined cache entry (or an older one),
+                    # not the strictly later packet needed for confirmation.
+                    self.stale_update_count += 1
+                    return
+                # Any later packet that arrives while the candidate is still
+                # awaiting classification confirms that the device is live.
+                self._clear_replay_pending()
+                confirmed_comeback = True
+
             if self.stamp > new_stamp:
                 self.backward_drop_streak += 1
                 if self.stamp_is_synthetic or self.backward_drop_streak >= STAMP_REBASE_STREAK:
@@ -211,6 +260,7 @@ class BermudaAdvert(dict):
                     # until wall time catches up; history spanning the
                     # discontinuity is meaningless, so start fresh.
                     scanner.record_stamp_rebase(self.stamp - new_stamp)
+                    self._clear_replay_pending()
                     self._reset_timing_history()
                     self.backward_drop_streak = 0
                     rebased = True
@@ -227,29 +277,17 @@ class BermudaAdvert(dict):
             else:
                 self.backward_drop_streak = 0
             if (
-                not rebased
+                not confirmed_comeback
+                and not rebased
                 and self.stamp > 0
                 and self.rssi is not None
                 and advertisementdata.rssi == self.rssi
-                and self._payload_matches_last_accepted(advertisementdata)
+                and self._advertisement_matches_last_accepted(advertisementdata)
                 and (new_stamp - self.stamp) > REPLAY_SUSPECT_GAP_S
             ):
-                # Replay-shaped packet: quarantine it and require a second,
-                # strictly later packet before trusting the comeback.
-                pending = self._replay_pending_stamp
-                if pending is None or not 0.0 < (new_stamp - pending) <= REPLAY_CONFIRM_WINDOW_S:
-                    if pending is not None:
-                        # The previously quarantined packet was never followed up
-                        # within the confirm window, so that one really was a
-                        # replayed cache entry rather than a device returning to
-                        # range. Blame the scanner only now that the window has
-                        # been proven empty - reporting at quarantine time
-                        # accuses the proxy for every ordinary comeback.
-                        scanner.record_advert_replay_suspect(self.device_address)
-                    self._replay_pending_stamp = new_stamp
-                    self.stale_update_count += 1
-                    return
-            self._replay_pending_stamp = None
+                self._queue_replay_pending(advertisementdata, new_stamp, nowstamp)
+                self.stale_update_count += 1
+                return
             self.stamp_is_synthetic = False
 
         elif self.rssi != advertisementdata.rssi:
@@ -266,6 +304,17 @@ class BermudaAdvert(dict):
             # Nothing new for us, bail.
             return
 
+        self._accept_advertisement(advertisementdata, new_stamp, nowstamp, rebased=rebased)
+
+    def _accept_advertisement(
+        self,
+        advertisementdata: AdvertisementData | _AdvertisementSnapshot,
+        new_stamp: float,
+        nowstamp: float,
+        *,
+        rebased: bool,
+    ) -> None:
+        """Apply one trusted advertisement to histories and device metadata."""
         # Update our parent scanner's last_seen if we have a new stamp.
         if new_stamp > self.scanner_device.last_seen + 0.01:  # some slight warp seems common.
             _LOGGER.debug(
@@ -372,20 +421,75 @@ class BermudaAdvert(dict):
         # Finally, save the new advert timestamp.
         self.new_stamp = new_stamp
 
-    def _payload_matches_last_accepted(self, advertisementdata: AdvertisementData) -> bool:
+    def _advertisement_matches_last_accepted(self, advertisementdata: AdvertisementData) -> bool:
         """
-        Return True if this advert carries the same payload as the last accepted one.
+        Return True if HA's merged advertisement snapshot is unchanged.
 
-        A replayed cache entry is the previous frame verbatim, so its payload is
-        unchanged. Devices whose adverts carry live data (temperature, battery,
-        rotating counters) change theirs between comebacks, which rules a replay
-        out cheaply and spares them a needless quarantine. An empty history can't
-        discriminate, so it falls back to "matches" and lets the confirm window
-        do the work.
+        Equality only makes an advert a candidate: HA merges fields across frames,
+        so this is deliberately not treated as proof. Changed live data, TX power,
+        name, or service UUIDs can still rule a replay out immediately.
         """
         if self.manufacturer_data and self.manufacturer_data[0] != advertisementdata.manufacturer_data:
             return False
-        return not (self.service_data and self.service_data[0] != advertisementdata.service_data)
+        if self.service_data and self.service_data[0] != advertisementdata.service_data:
+            return False
+        if set(self.service_uuids) != set(advertisementdata.service_uuids):
+            return False
+        if self.tx_power != advertisementdata.tx_power:
+            return False
+        previous_local_name = self.local_name[0][1] if self.local_name else None
+        current_local_name = advertisementdata.local_name.encode() if advertisementdata.local_name is not None else None
+        return previous_local_name == current_local_name
+
+    def _queue_replay_pending(
+        self,
+        advertisementdata: AdvertisementData,
+        new_stamp: float,
+        nowstamp: float,
+    ) -> None:
+        """Register a replay-shaped comeback without yet accusing the scanner."""
+        pending = _ReplayPending(
+            stamp=new_stamp,
+            queued_at=nowstamp,
+            advertisement=_AdvertisementSnapshot.from_advertisement(advertisementdata),
+        )
+        self._replay_pending = pending
+        self.scanner_device.register_advert_replay_candidate(self.device_address, pending.queued_at)
+
+    def _clear_replay_pending(self) -> None:
+        """Forget this advert's pending candidate in both owners."""
+        pending = self._replay_pending
+        if pending is None:
+            return
+        self.scanner_device.clear_advert_replay_candidate(self.device_address, pending.queued_at)
+        self._replay_pending = None
+
+    def _resolve_replay_pending(self, nowstamp: float) -> None:
+        """Accept an isolated candidate or reject a proven scanner-wide burst."""
+        pending = self._replay_pending
+        if pending is None:
+            return
+        decision = self.scanner_device.resolve_advert_replay_candidate(
+            self.device_address,
+            pending.queued_at,
+            nowstamp,
+            REPLAY_CONFIRM_WINDOW_S,
+        )
+        if decision == "pending":
+            return
+        self._replay_pending = None
+        if decision == "reject":
+            self.scanner_device.record_advert_replay_suspect(self.device_address)
+            return
+        if decision != "accept":
+            msg = f"Unexpected replay-candidate decision: {decision!r}"
+            raise RuntimeError(msg)
+        self._accept_advertisement(
+            pending.advertisement,
+            pending.stamp,
+            nowstamp,
+            rebased=False,
+        )
 
     def _reset_timing_history(self) -> None:
         """
@@ -676,6 +780,7 @@ class BermudaAdvert(dict):
         is how we decide how long to wait, and should accommodate for dropped
         packets and for temporary occlusion (dogs' bodies etc)
         """
+        self._resolve_replay_pending(monotonic_time_coarse())
         new_stamp = self.new_stamp  # should have been set by update()
         self.new_stamp = None  # Clear so we know if an update is missed next cycle
 

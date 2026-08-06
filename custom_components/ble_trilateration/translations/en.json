@@ -300,8 +300,8 @@
       "description": "BLE Trilateration requires all bluetooth proxies to have a valid area assigned in order to work correctly. Assign an area by visiting each proxy's device page (via `Devices and Services`), and click the pencil icon in the top-right to assign an area. The following proxies are missing an area assignment:\n\n{scannerlist}"
     },
     "trilat_without_anchors": {
-      "title": "Not enough scanner anchors are configured to trilaterate",
-      "description": "BLE Trilateration cannot solve a position until at least three scanners on the same floor have both `Anchor X` and `Anchor Y` coordinates set and a floor assigned to their device. Set the coordinates on each proxy's `Anchor X/Y` number entities, and assign each proxy's device to an area on a floor. Scanners that are not currently usable as anchors:\n\n{scannerlist}"
+      "title": "Scanner anchor configuration is incomplete",
+      "description": "BLE Trilateration needs at least three fully configured scanner anchors in total. Each scanner used for calibration must have `Anchor X`, `Anchor Y`, and `Anchor Z` coordinates set, and its device must belong to an area assigned to a floor. Complete the following configuration:\n\n{scannerlist}"
     },
     "calibration_layout_mismatch": {
       "title": "Some calibration samples don't match the current anchor layout",

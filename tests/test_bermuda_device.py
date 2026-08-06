@@ -127,6 +127,33 @@ def test_timestamp_sync_recovered_returns_to_synchronized_after_cooldown(bermuda
         assert diagnostics["state"] == "synchronized"
 
 
+def test_replay_candidates_reject_only_a_mature_multi_device_burst(bermuda_scanner):
+    """Every member must remain unconfirmed for a full window before rejection."""
+    bermuda_scanner.register_advert_replay_candidate("device-a", 100.0)
+    bermuda_scanner.register_advert_replay_candidate("device-b", 108.0)
+
+    assert bermuda_scanner.resolve_advert_replay_candidate("device-a", 100.0, 128.0, 20.0) == "pending"
+    assert bermuda_scanner.resolve_advert_replay_candidate("device-a", 100.0, 129.0, 20.0) == "reject"
+    assert bermuda_scanner.resolve_advert_replay_candidate("device-b", 108.0, 129.0, 20.0) == "reject"
+
+
+def test_replay_candidate_accepts_an_isolated_one_off(bermuda_scanner):
+    """A lone unconfirmed packet is ambiguous and must not be discarded."""
+    bermuda_scanner.register_advert_replay_candidate("device-a", 100.0)
+
+    assert bermuda_scanner.resolve_advert_replay_candidate("device-a", 100.0, 120.0, 20.0) == "pending"
+    assert bermuda_scanner.resolve_advert_replay_candidate("device-a", 100.0, 121.0, 20.0) == "accept"
+
+
+def test_confirmed_replay_candidate_leaves_no_burst_evidence(bermuda_scanner):
+    """A later packet removes the candidate before scanner-wide classification."""
+    bermuda_scanner.register_advert_replay_candidate("device-a", 100.0)
+    bermuda_scanner.clear_advert_replay_candidate("device-a", 100.0)
+
+    assert bermuda_scanner._scanner_replay_candidates == {}  # noqa: SLF001
+    assert bermuda_scanner._scanner_replay_rejected == {}  # noqa: SLF001
+
+
 def test_async_as_scanner_get_stamp(bermuda_scanner, mock_scanner, mock_remote_scanner):
     """Test async_as_scanner_get_stamp method."""
     bermuda_scanner.async_as_scanner_init(mock_scanner)

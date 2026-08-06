@@ -2790,10 +2790,9 @@ def _capture_anchor_repair(coordinator):
     return captured
 
 
-def test_anchor_repair_clears_with_three_anchors_on_one_floor():
-    """Three usable anchors sharing a floor is the minimum solvable layout."""
+def test_anchor_repair_waits_for_scanner_discovery():
+    """Startup with no discovered scanners should not raise a configuration issue."""
     coordinator = _make_coordinator()
-    _right_triangle_anchors(coordinator, "repair-ok", "f1")
 
     captured = _capture_anchor_repair(coordinator)
     coordinator._evaluate_trilat_anchor_repair()
@@ -2801,29 +2800,57 @@ def test_anchor_repair_clears_with_three_anchors_on_one_floor():
     assert captured == [[]]
 
 
-def test_anchor_repair_raised_when_a_floor_is_short_of_anchors():
-    """Two anchors on a floor can never solve, so the repair must still be raised."""
+def test_anchor_repair_clears_with_three_fully_configured_anchors():
+    """Three complete anchors are the minimum globally solvable layout."""
     coordinator = _make_coordinator()
-    _make_scanner(coordinator, "half-a", "f1", 0.0, 0.0)
-    _make_scanner(coordinator, "half-b", "f1", 6.0, 0.0)
+    for scanner in _right_triangle_anchors(coordinator, "repair-ok", "f1"):
+        scanner.anchor_z_m = 1.0
+
+    captured = _capture_anchor_repair(coordinator)
+    coordinator._evaluate_trilat_anchor_repair()
+
+    assert captured == [[]]
+
+
+def test_anchor_repair_reports_minimum_and_each_missing_coordinate():
+    """The repair should explain both anchor count and incomplete geometry."""
+    coordinator = _make_coordinator()
+    _make_scanner(coordinator, "half-a", "f1", 0.0, 0.0, 1.0)
+    _make_scanner(coordinator, "half-b", "f1", 6.0, 0.0, 1.0)
     _make_scanner(coordinator, "half-c", "f1", None, None)
 
     captured = _capture_anchor_repair(coordinator)
     coordinator._evaluate_trilat_anchor_repair()
 
-    # Only the scanner that is actually missing coordinates gets named.
-    assert captured == [["half-c [half-c]"]]
+    assert captured == [
+        [
+            "Only 2 fully configured anchors are available; at least 3 are required",
+            "half-c [half-c] (missing Anchor X, Anchor Y, Anchor Z)",
+        ]
+    ]
 
 
-def test_anchor_repair_ignores_anchors_split_across_floors():
-    """Anchors spread one-per-floor never reach three on any single floor."""
+def test_anchor_repair_accepts_global_anchors_split_across_floors():
+    """The global solver intentionally combines anchors from different floors."""
     coordinator = _make_coordinator()
-    _make_scanner(coordinator, "split-a", "f1", 0.0, 0.0)
-    _make_scanner(coordinator, "split-b", "f2", 6.0, 0.0)
-    _make_scanner(coordinator, "split-c", "f3", 0.0, 8.0)
+    _make_scanner(coordinator, "split-a", "f1", 0.0, 0.0, 0.5)
+    _make_scanner(coordinator, "split-b", "f2", 6.0, 0.0, 3.5)
+    _make_scanner(coordinator, "split-c", "f3", 0.0, 8.0, 6.5)
 
     captured = _capture_anchor_repair(coordinator)
     coordinator._evaluate_trilat_anchor_repair()
 
-    # Every scanner is configured, so all of them are listed against the requirement.
-    assert captured == [["split-a [split-a]", "split-b [split-b]", "split-c [split-c]"]]
+    assert captured == [[]]
+
+
+def test_anchor_repair_reports_incomplete_scanner_after_minimum_is_met():
+    """Calibration remains blocked if any additional scanner has partial geometry."""
+    coordinator = _make_coordinator()
+    for scanner in _right_triangle_anchors(coordinator, "complete", "f1"):
+        scanner.anchor_z_m = 1.0
+    _make_scanner(coordinator, "partial", None, 4.0, 5.0)
+
+    captured = _capture_anchor_repair(coordinator)
+    coordinator._evaluate_trilat_anchor_repair()
+
+    assert captured == [["partial [partial] (missing Anchor Z, floor assignment)"]]
