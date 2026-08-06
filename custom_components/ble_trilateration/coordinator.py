@@ -710,7 +710,33 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
 
     def layout_identity_diagnostics(self) -> dict[str, Any]:
         """Return canonical-layout classification of all stored positioning data."""
-        return self.calibration.classify_stored_samples()
+        identity = self.calibration.classify_stored_samples()
+        identity["feature_validity"] = self.calibration.feature_validity_summary(
+            anchor_first_seen=self.anchor_first_seen_map(),
+        )
+        return identity
+
+    def anchor_first_seen_map(self) -> dict[str, str]:
+        """
+        Return each scanner's earliest known existence time, from the device registry.
+
+        Samples recorded before anchor manifests existed cannot say whether an
+        absent anchor was silent or simply not installed yet. A scanner's device
+        registry entry is created when the proxy first appears, so it is the best
+        available stand-in for "when did this anchor start existing".
+        """
+        first_seen: dict[str, str] = {}
+        for address in getattr(self, "scanner_list", ()):
+            device = self.devices.get(address)
+            entry_id = getattr(device, "entry_id", None) if device is not None else None
+            if entry_id is None:
+                continue
+            devreg_entry = self.dr.async_get(entry_id)
+            created_at = getattr(devreg_entry, "created_at", None) if devreg_entry is not None else None
+            if created_at is None:
+                continue
+            first_seen[address] = created_at.isoformat() if hasattr(created_at, "isoformat") else str(created_at)
+        return first_seen
 
     def scanner_floor_z_diagnostics(self) -> list[dict[str, Any]]:
         """

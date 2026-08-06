@@ -531,6 +531,103 @@ class BermudaCalibrationManager:
             return self.SAMPLE_CLASS_HASH_ONLY
         return self.SAMPLE_CLASS_CURRENT
 
+    # Per-anchor validity of one stored sample against the current layout.
+    ANCHOR_FEATURE_MATCHED = "matched"
+    ANCHOR_FEATURE_MOVED = "moved"
+    ANCHOR_FEATURE_REMOVED = "removed"
+    ANCHOR_FEATURE_ADDED_SINCE = "added_since"
+    ANCHOR_FEATURE_UNTRAINED = "untrained"
+
+    def sample_feature_validity(
+        self,
+        sample: dict[str, Any],
+        current_anchor_index: dict[str, tuple[dict[str, float | None], str | None]],
+        *,
+        anchor_first_seen: dict[str, str] | None = None,
+    ) -> dict[str, str]:
+        """
+        Classify every anchor in the union of one sample and the current layout.
+
+        Whole-sample classification asks "is this sample still usable"; this asks
+        the finer question the fusion layer needs - which individual features are
+        still comparable. A moved anchor invalidates only its own feature, and an
+        anchor installed after the sample was taken is not evidence that the
+        sample is stale, it is simply untrained.
+
+        Anchors present now but absent from the sample split two ways:
+
+        - added_since: it did not exist when the sample was captured, so its
+          absence says nothing about the sample.
+        - untrained: it existed and was not recorded, which does say something -
+          either it could not be heard from there, or training was incomplete.
+
+        Proof comes from the sample's own anchor_manifest where one was stored.
+        For older samples with no manifest, anchor_first_seen (the scanner
+        device's registry creation time) stands in for it; with neither, the
+        conservative reading is "untrained".
+        """
+        anchors = sample.get("anchors") or {}
+        manifest = ((sample.get("anchor_manifest") or {}).get("anchors")) or {}
+        manifest_addresses = {mac_norm(str(address)) for address in manifest}
+        sample_addresses = {mac_norm(str(address)) for address in anchors}
+        sample_created_at = str(sample.get("created_at") or "")
+
+        validity: dict[str, str] = {}
+        for raw_address, anchor in anchors.items():
+            address = mac_norm(str(raw_address))
+            resolved = current_anchor_index.get(address)
+            if resolved is None:
+                validity[address] = self.ANCHOR_FEATURE_REMOVED
+                continue
+            current_anchor, _name = resolved
+            delta_m = self._anchor_delta_m(current_anchor, anchor.get("anchor_position") or {})
+            validity[address] = (
+                self.ANCHOR_FEATURE_MATCHED if delta_m is not None and delta_m < 0.01 else self.ANCHOR_FEATURE_MOVED
+            )
+
+        for address in current_anchor_index:
+            if address in sample_addresses:
+                continue
+            if manifest_addresses:
+                validity[address] = (
+                    self.ANCHOR_FEATURE_UNTRAINED if address in manifest_addresses else self.ANCHOR_FEATURE_ADDED_SINCE
+                )
+                continue
+            first_seen = (anchor_first_seen or {}).get(address)
+            validity[address] = (
+                self.ANCHOR_FEATURE_ADDED_SINCE
+                if first_seen and sample_created_at and first_seen > sample_created_at
+                else self.ANCHOR_FEATURE_UNTRAINED
+            )
+        return validity
+
+    def feature_validity_summary(
+        self,
+        samples: list[dict[str, Any]] | None = None,
+        *,
+        anchor_first_seen: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        """Aggregate per-anchor validity across stored samples, for diagnostics."""
+        current_anchor_index = self._current_anchor_identity_index()
+        rows = samples if samples is not None else list(self.samples())
+        counts: dict[str, int] = {}
+        samples_with_manifest = 0
+        for sample in rows:
+            if (sample.get("anchor_manifest") or {}).get("anchors"):
+                samples_with_manifest += 1
+            for state in self.sample_feature_validity(
+                sample,
+                current_anchor_index,
+                anchor_first_seen=anchor_first_seen,
+            ).values():
+                counts[state] = counts.get(state, 0) + 1
+        return {
+            "sample_count": len(rows),
+            "samples_with_manifest": samples_with_manifest,
+            "current_anchor_count": len(current_anchor_index),
+            "feature_states": counts,
+        }
+
     def classify_stored_samples(self) -> dict[str, Any]:
         """Classify all stored samples and bootstrap records for diagnostics and repair."""
         current_anchor_index = self._current_anchor_identity_index()
@@ -1904,10 +2001,28 @@ class BermudaCalibrationManager:
             "position": deepcopy(session.position),
             "sample_radius_m": session.sample_radius_m,
             "anchor_layout_hash": self.current_anchor_layout_hash,
+            # Every anchor that existed at capture time, not just the ones heard.
+            # Without this an anchor added later is indistinguishable from one
+            # that was present but silent, and the sample looks fully current
+            # when half the live feature set has never been trained.
+            "anchor_manifest": self._build_anchor_manifest(),
             "notes": session.notes,
             "anchors": shared["anchors"],
             "quality": shared["quality"],
             "trilat_capture": trilat_capture,
+        }
+
+    def _build_anchor_manifest(self) -> dict[str, Any]:
+        """Snapshot the configured anchor set so later layout changes stay attributable."""
+        return {
+            "layout_hash": self.current_anchor_layout_hash,
+            "anchors": {
+                address: {
+                    "scanner_name": name,
+                    "anchor_position": dict(coords),
+                }
+                for address, (coords, name) in sorted(self._current_anchor_identity_index().items())
+            },
         }
 
     def _build_transition_sample(self, session: _CaptureSession) -> dict[str, Any]:

@@ -65,7 +65,9 @@ async def test_record_calibration_sample_service(hass: HomeAssistant, setup_berm
 
     unsub = hass.bus.async_listen(CALIBRATION_EVENT_SAMPLE_CAPTURED, _capture_event)
     try:
-        with patch("custom_components.ble_trilateration.calibration.persistent_notification.async_create") as notify_mock:
+        with patch(
+            "custom_components.ble_trilateration.calibration.persistent_notification.async_create"
+        ) as notify_mock:
             response = await hass.services.async_call(
                 DOMAIN,
                 "record_calibration_sample",
@@ -206,9 +208,7 @@ async def test_record_calibration_sample_service_accepts_legacy_room_radius(hass
     assert "room_radius_m" not in sample
 
 
-async def test_calibration_sample_records_trilat_capture_summary(
-    hass: HomeAssistant, setup_bermuda_entry
-):
+async def test_calibration_sample_records_trilat_capture_summary(hass: HomeAssistant, setup_bermuda_entry):
     """Calibration captures should persist compact raw-trilat behavior summaries."""
     coordinator = setup_bermuda_entry.runtime_data.coordinator
 
@@ -289,9 +289,7 @@ async def test_calibration_sample_records_trilat_capture_summary(
     assert trilat_capture["residual_mean_m"] == 0.5
 
 
-async def test_existing_calibration_samples_bootstrap_trilat_position_model(
-    hass: HomeAssistant, setup_bermuda_entry
-):
+async def test_existing_calibration_samples_bootstrap_trilat_position_model(hass: HomeAssistant, setup_bermuda_entry):
     """Existing calibration samples without trilat summaries should still seed correction lookups."""
     coordinator = setup_bermuda_entry.runtime_data.coordinator
 
@@ -886,9 +884,7 @@ async def test_calibration_layout_mismatch_can_be_acknowledged(hass: HomeAssista
     assert coordinator.calibration.get_layout_mismatch_summary() is None
 
 
-async def test_calibration_layout_mismatch_raises_repair(
-    hass: HomeAssistant, setup_bermuda_entry, caplog
-):
+async def test_calibration_layout_mismatch_raises_repair(hass: HomeAssistant, setup_bermuda_entry, caplog):
     """A layout mismatch should create a fixable repair issue."""
     coordinator = setup_bermuda_entry.runtime_data.coordinator
     coordinator._cancel_calibration_layout_mismatch_grace()
@@ -1035,9 +1031,7 @@ async def test_calibration_layout_mismatch_raises_repair_for_mixed_current_and_s
     }
 
 
-async def test_calibration_layout_mismatch_updates_issue_without_recreating(
-    hass: HomeAssistant, setup_bermuda_entry
-):
+async def test_calibration_layout_mismatch_updates_issue_without_recreating(hass: HomeAssistant, setup_bermuda_entry):
     """Updating mismatch details should replace the issue in place without deleting it first."""
     coordinator = setup_bermuda_entry.runtime_data.coordinator
     coordinator._cancel_calibration_layout_mismatch_grace()
@@ -1207,9 +1201,7 @@ async def test_calibration_layout_mismatch_not_raised_for_hash_only_same_geometr
     assert issue is None
 
 
-async def test_hash_only_same_geometry_samples_build_current_runtime_models(
-    hass: HomeAssistant, setup_bermuda_entry
-):
+async def test_hash_only_same_geometry_samples_build_current_runtime_models(hass: HomeAssistant, setup_bermuda_entry):
     """Geometry-matching samples should feed the current runtime model even with an old stored hash."""
     coordinator = setup_bermuda_entry.runtime_data.coordinator
     area = ar.async_get(hass).async_create("Hall")
@@ -1309,9 +1301,7 @@ async def test_calibration_layout_mismatch_repair_is_suppressed_during_startup_g
     assert issue is not None
 
 
-async def test_calibration_layout_mismatch_repair_flow_updates_samples(
-    hass: HomeAssistant, setup_bermuda_entry
-):
+async def test_calibration_layout_mismatch_repair_flow_updates_samples(hass: HomeAssistant, setup_bermuda_entry):
     """The repair flow should update stored sample geometry on confirmation."""
     coordinator = setup_bermuda_entry.runtime_data.coordinator
 
@@ -1365,7 +1355,9 @@ async def test_calibration_layout_mismatch_repair_flow_updates_samples(
 
     result = await flow.async_step_init({"update_stored_sample_geometry": True})
     assert result["type"] == data_entry_flow.FlowResultType.CREATE_ENTRY
-    assert coordinator.calibration.samples()[0]["anchor_layout_hash"] == coordinator.calibration.current_anchor_layout_hash
+    assert (
+        coordinator.calibration.samples()[0]["anchor_layout_hash"] == coordinator.calibration.current_anchor_layout_hash
+    )
     assert coordinator.calibration.get_layout_mismatch_summary() is None
 
 
@@ -1469,9 +1461,7 @@ async def test_calibration_samples_options_flow(hass: HomeAssistant, setup_bermu
     assert coordinator.calibration.samples() == []
 
 
-async def test_anchor_geometry_change_rebuilds_runtime_models(
-    hass: HomeAssistant, setup_bermuda_entry
-):
+async def test_anchor_geometry_change_rebuilds_runtime_models(hass: HomeAssistant, setup_bermuda_entry):
     """Anchor geometry changes must rebuild models onto the newly current layout hash.
 
     Samples can be stored with a legacy layout hash that does not match the
@@ -1553,9 +1543,7 @@ async def test_anchor_geometry_change_rebuilds_runtime_models(
     assert coordinator.room_classifier.has_trained_rooms(stored_layout_hash, None) is False
 
 
-async def test_calibration_layout_mismatch_clear_rebuilds_runtime_models(
-    hass: HomeAssistant, setup_bermuda_entry
-):
+async def test_calibration_layout_mismatch_clear_rebuilds_runtime_models(hass: HomeAssistant, setup_bermuda_entry):
     """Clearing a mismatch issue should trigger the full calibration runtime rebuild path."""
     coordinator = setup_bermuda_entry.runtime_data.coordinator
     coordinator._cancel_calibration_layout_mismatch_grace()
@@ -1589,3 +1577,107 @@ async def test_calibration_layout_mismatch_clear_rebuilds_runtime_models(
     rebuild_runtime.assert_awaited_once()
     assert coordinator._calibration_layout_mismatch_signature is None
     assert ir.async_get(hass).async_get_issue(DOMAIN, REPAIR_CALIBRATION_LAYOUT_MISMATCH) is None
+
+
+def _validity_manager():
+    """Bare calibration manager: sample_feature_validity needs no runtime state."""
+    from custom_components.ble_trilateration.calibration import BermudaCalibrationManager
+
+    return object.__new__(BermudaCalibrationManager)
+
+
+def _anchor(x, y, z):
+    return {"x_m": x, "y_m": y, "z_m": z}
+
+
+def _sample(anchors, *, manifest=None, created_at="2026-03-01T00:00:00+00:00"):
+    sample = {
+        "created_at": created_at,
+        "anchors": {addr: {"anchor_position": _anchor(*pos)} for addr, pos in anchors.items()},
+    }
+    if manifest is not None:
+        sample["anchor_manifest"] = {
+            "anchors": {addr: {"anchor_position": _anchor(*pos)} for addr, pos in manifest.items()}
+        }
+    return sample
+
+
+def test_feature_validity_splits_moved_removed_and_matched():
+    """Each anchor is judged on its own, not by whole-sample staleness."""
+    manager = _validity_manager()
+    sample = _sample({"aa:aa:aa:aa:aa:01": (0, 0, 1), "aa:aa:aa:aa:aa:02": (5, 0, 1)})
+    current = {
+        "aa:aa:aa:aa:aa:01": (_anchor(0, 0, 1), "kept"),
+        "aa:aa:aa:aa:aa:02": (_anchor(5, 2, 1), "shifted"),
+    }
+
+    validity = manager.sample_feature_validity(sample, current)
+
+    assert validity["aa:aa:aa:aa:aa:01"] == manager.ANCHOR_FEATURE_MATCHED
+    assert validity["aa:aa:aa:aa:aa:02"] == manager.ANCHOR_FEATURE_MOVED
+
+
+def test_feature_validity_marks_deleted_anchor_removed():
+    """An anchor the user deleted is removed, and does not condemn the other features."""
+    manager = _validity_manager()
+    sample = _sample({"aa:aa:aa:aa:aa:01": (0, 0, 1), "aa:aa:aa:aa:aa:09": (9, 9, 1)})
+    current = {"aa:aa:aa:aa:aa:01": (_anchor(0, 0, 1), "kept")}
+
+    validity = manager.sample_feature_validity(sample, current)
+
+    assert validity["aa:aa:aa:aa:aa:09"] == manager.ANCHOR_FEATURE_REMOVED
+    assert validity["aa:aa:aa:aa:aa:01"] == manager.ANCHOR_FEATURE_MATCHED
+
+
+def test_manifest_distinguishes_added_since_from_untrained():
+    """The stored manifest proves which absent anchors did not yet exist."""
+    manager = _validity_manager()
+    sample = _sample(
+        {"aa:aa:aa:aa:aa:01": (0, 0, 1)},
+        # Anchor 02 existed at capture time but was not heard; 03 did not exist.
+        manifest={"aa:aa:aa:aa:aa:01": (0, 0, 1), "aa:aa:aa:aa:aa:02": (5, 0, 1)},
+    )
+    current = {
+        "aa:aa:aa:aa:aa:01": (_anchor(0, 0, 1), "trained"),
+        "aa:aa:aa:aa:aa:02": (_anchor(5, 0, 1), "silent"),
+        "aa:aa:aa:aa:aa:03": (_anchor(9, 0, 1), "new"),
+    }
+
+    validity = manager.sample_feature_validity(sample, current)
+
+    assert validity["aa:aa:aa:aa:aa:02"] == manager.ANCHOR_FEATURE_UNTRAINED
+    assert validity["aa:aa:aa:aa:aa:03"] == manager.ANCHOR_FEATURE_ADDED_SINCE
+
+
+def test_first_seen_stands_in_for_a_missing_manifest():
+    """Historical samples predate the manifest; registry creation time substitutes."""
+    manager = _validity_manager()
+    sample = _sample({"aa:aa:aa:aa:aa:01": (0, 0, 1)}, created_at="2026-03-01T00:00:00+00:00")
+    current = {
+        "aa:aa:aa:aa:aa:01": (_anchor(0, 0, 1), "trained"),
+        "aa:aa:aa:aa:aa:02": (_anchor(5, 0, 1), "older"),
+        "aa:aa:aa:aa:aa:03": (_anchor(9, 0, 1), "newer"),
+    }
+    first_seen = {
+        "aa:aa:aa:aa:aa:02": "2026-01-01T00:00:00+00:00",
+        "aa:aa:aa:aa:aa:03": "2026-07-01T00:00:00+00:00",
+    }
+
+    validity = manager.sample_feature_validity(sample, current, anchor_first_seen=first_seen)
+
+    assert validity["aa:aa:aa:aa:aa:02"] == manager.ANCHOR_FEATURE_UNTRAINED
+    assert validity["aa:aa:aa:aa:aa:03"] == manager.ANCHOR_FEATURE_ADDED_SINCE
+
+
+def test_absent_anchor_defaults_to_untrained_without_evidence():
+    """With neither manifest nor first-seen, do not claim the anchor is new."""
+    manager = _validity_manager()
+    sample = _sample({"aa:aa:aa:aa:aa:01": (0, 0, 1)})
+    current = {
+        "aa:aa:aa:aa:aa:01": (_anchor(0, 0, 1), "trained"),
+        "aa:aa:aa:aa:aa:02": (_anchor(5, 0, 1), "unknown provenance"),
+    }
+
+    validity = manager.sample_feature_validity(sample, current)
+
+    assert validity["aa:aa:aa:aa:aa:02"] == manager.ANCHOR_FEATURE_UNTRAINED
