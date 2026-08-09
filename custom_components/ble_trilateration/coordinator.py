@@ -6158,7 +6158,16 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator):
 
         if redact:
             _stamp_redact = monotonic_time_coarse()
-            out = cast("ServiceResponse", self.redact_data(out))
+            # The substitution map is built here because it walks self.devices, which the
+            # event loop mutates; iterating it from a worker thread can raise. The
+            # recursive walk that follows only reads the snapshot in `out` and the
+            # finished map, and on a large estate it has taken over a minute, so it runs
+            # in an executor rather than blocking every other integration for that long.
+            self.redaction_list_update()
+            out = cast(
+                "ServiceResponse",
+                await self.hass.async_add_executor_job(self.redact_data, out, False),
+            )
             _stamp_redact_elapsed = monotonic_time_coarse() - _stamp_redact
             if _stamp_redact_elapsed > 3:  # It should be fast now.
                 _LOGGER.warning("Dump devices redaction took %2f seconds", _stamp_redact_elapsed)
